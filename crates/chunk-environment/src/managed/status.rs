@@ -37,6 +37,8 @@ pub(super) struct Observed {
     /// Where edges reach this core's gateway, as `ip:port`.
     pub gateway_addresses: Vec<String>,
     pub online_players: u32,
+    /// Logins control has admitted since this core started, which only ever grows.
+    pub logins: u64,
     pub ready_to_suspend: bool,
     /// The status the gateway last answered for each hostname, which edges answer pings with while core sleeps.
     pub pings: Vec<v1::PingStatus>,
@@ -44,11 +46,7 @@ pub(super) struct Observed {
 
 impl Observed {
     fn said(&self) -> Said {
-        Said {
-            gateway_addresses: self.gateway_addresses.clone(),
-            ready_to_suspend: self.ready_to_suspend,
-            players_online: self.online_players > 0,
-        }
+        Said { gateway_addresses: self.gateway_addresses.clone(), ready_to_suspend: self.ready_to_suspend }
     }
 }
 
@@ -57,9 +55,6 @@ impl Observed {
 struct Said {
     gateway_addresses: Vec<String>,
     ready_to_suspend: bool,
-    /// Whether any player is online, which management takes as proof that a login wake led to a login, so a player
-    /// who leaves before the next heartbeat is still reported.
-    players_online: bool,
 }
 
 /// Sends reports under increasing sequences, never waiting for one to finish before sending the next. Management
@@ -192,6 +187,7 @@ impl Reporter {
                 observe_time: Some(SystemTime::now().into()),
                 gateway_addresses: observed.gateway_addresses,
                 online_players: observed.online_players,
+                logins: observed.logins,
                 pings: observed.pings,
                 deployment: deployment.or_else(|| sent.progress.as_ref().map(|(_, progress)| progress.clone())),
                 ready_to_suspend: observed.ready_to_suspend,
@@ -215,8 +211,8 @@ impl Reporter {
         lock(&self.sent).addresses.clone()
     }
 
-    /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses, readiness
-    /// to suspend or whether any player is online change. A change doesn't wait for a report in flight: it cancels that one and is sent under the next
+    /// Reports what `observe` finds every [`INTERVAL`], and within [`OBSERVE`] once its gateway addresses or readiness
+    /// to suspend change. A change doesn't wait for a report in flight: it cancels that one and is sent under the next
     /// sequence. After a failed report, whose outcome is unknown, it reports again after a backoff of one to four
     /// seconds until one is accepted. `observe` finds nothing while core must not report. Observations run beside the
     /// report in flight, so a slow one never holds up that report's timeout. Returns once management fences a lease

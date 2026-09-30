@@ -137,38 +137,6 @@ async fn reports_repeat_under_one_lease_a_changed_address_reports_at_once_and_a_
 }
 
 #[tokio::test(start_paused = true)]
-async fn the_first_player_online_and_the_last_one_leaving_are_reported_at_once() {
-    let mut harness = Harness::new().await;
-    let _time = hold_time();
-    let reporter = Reporter::new(harness.management_config().client(), CancellationToken::new());
-    let observed = Mutex::new(Observed { lease: 0, revision: 1, ..Observed::default() });
-    let (observing, mut observations) = mpsc::unbounded_channel();
-    let observe = || {
-        observing.send(()).unwrap();
-        std::future::ready(Some(observed.lock().unwrap().clone()))
-    };
-    let reporting = reporter.keep_reporting(observe, |_| false);
-    let checks = async {
-        let applied = &mut harness.reported;
-        observations.recv().await.unwrap();
-        assert_eq!(applied.recv().await.unwrap().online_players, 0);
-        let mut online = async |players| {
-            observed.lock().unwrap().online_players = players;
-            let reports = applied_after(2, &mut observations, applied).await;
-            reports.into_iter().map(|report| report.online_players).collect::<Vec<_>>()
-        };
-        assert_eq!(online(1).await, [1]);
-        // Only the heartbeat reports how many.
-        assert!(online(2).await.is_empty());
-        assert_eq!(online(0).await, [0]);
-    };
-    tokio::select! {
-        error = reporting => panic!("{error}"),
-        () = checks => {}
-    }
-}
-
-#[tokio::test(start_paused = true)]
 async fn a_change_management_did_not_accept_is_sent_again_with_backoff_until_it_is() {
     let mut harness = Harness::new().await;
     let _time = hold_time();
@@ -185,13 +153,15 @@ async fn a_change_management_did_not_accept_is_sent_again_with_backoff_until_it_
         observations.recv().await.unwrap();
         assert!(applied.recv().await.unwrap().ready_to_suspend);
 
-        // Readiness is revoked and the address changes, but management refuses the next three reports.
+        // Readiness is revoked, the address changes and a player logs in, but management refuses the next three
+        // reports.
         *harness.management.unavailable_reports.lock().unwrap() = 3;
         let address = vec!["10.0.0.2:25565".to_owned()];
         {
             let mut observed = observed.lock().unwrap();
             observed.ready_to_suspend = false;
             observed.gateway_addresses.clone_from(&address);
+            observed.logins = 1;
         }
         let mut ticks = 0;
         let report = loop {
@@ -202,7 +172,10 @@ async fn a_change_management_did_not_accept_is_sent_again_with_backoff_until_it_
             assert!(ticks < 10, "the change was not sent again");
         };
         // Sent at once, then again after one, two and four seconds, each under a new sequence.
-        assert_eq!((report.sequence, report.ready_to_suspend, report.gateway_addresses), (5, false, address));
+        assert_eq!(
+            (report.sequence, report.ready_to_suspend, report.gateway_addresses, report.logins),
+            (5, false, address, 1)
+        );
         assert_eq!(*harness.management.unavailable_reports.lock().unwrap(), 0);
     };
     tokio::select! {

@@ -29,6 +29,13 @@ impl Control {
         Ok(online.filter(|operation| state.claims.contains_key(*operation)).count())
     }
 
+    /// How many logins control has reserved a claim for since it opened, each from a player a gateway authenticated.
+    /// Retries and moves don't count, and players leaving don't lower it.
+    #[must_use]
+    pub fn logins(&self) -> u64 {
+        self.logins.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Queues a move of `arguments`' player under the operator's `operation`, which becomes the destination claim's
     /// operation ID. A retry queues nothing more.
     /// # Errors

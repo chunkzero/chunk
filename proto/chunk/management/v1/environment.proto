@@ -175,6 +175,11 @@ message ReportStatusRequest {
   uint64 sequence = 8;
   // The AttachResponse revision this status reflects.
   uint64 desired_revision = 9;
+  // Logins this core instance has admitted since it started, each from a
+  // player a gateway authenticated. It never decreases within an instance,
+  // so a report carries every login since the last one, even players who have
+  // already left. The management plane refunds pending login wakes from it.
+  uint64 logins = 10;
 }
 
 message PingStatus {

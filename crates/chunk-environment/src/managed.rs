@@ -516,9 +516,15 @@ impl<'a> Managed<'a> {
         }
         tracing::debug!("core's status took too long to observe; it isn't ready to suspend");
         self.idle.restart(revision);
-        let gateway_addresses = self.reporter.accepted_addresses();
-        let pings = self.pings();
-        status::Observed { lease, revision, gateway_addresses, online_players: 0, ready_to_suspend: false, pings }
+        status::Observed {
+            lease,
+            revision,
+            gateway_addresses: self.reporter.accepted_addresses(),
+            online_players: 0,
+            logins: self.logins(),
+            ready_to_suspend: false,
+            pings: self.pings(),
+        }
     }
 
     async fn observe_now(&self, lease: u64, revision: u64) -> status::Observed {
@@ -536,7 +542,19 @@ impl<'a> Managed<'a> {
                     0
                 }
             };
-        status::Observed { lease, revision, gateway_addresses, online_players, ready_to_suspend, pings: self.pings() }
+        status::Observed {
+            lease,
+            revision,
+            gateway_addresses,
+            online_players,
+            logins: self.logins(),
+            ready_to_suspend,
+            pings: self.pings(),
+        }
+    }
+
+    fn logins(&self) -> u64 {
+        self.core.control().map_or(0, |control| control.logins())
     }
 
     /// The status the gateway last answered for each hostname.

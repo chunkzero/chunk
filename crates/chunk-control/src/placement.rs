@@ -27,12 +27,15 @@ impl Control {
         }
         self.admit()?;
         let unavailable = self.unavailable()?;
-        self.update(|state| {
+        let inserted = self.update(|state| {
             if self.draining.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(Error::Invalid("control draining"));
             }
             reserve(state, &request, &unavailable)
         })?;
+        if inserted && request.source.is_none() {
+            self.logins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         self.wake_capacity();
         let _guard = operation.lock().await;
         let state = self.state()?;
@@ -170,15 +173,21 @@ fn validate(request: &ClaimRequest) -> Result<()> {
     Ok(())
 }
 
-fn reserve(state: &mut State, request: &ClaimRequest, unavailable: &std::collections::BTreeSet<String>) -> Result<()> {
+/// Reserves `request`'s claim unless it already has one, and returns whether it did.
+fn reserve(
+    state: &mut State,
+    request: &ClaimRequest,
+    unavailable: &std::collections::BTreeSet<String>,
+) -> Result<bool> {
     if reserved(state, request)? {
-        return Ok(());
+        return Ok(false);
     }
     let owner = owner(state, request)?;
     let (name, release) = state.placing(request)?;
     let demand = request.demand.as_ref().ok_or(Error::Invalid("demand"))?;
     let session = select_session(state, &name, &release, demand, unavailable)?;
-    insert_claim(state, request, owner, session, None)
+    insert_claim(state, request, owner, session, None)?;
+    Ok(true)
 }
 
 /// Whether `request` already has its claim. Rejects changed claims and canceled or changed moves.
