@@ -1,5 +1,5 @@
 //! Serving the deployments the management service asks for, through `EnvironmentService.Attach` and `ReportStatus`,
-//! and handing the backend's next due job to `SetWakeAlarm`.
+//! handing the backend's next due job to `SetWakeAlarm`, and reporting logs, metrics and usage.
 
 mod activation;
 mod alarm;
@@ -7,9 +7,12 @@ mod failed_auth;
 mod idle;
 mod launcher;
 mod log_store;
+mod metrics;
 mod release;
 mod retire;
 mod status;
+mod telemetry;
+mod usage;
 
 use crate::{Core, CoreConfig, Gateway, GatewayConfig};
 use activation::Activation;
@@ -26,9 +29,10 @@ use std::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
-use tokio::sync::watch;
+use telemetry::Telemetry;
+use tokio::{sync::watch, time::MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 
 const REATTACH: Duration = Duration::from_secs(5);
@@ -87,6 +91,8 @@ pub(crate) struct Managed<'a> {
     log_store: Arc<LogStore>,
     /// Renews `log_store`'s credentials from an attach that takes no lease until the core attach first answers.
     renewal: Mutex<Option<Renewal>>,
+    /// Ships core's log lines and usage, and outlives this attachment for a last shipment.
+    telemetry: Arc<Telemetry>,
     /// Cancelled once core shuts down. From then on no deployment activates, no gateway starts and no status is
     /// reported periodically, while attaches still publish their leases.
     stopping: CancellationToken,
@@ -166,6 +172,8 @@ impl<'a> Managed<'a> {
         gateway_config: Option<GatewayConfig>,
     ) -> Self {
         let (client, stopping) = (management.client(), CancellationToken::new());
+        let telemetry =
+            Telemetry::new(client.clone(), registration.instance_id.clone(), &crate::logs::LINES, registration.started);
         Self {
             reporter: status::Reporter::new(client.clone(), stopping.clone()),
             alarm: alarm::Alarm::new(client.clone()),
@@ -177,6 +185,7 @@ impl<'a> Managed<'a> {
             instance_id: registration.instance_id,
             log_store: registration.log_store,
             renewal: Mutex::new(registration.renewal),
+            telemetry: Arc::new(telemetry),
             environment: registration.environment,
             releases: release::Store::new(state, core.archives().clone()),
             activation: state.join("managed.json"),
@@ -203,6 +212,11 @@ impl<'a> Managed<'a> {
         }
     }
 
+    /// What ships core's last log lines and usage once this attachment ends.
+    pub(crate) fn telemetry(&self) -> Arc<Telemetry> {
+        self.telemetry.clone()
+    }
+
     /// Stops the renewal from the attach that took no lease, so only the core attach renews from here on.
     async fn take_over_renewal(&self) {
         let renewal = self.renewal.lock().unwrap_or_else(PoisonError::into_inner).take();
@@ -212,7 +226,8 @@ impl<'a> Managed<'a> {
     }
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
-    /// Meanwhile, it retires the deployments it no longer serves, reports its status and hands off its wake alarm.
+    /// Meanwhile, it retires the deployments it no longer serves, reports its status, metrics, logs and usage, and hands
+    /// off its wake alarm.
     pub(crate) async fn run(&self) -> io::Error {
         if let Err(error) = self.recover() {
             return error;
@@ -234,7 +249,20 @@ impl<'a> Managed<'a> {
             never = self.reclaim() => match never {},
             never = self.hand_off_alarms() => match never {},
             never = self.report_failed_auth() => match never {},
+            never = self.report_metrics() => match never {},
+            never = self.count_usage() => match never {},
+            never = self.telemetry.keep_shipping() => match never {},
             error = self.reporter.keep_reporting(|| self.current(), |lease| self.superseded(lease)) => self.fenced(error),
+        }
+    }
+
+    /// Counts awake time and the players online every [`usage::TICK`].
+    async fn count_usage(&self) -> std::convert::Infallible {
+        let mut tick = tokio::time::interval(usage::TICK);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        loop {
+            tick.tick().await;
+            self.telemetry.tick(self.online_players().unwrap_or(0));
         }
     }
 
@@ -470,6 +498,7 @@ impl<'a> Managed<'a> {
             }
         }
         lock(&self.deployments).serving = Some(deployment.into());
+        self.telemetry.lines().serving(deployment);
         Ok(())
     }
 
@@ -534,14 +563,10 @@ impl<'a> Managed<'a> {
         };
         let (address, ready_to_suspend) = tokio::join!(address, self.ready_to_suspend(revision));
         let gateway_addresses = address.as_ref().map(SocketAddr::to_string).into_iter().collect();
-        let online_players =
-            match self.core.control().and_then(|control| control.online_players().map_err(io::Error::other)) {
-                Ok(online) => u32::try_from(online).unwrap_or(u32::MAX),
-                Err(error) => {
-                    tracing::warn!(%error, "online players unknown");
-                    0
-                }
-            };
+        let online_players = self.online_players().unwrap_or_else(|error| {
+            tracing::warn!(%error, "online players unknown");
+            0
+        });
         status::Observed {
             lease,
             revision,
@@ -551,6 +576,11 @@ impl<'a> Managed<'a> {
             ready_to_suspend,
             pings: self.pings(),
         }
+    }
+
+    fn online_players(&self) -> io::Result<u32> {
+        let online = self.core.control()?.online_players().map_err(io::Error::other)?;
+        Ok(u32::try_from(online).unwrap_or(u32::MAX))
     }
 
     fn logins(&self) -> u64 {
@@ -565,11 +595,11 @@ impl<'a> Managed<'a> {
     }
 
     /// Whether management may suspend core under desired `revision`, as the proto's contract has it: no players remain,
-    /// the log is flushed and the wake alarm is handed off, with no job due within the grace period, and nothing was
-    /// active for the grace period. Active means backend work running, starting or finishing (actions, hooks, commands
-    /// and jobs), a gateway that reports connections or that core can't hear from, an open claim or a launching host in
-    /// control, a claimed job, or a deployment loading or not yet accepted. What can't be read within [`READ_WAIT`]
-    /// counts as active.
+    /// the log is flushed, the wake alarm is handed off and logs and usage are shipped, with no job due within the grace
+    /// period, and nothing was active for the grace period. Active means backend work running, starting or finishing
+    /// (actions, hooks, commands and jobs), a gateway that reports connections or that core can't hear from, an open
+    /// claim or a launching host in control, a claimed job, or a deployment loading or not yet accepted. What can't be
+    /// read within [`READ_WAIT`] counts as active.
     ///
     /// Queries, mutations and operator calls aren't counted: suspending stops or pauses the environment gracefully,
     /// every commit is durable before it's acknowledged, and a call a suspend cuts off fails as it would in a crash and
@@ -601,7 +631,7 @@ impl<'a> Managed<'a> {
         let observed = idle::Observation {
             active,
             changes: work.map_or(0, |work| work.changes),
-            settled: handed && self.core.flushed(),
+            settled: handed && self.core.flushed() && self.telemetry.settled(),
             due_at: handoff.and_then(|handoff| handoff.due_at),
         };
         self.idle.ready(revision, &observed)
@@ -616,6 +646,8 @@ pub(crate) struct Registration {
     log_store: Arc<LogStore>,
     /// Renews `log_store`'s credentials from the attach that took no lease, until the core attach takes over.
     renewal: Option<Renewal>,
+    /// When this run started, which counts as awake from then on.
+    started: SystemTime,
 }
 
 impl Registration {
@@ -630,7 +662,7 @@ impl Registration {
         core: &mut CoreConfig,
         stop: &CancellationToken,
     ) -> io::Result<Option<Self>> {
-        let environment = core.environment.clone();
+        let (environment, started) = (core.environment.clone(), SystemTime::now());
         let instance_id = uuid::Uuid::new_v4().to_string();
         let client = management.client();
         let request = log_store::request(&instance_id);
@@ -668,7 +700,7 @@ impl Registration {
             log_store: log_store.clone(),
         };
         let renewal = renewer.start(Some(stream));
-        Ok(Some(Self { instance_id, environment, log_store, renewal }))
+        Ok(Some(Self { instance_id, environment, log_store, renewal, started }))
     }
 
     /// A run that replicates nothing management grants.
@@ -680,6 +712,7 @@ impl Registration {
             environment: environment.into(),
             log_store: Arc::new(log_store),
             renewal: None,
+            started: SystemTime::now(),
         }
     }
 }

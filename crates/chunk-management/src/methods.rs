@@ -73,6 +73,12 @@ unary! {
     /// Reports client addresses that failed Minecraft authentication at a gateway.
     report_failed_auth:
         "EnvironmentService" / "ReportFailedAuth" (ReportFailedAuthRequest) -> ReportFailedAuthResponse;
+    /// Records awake time spans; management drops records whose ID it already holds.
+    report_usage: "EnvironmentService" / "ReportUsage" (ReportUsageRequest) -> ReportUsageResponse;
+    /// Ships log lines; management drops entries whose instance and sequence it already holds.
+    report_logs: "EnvironmentService" / "ReportLogs" (ReportLogsRequest) -> ReportLogsResponse;
+    /// Ships metric samples, best effort.
+    report_metrics: "EnvironmentService" / "ReportMetrics" (ReportMetricsRequest) -> ReportMetricsResponse;
 
     /// Asks for a sleeping environment to wake for a login or ping.
     wake: "EdgeService" / "Wake" (WakeRequest) -> WakeResponse;

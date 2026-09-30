@@ -734,6 +734,7 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
  "zip",

@@ -2,6 +2,7 @@
 
 mod core;
 mod gateway;
+mod logs;
 mod managed;
 mod services;
 
@@ -11,6 +12,7 @@ pub use self::core::{
     Core, CoreConfig, LaunchSpec, Launcher, READINESS, RELEASE_TIMEOUT, ReleaseArchive, RunnerConfig,
 };
 pub use gateway::{Gateway, GatewayConfig, PlatformTarget, RemoteCore};
+pub use logs::logging;
 pub use managed::ManagementConfig;
 pub use services::{Service, Services};
 
@@ -27,6 +29,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const STARTUP: Duration = Duration::from_secs(30);
+/// How long a stopped managed core spends shipping its last log lines and usage.
+const FINAL_SHIPMENT: Duration = Duration::from_secs(5);
 
 pub enum Config {
     /// Core, with the in-process gateway when `gateway` is set.
@@ -131,6 +135,7 @@ async fn run_core(
     let state = config.state.clone();
     let management = match management {
         Some(management) => {
+            logs::LINES.capture();
             let Some(registration) = managed::Registration::attach(&management, &mut config, &stop).await? else {
                 return Err(io::Error::other("stopped before management answered; the log was never opened"));
             };
@@ -168,6 +173,7 @@ async fn run_core(
     };
     let stopping = managed.as_ref().map(managed::Managed::stopping).unwrap_or_default();
     let renewer = managed.as_ref().map(managed::Managed::renewer);
+    let telemetry = managed.as_ref().map(managed::Managed::telemetry);
     tracing::info!("environment ready");
     let failed = async {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -223,6 +229,9 @@ async fn run_core(
     // The core attach ended with `managed`, so an attach that takes no lease renews the log store's credentials through
     // the final flush.
     let result = managed::renewing(renewer, stop_services(gateway.into_inner(), core)).await;
+    if let Some(telemetry) = telemetry {
+        telemetry.finish(FINAL_SHIPMENT).await;
+    }
     failure.and(result)
 }
 

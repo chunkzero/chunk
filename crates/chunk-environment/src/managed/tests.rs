@@ -58,6 +58,7 @@ struct Management {
     epochs: Mutex<Vec<u64>>,
     /// The object storage each desired state grants.
     log_store: Mutex<Option<ObjectStore>>,
+    telemetry: Mutex<telemetry::Reports>,
 }
 
 /// Management's record of the environment's deployments, oldest first, kept by the rules of `packages/management`.
@@ -229,6 +230,9 @@ async fn handle(
         }
         _ if path.ends_with("Capacity") => launcher::serve(&management, &path, &body).await,
         "/chunk.management.v1.EnvironmentService/SetWakeAlarm" => suspend::serve(&management, &body).await,
+        _ if path.starts_with("/chunk.management.v1.EnvironmentService/Report") => {
+            telemetry::serve(&management, &path, &body)
+        }
         _ if path.contains("unavailable") => response.status(503).body(Full::default().boxed()).unwrap(),
         _ if path.contains("stalled") => {
             let archive = management.archives.lock().unwrap().get(&path).cloned().unwrap();
@@ -372,6 +376,7 @@ impl Harness {
             alarm: Mutex::default(),
             epochs: Mutex::default(),
             log_store: Mutex::default(),
+            telemetry: Mutex::default(),
         });
         let url = serve(management.clone()).await;
         let release = (release_id, fs::read(&archive).unwrap());
@@ -749,3 +754,4 @@ mod replication;
 mod runner_image;
 mod status;
 mod suspend;
+mod telemetry;
