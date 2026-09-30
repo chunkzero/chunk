@@ -15,14 +15,15 @@ use crate::{Core, CoreConfig, Gateway, GatewayConfig};
 use activation::Activation;
 use chunk_management::{Client, Code, v1};
 pub(crate) use launcher::{Lease, ManagementLauncher};
-use log_store::LogStore;
+pub(crate) use log_store::renewing;
+use log_store::{LogStore, Renewal, Renewer};
 use std::{
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        Mutex, MutexGuard, OnceLock, PoisonError,
+        Arc, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -82,7 +83,10 @@ pub(crate) struct Managed<'a> {
     idle: idle::Idle,
     /// Where edges reach the gateway.
     private_address: status::PrivateAddress,
-    log_store: LogStore,
+    /// Renewed from each desired state of the core attach.
+    log_store: Arc<LogStore>,
+    /// Renews `log_store`'s credentials from an attach that takes no lease until the core attach first answers.
+    renewal: Mutex<Option<Renewal>>,
     /// Cancelled once core shuts down. From then on no deployment activates, no gateway starts and no status is
     /// reported periodically, while attaches still publish their leases.
     stopping: CancellationToken,
@@ -172,6 +176,7 @@ impl<'a> Managed<'a> {
             attaching: AtomicBool::new(false),
             instance_id: registration.instance_id,
             log_store: registration.log_store,
+            renewal: Mutex::new(registration.renewal),
             environment: registration.environment,
             releases: release::Store::new(state, core.archives().clone()),
             activation: state.join("managed.json"),
@@ -186,6 +191,24 @@ impl<'a> Managed<'a> {
     /// The token that tells this attachment core is shutting down.
     pub(crate) fn stopping(&self) -> CancellationToken {
         self.stopping.clone()
+    }
+
+    /// What renews the log store's credentials once this attachment ends.
+    pub(crate) fn renewer(&self) -> Renewer {
+        Renewer {
+            client: self.client.clone(),
+            instance_id: self.instance_id.clone(),
+            environment: self.environment.clone(),
+            log_store: self.log_store.clone(),
+        }
+    }
+
+    /// Stops the renewal from the attach that took no lease, so only the core attach renews from here on.
+    async fn take_over_renewal(&self) {
+        let renewal = self.renewal.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(renewal) = renewal {
+            renewal.stop().await;
+        }
     }
 
     /// Attaches until management fences this core or it cannot serve, attaching again after other interruptions.
@@ -295,6 +318,7 @@ impl<'a> Managed<'a> {
                 message = deadline(ATTACH_IDLE, stream.message()) => {
                     let Some(desired) = message? else { return Ok(()) };
                     check(&desired, &self.environment)?;
+                    self.take_over_renewal().await;
                     self.log_store.renew(desired.log_store.as_ref());
                     self.lease.send_replace(Lease::Held(desired.lease));
                     self.attaching.store(false, Ordering::SeqCst);
@@ -545,14 +569,16 @@ pub(crate) struct Registration {
     /// Unique to this run of the process.
     instance_id: String,
     environment: String,
-    log_store: LogStore,
+    log_store: Arc<LogStore>,
+    /// Renews `log_store`'s credentials from the attach that took no lease, until the core attach takes over.
+    renewal: Option<Renewal>,
 }
 
 impl Registration {
     /// Reads the first desired state from an attach that claims no lease, since core must know where its log replicates
     /// before it opens the log, and only then knows the epoch a core attach carries. Attaches again until management
     /// answers, or returns `None` once `stop` is cancelled. Object storage management grants replaces `core`'s
-    /// replication.
+    /// replication, and that attach keeps renewing its credentials while core restores and starts.
     /// # Errors
     /// Reports a desired state for another environment or an invalid log store.
     pub(crate) async fn attach(
@@ -563,24 +589,19 @@ impl Registration {
         let environment = core.environment.clone();
         let instance_id = uuid::Uuid::new_v4().to_string();
         let client = management.client();
-        let request = v1::AttachRequest {
-            instance_id: instance_id.clone(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            core: false,
-            epoch: 0,
-        };
+        let request = log_store::request(&instance_id);
         let attach = || async {
             let mut stream = deadline(REQUEST_TIMEOUT, client.attach(&request)).await?;
             match deadline(REQUEST_TIMEOUT, stream.message()).await? {
-                Some(desired) => check(&desired, &environment).map(|()| desired),
+                Some(desired) => check(&desired, &environment).map(|()| (stream, desired)),
                 None => Err(Interrupted::Retry(io::Error::other("management ended the attach"))),
             }
         };
-        let desired = loop {
+        let (stream, desired) = loop {
             let error = tokio::select! {
                 () = stop.cancelled() => return Ok(None),
                 attached = attach() => match attached {
-                    Ok(desired) => break desired,
+                    Ok(attached) => break attached,
                     Err(Interrupted::Fatal(error)) => return Err(error),
                     Err(Interrupted::Retry(error) | Interrupted::Fenced(error)) => error,
                 },
@@ -595,14 +616,27 @@ impl Registration {
         if replication.is_some() {
             core.replication = replication;
         }
-        Ok(Some(Self { instance_id, environment, log_store }))
+        let log_store = Arc::new(log_store);
+        let renewer = Renewer {
+            client,
+            instance_id: instance_id.clone(),
+            environment: environment.clone(),
+            log_store: log_store.clone(),
+        };
+        let renewal = renewer.start(Some(stream));
+        Ok(Some(Self { instance_id, environment, log_store, renewal }))
     }
 
     /// A run that replicates nothing management grants.
     #[cfg(test)]
     pub(crate) fn local(environment: &str) -> Self {
         let (log_store, _) = LogStore::open(None).expect("no grant");
-        Self { instance_id: uuid::Uuid::new_v4().to_string(), environment: environment.into(), log_store }
+        Self {
+            instance_id: uuid::Uuid::new_v4().to_string(),
+            environment: environment.into(),
+            log_store: Arc::new(log_store),
+            renewal: None,
+        }
     }
 }
 

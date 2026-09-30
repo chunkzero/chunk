@@ -68,7 +68,7 @@ struct Records {
 }
 
 impl Management {
-    /// The lease a core attach takes, which a later one fences. Other attaches take none, so one fences them at once.
+    /// The lease a core attach takes, which a later one fences. Other attaches take none and are never fenced.
     fn claim(&self, attach: &AttachRequest) -> u64 {
         if !attach.core {
             return 0;
@@ -161,7 +161,7 @@ async fn handle(
         "/chunk.management.v1.EnvironmentService/Attach" => {
             let attach = AttachRequest::decode(&body[5..]).unwrap();
             assert!(!attach.instance_id.is_empty() && !attach.version.is_empty());
-            let lease = management.claim(&attach);
+            let (core, lease) = (attach.core, management.claim(&attach));
             let (mut desired, mut leases) = (management.desired.subscribe(), management.lease.subscribe());
             let mut held = management.attach_held.subscribe();
             tokio::spawn(async move {
@@ -173,7 +173,7 @@ async fn handle(
                     }
                     tokio::select! {
                         changed = desired.changed() => if changed.is_err() { return },
-                        _ = async { leases.wait_for(|latest| *latest > lease).await.map(|_| ()) } => {
+                        _ = async { leases.wait_for(|latest| core && *latest > lease).await.map(|_| ()) } => {
                             _ = held.wait_for(|held| !*held).await;
                             let end = format!(r#"{{"error":{FENCED}}}"#);
                             _ = sender.send(Ok(Frame::data(envelope(2, end.as_bytes())))).await;

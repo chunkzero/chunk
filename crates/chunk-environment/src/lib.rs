@@ -167,6 +167,7 @@ async fn run_core(
         None
     };
     let stopping = managed.as_ref().map(managed::Managed::stopping).unwrap_or_default();
+    let renewer = managed.as_ref().map(managed::Managed::renewer);
     tracing::info!("environment ready");
     let failed = async {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -219,14 +220,19 @@ async fn run_core(
         }
     }
     drop(managed);
-    let mut result = match gateway.into_inner() {
+    // The core attach ended with `managed`, so an attach that takes no lease renews the log store's credentials through
+    // the final flush.
+    let result = managed::renewing(renewer, stop_services(gateway.into_inner(), core)).await;
+    failure.and(result)
+}
+
+/// Stops the gateway, then core.
+async fn stop_services(gateway: Option<Gateway>, core: Core) -> io::Result<()> {
+    let result = match gateway {
         Some(gateway) => gateway.stop().await.inspect_err(|error| tracing::error!(%error, "gateway shutdown failed")),
         None => Ok(()),
     };
-    if let Err(error) = core.stop(|| {}).await {
-        result = Err(error);
-    }
-    failure.and(result)
+    core.stop(|| {}).await.and(result)
 }
 
 /// A service task and the token that stops it.

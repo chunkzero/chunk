@@ -1,11 +1,17 @@
 //! Replicating core's log to the object storage management grants in each attach.
 
-use chunk_management::v1;
+use super::{ATTACH_IDLE, Interrupted, REATTACH, REQUEST_TIMEOUT, check, deadline};
+use chunk_management::{Client, Stream, v1};
 use chunk_store::{Replication, S3Bucket, S3Credentials};
 use std::{
     io,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 /// Where core's log replicates as management granted it when core started, with the credentials later attaches renew.
 pub(crate) struct LogStore {
@@ -45,6 +51,106 @@ impl LogStore {
         if !self.moved.swap(!same, Ordering::Relaxed) && !same {
             tracing::warn!("management moved the log's object storage; core keeps its own until it starts again");
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn credentials(&self) -> Option<&S3Credentials> {
+        self.opened.as_ref().map(|(_, credentials)| credentials)
+    }
+}
+
+/// What renews a log store's credentials while no core attach does: before core opens its log and attaches as core,
+/// and from when that attach ends until the final flush. These attaches take no lease.
+#[derive(Clone)]
+pub(crate) struct Renewer {
+    pub(super) client: Client,
+    pub(super) instance_id: String,
+    pub(super) environment: String,
+    pub(super) log_store: Arc<LogStore>,
+}
+
+impl Renewer {
+    /// Renews from `attached`, an attach that takes no lease, then from new ones, until the renewal stops. `None` when
+    /// management granted no log store.
+    pub(crate) fn start(self, attached: Option<Stream<v1::AttachResponse>>) -> Option<Renewal> {
+        self.log_store.opened.as_ref()?;
+        let stop = CancellationToken::new();
+        let task = tokio::spawn(self.keep_renewing(attached, stop.clone()));
+        Some(Renewal { stop, task })
+    }
+
+    async fn keep_renewing(self, mut attached: Option<Stream<v1::AttachResponse>>, stop: CancellationToken) {
+        loop {
+            let error = tokio::select! {
+                () = stop.cancelled() => return,
+                renewed = self.renew_from(attached.take()) => match renewed {
+                    Ok(()) => io::Error::other("management ended the attach"),
+                    Err(Interrupted::Fatal(error)) => {
+                        tracing::error!(%error, "log store credentials no longer renew");
+                        return;
+                    }
+                    Err(Interrupted::Retry(error) | Interrupted::Fenced(error)) => error,
+                },
+            };
+            tracing::warn!(%error, "management attach interrupted; log store credentials renew once it answers again");
+            tokio::select! {
+                () = stop.cancelled() => return,
+                () = tokio::time::sleep(REATTACH) => {}
+            }
+        }
+    }
+
+    /// Renews from each desired state of `attached`, or else of a new attach, until the stream ends.
+    async fn renew_from(&self, attached: Option<Stream<v1::AttachResponse>>) -> Result<(), Interrupted> {
+        let mut stream = match attached {
+            Some(stream) => stream,
+            None => deadline(REQUEST_TIMEOUT, self.client.attach(&request(&self.instance_id))).await?,
+        };
+        while let Some(desired) = deadline(ATTACH_IDLE, stream.message()).await? {
+            check(&desired, &self.environment)?;
+            self.log_store.renew(desired.log_store.as_ref());
+        }
+        Ok(())
+    }
+}
+
+/// An attach that takes no lease, for this run of core.
+pub(super) fn request(instance_id: &str) -> v1::AttachRequest {
+    v1::AttachRequest {
+        instance_id: instance_id.into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        core: false,
+        epoch: 0,
+    }
+}
+
+/// Runs `work` while `renewer`, if any, renews, and returns once that renewal stopped.
+pub(crate) async fn renewing<T>(renewer: Option<Renewer>, work: impl Future<Output = T>) -> T {
+    let renewal = renewer.and_then(|renewer| renewer.start(None));
+    let output = work.await;
+    if let Some(renewal) = renewal {
+        renewal.stop().await;
+    }
+    output
+}
+
+/// A running [`Renewer`]. Dropping it stops renewal soon; [`Self::stop`] waits until it has.
+pub(crate) struct Renewal {
+    stop: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+impl Renewal {
+    /// Returns once no more renewals come from here.
+    pub(crate) async fn stop(mut self) {
+        self.stop.cancel();
+        _ = (&mut self.task).await;
+    }
+}
+
+impl Drop for Renewal {
+    fn drop(&mut self) {
+        self.stop.cancel();
     }
 }
 

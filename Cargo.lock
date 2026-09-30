@@ -650,6 +650,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "object_store",
  "prost",
  "rustix 1.1.4",
  "serde",

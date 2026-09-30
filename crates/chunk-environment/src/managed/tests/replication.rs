@@ -1,4 +1,10 @@
 use super::*;
+use crate::{
+    Core,
+    managed::{Lease, Managed, Registration, log_store::LogStore},
+};
+use object_store::CredentialProvider;
+use std::sync::OnceLock;
 
 impl Management {
     /// Grants `store` from the next desired state on.
@@ -71,4 +77,66 @@ async fn core_replicates_where_management_grants_and_a_fresh_core_restores_from_
     assert_eq!(*harness.management.epochs.lock().unwrap(), [1, 1, 2]);
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(60), running).await.unwrap().unwrap().unwrap();
+}
+
+/// Waits until `log_store` signs with `token`.
+async fn renewed(log_store: &LogStore, token: &str) {
+    let credentials = log_store.credentials().unwrap();
+    let renewal = async {
+        while credentials.get_credential().await.unwrap().token.as_deref() != Some(token) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), renewal).await.expect("credentials renewed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn temporary_log_store_credentials_renew_before_the_core_attach_and_after_it_ends() {
+    let harness = Harness::new().await;
+    let temporary = |token: &str| ObjectStore {
+        endpoint: "http://127.0.0.1:9".into(),
+        bucket: "logs".into(),
+        prefix: "env_test/".into(),
+        access_key_id: "key".into(),
+        secret_access_key: "secret".into(),
+        session_token: token.into(),
+        ..ObjectStore::default()
+    };
+    harness.management.grant(temporary("opening"));
+    let mut config = harness.core();
+    let stop = CancellationToken::new();
+    let registration =
+        Registration::attach(&harness.management_config(), &mut config, &stop).await.unwrap().expect("attached");
+    assert!(config.replication.is_some());
+    let log_store = registration.log_store.clone();
+    renewed(&log_store, "opening").await;
+
+    // While core restores its log and starts, the attach that took no lease renews.
+    harness.management.grant(temporary("restoring"));
+    renewed(&log_store, "restoring").await;
+
+    let core = Core::start(harness.core(), || {}).await.unwrap();
+    let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
+    let managed =
+        Managed::new(&harness.management_config(), lease, registration, &harness.state(), &core, &gateway, None);
+    let renewer = managed.renewer();
+    let serving = async {
+        while managed.renewal.lock().unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        harness.management.grant(temporary("serving"));
+        renewed(&log_store, "serving").await;
+    };
+    tokio::select! {
+        error = managed.run() => panic!("{error}"),
+        () = serving => {}
+    }
+    drop(managed);
+
+    // Once the core attach ended, until the final flush.
+    let renewal = renewer.start(None).expect("a log store was granted");
+    harness.management.grant(temporary("flushing"));
+    renewed(&log_store, "flushing").await;
+    renewal.stop().await;
+    core.stop(|| {}).await.unwrap();
 }
