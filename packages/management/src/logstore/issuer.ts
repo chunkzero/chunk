@@ -31,6 +31,8 @@ export interface LogStoreIssuer {
 
 /** Credentials are replaced once less than a third of their lifetime, and at most this long, is left. */
 const maxRefreshBeforeMs = 15 * 60 * 1000;
+/** How long an AssumeRole request, its response body included, may take before it fails and is no longer cached. */
+const stsTimeoutMs = 30_000;
 
 export function logStoreIssuer(store: LogStore, fetchImpl: typeof fetch = fetch): LogStoreIssuer {
   return store.sharedCredentials ? sharedIssuer(store) : stsIssuer(store, fetchImpl);
@@ -73,7 +75,7 @@ function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
       { method: "POST", url, headers: { "content-type": "application/x-www-form-urlencoded" }, body },
       { accessKeyId: store.accessKeyId, secretAccessKey: store.secretAccessKey, region: store.region, service: "sts" },
     );
-    const response = await fetchImpl(url, { method: "POST", headers, body });
+    const response = await fetchImpl(url, { method: "POST", headers, body, signal: AbortSignal.timeout(stsTimeoutMs) });
     const xml = await response.text();
     // Only the error's code: a response can echo the request.
     const code = /<Code>(\w+)<\/Code>/.exec(xml)?.[1];

@@ -20,6 +20,10 @@ export async function deletePrefix(grant: LogStoreGrant, signal: AbortSignal): P
     signal.throwIfAborted();
     const listed = await s3("listing", () => client.list({ prefix: grant.prefix }));
     const keys = (listed.contents ?? []).map(({ key }) => key);
+    // An empty or final page is trusted only when the listing accounts for every key it counted.
+    if (typeof listed.isTruncated !== "boolean" || listed.keyCount !== keys.length) {
+      throw new Error("log store listing was incomplete");
+    }
     if (keys.some((key) => !key.startsWith(grant.prefix))) throw new Error("log store listing returned foreign keys");
     if (keys.length === 0) {
       if (listed.isTruncated) throw new Error("log store listing was truncated without keys");
