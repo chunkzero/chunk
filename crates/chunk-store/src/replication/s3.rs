@@ -129,31 +129,65 @@ impl S3 {
         Ok(Self { store, runtime: Some(runtime) })
     }
 
-    /// Waits on a channel instead of `block_on`, so callers may be inside another runtime.
+    /// Waits on a channel instead of `block_on`, so callers may be inside another runtime. Errors name `operation` and
+    /// `key` and are [`sanitized`].
     fn run<T: Send + 'static>(
         &self,
-        operation: impl Future<Output = object_store::Result<T>> + Send + 'static,
+        operation: &str,
+        key: &str,
+        request: impl Future<Output = object_store::Result<T>> + Send + 'static,
     ) -> io::Result<T> {
         let runtime = self.runtime.as_ref().ok_or_else(|| io::Error::other("replication runtime stopped"))?;
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         runtime.spawn(async move {
-            let _ = sender.send(operation.await);
+            let _ = sender.send(request.await);
         });
-        receiver.recv().map_err(io::Error::other)?.map_err(io::Error::other)
+        receiver.recv().map_err(io::Error::other)?.map_err(|error| sanitized(operation, key, &error))
     }
+}
+
+/// Describes a failed request by its operation, key, HTTP status, S3 error code and, when no response came, local I/O
+/// error alone. S3 error bodies can echo the signed request, session token included, and `object_store`'s errors carry
+/// the whole body after "Server returned".
+fn sanitized(operation: &str, key: &str, error: &object_store::Error) -> io::Error {
+    let text = error.to_string();
+    let status = text
+        .split_once("status code: ")
+        .and_then(|(_, rest)| rest.get(..3))
+        .filter(|status| status.bytes().all(|byte| byte.is_ascii_digit()));
+    let code = text
+        .split_once("<Code>")
+        .and_then(|(_, rest)| rest.split_once("</Code>"))
+        .map(|(code, _)| code)
+        .filter(|code| (1..=64).contains(&code.len()) && code.bytes().all(|byte| byte.is_ascii_alphanumeric()));
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    let local = std::iter::from_fn(|| {
+        let current = source?;
+        source = current.source();
+        Some(current)
+    })
+    .find_map(|error| error.downcast_ref::<io::Error>());
+    let reason = match (status, code, local) {
+        (Some(status), Some(code), _) => format!("HTTP {status} {code}"),
+        (Some(status), None, _) => format!("HTTP {status}"),
+        (None, Some(code), _) => code.to_owned(),
+        (None, None, Some(local)) if !text.contains("Server returned") => local.to_string(),
+        (None, None, _) => "no usable response".to_owned(),
+    };
+    io::Error::other(format!("S3 {operation} {key:?} failed: {reason}"))
 }
 
 impl ObjectStorage for S3 {
     fn put(&self, key: &str, bytes: Vec<u8>) -> io::Result<()> {
-        let (store, key) = (self.store.clone(), Path::from(key));
-        self.run(async move { store.put(&key, PutPayload::from(bytes)).await.map(|_| ()) })
+        let (store, path) = (self.store.clone(), Path::from(key));
+        self.run("put", key, async move { store.put(&path, PutPayload::from(bytes)).await.map(|_| ()) })
     }
 
     fn create(&self, key: &str, bytes: Vec<u8>) -> io::Result<bool> {
-        let (store, key) = (self.store.clone(), Path::from(key));
-        self.run(async move {
+        let (store, path) = (self.store.clone(), Path::from(key));
+        self.run("create", key, async move {
             let options = PutOptions { mode: PutMode::Create, ..PutOptions::default() };
-            match store.put_opts(&key, PutPayload::from(bytes), options).await {
+            match store.put_opts(&path, PutPayload::from(bytes), options).await {
                 Ok(_) => Ok(true),
                 Err(object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }) => Ok(false),
                 Err(error) => Err(error),
@@ -162,15 +196,15 @@ impl ObjectStorage for S3 {
     }
 
     fn get(&self, key: &str) -> io::Result<Vec<u8>> {
-        let (store, key) = (self.store.clone(), Path::from(key));
-        self.run(async move { store.get(&key).await?.bytes().await }).map(Vec::from)
+        let (store, path) = (self.store.clone(), Path::from(key));
+        self.run("get", key, async move { store.get(&path).await?.bytes().await }).map(Vec::from)
     }
 
     fn list(&self, prefix: &str) -> io::Result<Vec<Listed>> {
-        let (store, prefix) = (self.store.clone(), Path::from(prefix));
-        self.run(async move {
+        let (store, path) = (self.store.clone(), Path::from(prefix));
+        self.run("list", prefix, async move {
             store
-                .list(Some(&prefix))
+                .list(Some(&path))
                 .map_ok(|object| Listed {
                     key: object.location.to_string(),
                     size: object.size,
@@ -182,9 +216,9 @@ impl ObjectStorage for S3 {
     }
 
     fn delete(&self, key: &str) -> io::Result<()> {
-        let (store, key) = (self.store.clone(), Path::from(key));
-        self.run(async move {
-            match store.delete(&key).await {
+        let (store, path) = (self.store.clone(), Path::from(key));
+        self.run("delete", key, async move {
+            match store.delete(&path).await {
                 Err(object_store::Error::NotFound { .. }) => Ok(()),
                 result => result,
             }
@@ -200,3 +234,6 @@ impl Drop for S3 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
