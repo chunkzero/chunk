@@ -50,9 +50,9 @@ own gateway. Synthetic JVMs, one per host, follow their `jvm/<host>` topics insi
 counts toward the target; they report sessions and arrivals but launch no JVMs and simulate no ticks or failures. The
 fixture declares 128-player sessions, one session per process and at most 32 processes. `control-population` offers 100
 snapshots per second by default, each what a reconnecting gateway reads. `control-churn` reports complete player
-lifecycles per second, and `population + concurrency` may be at most 1024. Released claims are kept for five minutes, so
-shorter runs measure churn with growing history. Setup and a successful run end by checking that a fresh snapshot holds
-exactly the seeded population.
+lifecycles per second; `population` (plus `concurrency` for churn) may be at most 4096. Released claims are kept for
+five minutes, so shorter runs measure churn with growing history. Setup and a successful run end by checking that a
+fresh snapshot holds exactly the seeded population.
 
 **Backend workloads** compile `backend/` with `chunk_build::compile` and serve it from core's backend on on-disk SQLite.
 Its schema has a `profiles` table, with `by_player` and `by_rank` indexes, and an `activity` table. Setup seeds

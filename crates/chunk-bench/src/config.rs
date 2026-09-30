@@ -2,6 +2,9 @@ use anyhow::{Result, ensure};
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 
+/// Players the control fixture's release can seat: control's limit of 32 processes, each one 128-player session.
+pub const CONTROL_SLOTS: u32 = 32 * 128;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Scenario {
@@ -132,8 +135,7 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         ensure!((1..=3600).contains(&self.seconds) && self.warmup <= 60, "invalid duration");
         ensure!((1..=4096).contains(&self.concurrency), "concurrency must be 1..=4096");
-        let population = if self.scenario.is_backend() { 100_000 } else { 1024 };
-        ensure!((1..=population).contains(&self.population), "population must be 1..={population}");
+        ensure!((1..=100_000).contains(&self.population), "population must be 1..=100000");
         ensure!((1..=100_000).contains(&self.subscribers), "subscribers must be 1..=100000");
         ensure!((1..=10_000).contains(&self.streams_per_connection), "streams per connection must be 1..=10000");
         ensure!(
@@ -162,10 +164,11 @@ impl Config {
         );
         let offers = u64::from(self.rate()) * u64::from(self.seconds + self.warmup);
         ensure!(self.rate() > 0 && offers <= 10_000_000, "rate must be positive; at most 10 million offers/run");
-        if self.scenario == Scenario::ControlChurn {
+        if !self.scenario.is_backend() && self.scenario != Scenario::ProxyRelay {
+            let open = self.population + if self.scenario == Scenario::ControlChurn { self.concurrency } else { 0 };
             ensure!(
-                self.population + self.concurrency <= 1024,
-                "control holds at most 1024 open claims: population + concurrency must be <= 1024"
+                open <= CONTROL_SLOTS,
+                "the control fixture seats {CONTROL_SLOTS} players: population (+ concurrency for churn) must fit"
             );
         }
         Ok(())
@@ -178,10 +181,10 @@ mod tests {
 
     #[test]
     fn churn_budget_includes_in_flight_and_seeded_players() {
-        let mut config = Config::parse_from(["bench", "control-churn", "--population", "960", "--concurrency", "64"]);
+        let mut config = Config::parse_from(["bench", "control-churn", "--population", "4032", "--concurrency", "64"]);
         assert!(config.validate().is_ok());
         config.population += 1;
-        assert!(config.validate().unwrap_err().to_string().contains("1024"));
+        assert!(config.validate().unwrap_err().to_string().contains("4096"));
         config.scenario = Scenario::ControlPopulation;
         assert!(config.validate().is_ok());
     }

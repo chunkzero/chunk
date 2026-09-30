@@ -14,7 +14,7 @@ use tokio_util::task::AbortOnDropHandle;
 use tonic::{Streaming, transport::Channel};
 
 use crate::{
-    config::{Config, Scenario},
+    config::{self, Config, Scenario},
     sync,
 };
 
@@ -28,7 +28,7 @@ pub fn release() -> Result<chunk_control::Release> {
         "deployment":{"environment":"bench","deployment":"bench"}, "release_id":"bench",
         "profiles":{"bench":{"memory_mib":512,"max_sessions":1}},
         "session_types":{"bench/default":{"app":"bench","machine_profile":"bench","capacity":128}},
-        "max_processes":32, "idle_node_timeout_seconds":0
+        "max_processes": config::CONTROL_SLOTS / 128, "idle_node_timeout_seconds":0
     }))?)
 }
 
