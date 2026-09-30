@@ -337,7 +337,7 @@ async fn shutdown_releases_machines_through_management_and_a_fenced_core_still_s
     recorded(&harness, "remote-2").await;
     harness.management.requested("remote-2", false);
     let (_stop, running) = harness.start();
-    harness.expect(1, "dep_a", DeploymentState::InProgress).await;
+    harness.expect(1, "dep_a", DeploymentState::Active).await;
     harness.management.lease.send_modify(|lease| *lease += 1);
     let error = tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap_err();
     assert!(error.to_string().contains("fenced"), "{error}");

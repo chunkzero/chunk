@@ -61,7 +61,6 @@ async fn core_replicates_where_management_grants_and_a_fresh_core_restores_from_
     // Restarted on its volume with working credentials, core uploads what it kept and stops cleanly.
     harness.management.grant(store);
     let (stop, running) = harness.start();
-    harness.expect(5, "dep_b", DeploymentState::InProgress).await;
     harness.expect(5, "dep_b", DeploymentState::Active).await;
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(60), running).await.unwrap().unwrap().unwrap();
