@@ -364,8 +364,8 @@ impl Storage for SqliteStore {
         Ok(applied.into_iter().filter(|entry| entry.active).map(|entry| entry.migration).collect())
     }
 
-    fn contracted(&self) -> Result<Vec<String>> {
-        Ok(journal::contracted(&journal::load(&self.connection)?).map(str::to_owned).collect())
+    fn contracted(&self) -> Result<Vec<chunk_contract::Migration>> {
+        Ok(journal::contracted(&journal::load(&self.connection)?).cloned().collect())
     }
 
     fn deployments(&self) -> Result<Vec<chunk_contract::Deployment>> {

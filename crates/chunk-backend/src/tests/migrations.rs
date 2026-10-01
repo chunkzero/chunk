@@ -146,6 +146,21 @@ async fn a_rename_backfills_syncs_both_ways_and_drops_the_old_field_once_finishe
 }
 
 #[tokio::test]
+async fn a_deployment_that_declares_no_contracted_table_stays_ready_after_a_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("unrelated.db");
+    let backend = Backend::new("local".into(), Box::new(SqliteStore::open(&path, "local").unwrap())).unwrap();
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    backend.deploy(Deployment { tables: DatabaseSchema::default(), ..deployment("unrelated", 1) }).await.unwrap();
+    backend.deploy(deployment("finished", 3)).await.unwrap();
+    assert!(backend.release(DeploymentId::new("old").unwrap()).await.unwrap());
+    drop(backend);
+
+    let backend = Backend::new("local".into(), Box::new(SqliteStore::open(&path, "local").unwrap())).unwrap();
+    backend.ready(DeploymentId::new("unrelated").unwrap()).await.unwrap();
+}
+
+#[tokio::test]
 async fn a_failed_backfill_holds_back_the_drop_and_retries_without_panicking() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("failed.db");

@@ -133,10 +133,10 @@ pub trait Storage: Send {
     /// Reports storage failures or corrupt records.
     fn migrations(&self) -> Result<Vec<chunk_contract::Migration>>;
 
-    /// The IDs of the expand migrations whose old shape was dropped.
+    /// The expand migrations whose old shape was dropped.
     /// # Errors
     /// Reports storage failures or corrupt records.
-    fn contracted(&self) -> Result<Vec<String>>;
+    fn contracted(&self) -> Result<Vec<chunk_contract::Migration>>;
 
     /// Removes an inactive deployment, permanently retiring its identity. Indexes
     /// and pending work that no remaining deployment or schema declares go with it.

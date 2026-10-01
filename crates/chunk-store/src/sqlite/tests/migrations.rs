@@ -431,5 +431,7 @@ fn an_older_writer_cannot_install_after_a_contraction() {
         let late = migration_error(store.install_deployment(&deployed("late", &history[..1])));
         assert!(late.contains("0002_") && late.contains("no longer possible"), "{late}");
         store.install_deployment(&deployed("again", &history)).unwrap();
+        let unrelated = Deployment { tables: DatabaseSchema::default(), ..deployed("unrelated", &history[..1]) };
+        store.install_deployment(&unrelated).unwrap();
     }
 }

@@ -21,7 +21,7 @@ pub(super) struct Work {
     /// Active expand migrations, whose old and new shapes writes keep in step.
     pub migrations: Vec<chunk_contract::Migration>,
     /// Expands whose old shape was dropped, which no deployment may lack.
-    pub contracted: Vec<String>,
+    pub contracted: Vec<chunk_contract::Migration>,
     /// The item in progress: with the commit thread, or a backfill batch with a read engine.
     running: Option<u64>,
     /// What the running backfill does next, once the commit thread or a read engine can take it.

@@ -29,12 +29,12 @@ pub(super) fn load(connection: &Connection) -> Result<Vec<Applied>> {
     .collect()
 }
 
-/// The IDs of the expands in `applied` whose old shape is dropped.
-pub(super) fn contracted(applied: &[Applied]) -> impl Iterator<Item = &str> {
+/// The expands in `applied` whose old shape is dropped.
+pub(super) fn contracted(applied: &[Applied]) -> impl Iterator<Item = &Migration> {
     applied
         .iter()
         .filter(|entry| entry.migration.kind == MigrationKind::Expand && !entry.active)
-        .map(|entry| entry.migration.id.as_str())
+        .map(|entry| &entry.migration)
 }
 
 /// Appends `new` after the `applied` entries already recorded, with a backfill for each table an active expand
@@ -86,7 +86,7 @@ pub(super) fn install(
     let journal = &deployment.contracts.migrations;
     chunk_contract::validate_migrations(journal)
         .map_err(|error| Error::Migration(format!("invalid migration journal: {error}")))?;
-    if let Some(migration) = crate::rolled_back_past(contracted(applied), journal) {
+    if let Some(migration) = crate::rolled_back_past(contracted(applied), &deployment.tables, journal) {
         return Err(crate::rollback_error(migration));
     }
     let new = verify(applied, journal)?;

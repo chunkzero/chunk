@@ -81,7 +81,7 @@ pub(crate) struct Stored {
     pub work: Vec<PendingWork>,
     pub migrations: Vec<chunk_contract::Migration>,
     /// The expands whose old shape was dropped.
-    pub contracted: Vec<String>,
+    pub contracted: Vec<chunk_contract::Migration>,
 }
 
 /// How far the log has advanced.

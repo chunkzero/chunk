@@ -86,14 +86,18 @@ impl Backfill {
     }
 }
 
-/// The first of `contracted`, the expands whose old shape the environment dropped, that `journal` neither contains
-/// nor replaces with a baseline. A deployment without it writes the shape from before the contraction.
+/// The first of `contracted`, the expands whose old shape the environment dropped, that changes a table in
+/// `declared` and that `journal` neither contains nor replaces with a baseline. A deployment without it writes the
+/// shape from before the contraction.
 #[must_use]
 pub fn rolled_back_past<'a>(
-    contracted: impl IntoIterator<Item = &'a str>,
+    contracted: impl IntoIterator<Item = &'a chunk_contract::Migration>,
+    declared: &chunk_contract::DatabaseSchema,
     journal: &[chunk_contract::Migration],
 ) -> Option<&'a str> {
-    contracted.into_iter().find(|id| {
+    let touched =
+        contracted.into_iter().filter(|migration| migration.tables.keys().any(|table| declared.contains_key(table)));
+    touched.map(|migration| migration.id.as_str()).find(|id| {
         let number = chunk_contract::migration_number(id);
         !journal.iter().any(|entry| {
             entry.id == *id

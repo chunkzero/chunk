@@ -246,7 +246,7 @@ impl Storage for ControlledStore {
     fn migrations(&self) -> chunk_store::Result<Vec<chunk_contract::Migration>> {
         self.inner.migrations()
     }
-    fn contracted(&self) -> chunk_store::Result<Vec<String>> {
+    fn contracted(&self) -> chunk_store::Result<Vec<chunk_contract::Migration>> {
         self.inner.contracted()
     }
     fn release_deployment(&mut self, id: &str) -> chunk_store::Result<bool> {
