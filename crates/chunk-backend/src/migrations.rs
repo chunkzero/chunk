@@ -69,41 +69,36 @@ impl ReadHost for NoReads {
     }
 }
 
-/// Transforms the rows of `batch` with `to` in the resident deployment `id`. A batch that outlasts the deadline or
-/// returns more than the output budget is retried with half as many rows, and a single row that does fails.
+/// Transforms the rows of `batch` with `to` in the resident deployment `id`, stopping early once the deadline
+/// passes or the output budget is spent. The rows already transformed are returned, and a first row that alone
+/// exceeds either budget fails.
 pub(crate) fn backfill(
     engine: &mut Engine,
     id: &DeploymentId,
     mut batch: Backfill,
     cancellation: &Cancellation,
 ) -> crate::Result<(Backfill, Vec<Value>)> {
-    let mut rows = batch.rows.len();
-    loop {
-        let started = Instant::now();
-        let (mut outputs, mut bytes) = (Vec::with_capacity(rows), 0);
-        let mut exceeded = None;
-        for row in &batch.rows[..rows] {
-            let to = (batch.migration.as_str(), batch.table.as_str(), Direction::To);
-            let output = transform(engine, id, to, &row.input, cancellation)
-                .map_err(|reason| Error::from(batch.failure(&row.id, &reason)))?;
-            bytes += output.to_string().len();
-            if started.elapsed() > BATCH_DEADLINE || bytes > BATCH_OUTPUT_BYTES {
-                exceeded = Some(row.id.clone());
-                break;
-            }
-            outputs.push(output);
-        }
-        match exceeded {
-            None => {
-                batch.shrink(rows);
-                return Ok((batch, outputs));
-            }
-            Some(_) if rows > 1 => rows /= 2,
-            Some(row) => {
+    let started = Instant::now();
+    let (mut outputs, mut bytes) = (Vec::with_capacity(batch.rows.len()), 0);
+    for row in &batch.rows {
+        let to = (batch.migration.as_str(), batch.table.as_str(), Direction::To);
+        let output = transform(engine, id, to, &row.input, cancellation)
+            .map_err(|reason| Error::from(batch.failure(&row.id, &reason)))?;
+        bytes += output.to_string().len();
+        let over = bytes > BATCH_OUTPUT_BYTES;
+        if over || started.elapsed() > BATCH_DEADLINE {
+            if outputs.is_empty() {
                 let reason =
                     format!("the transform exceeded the {BATCH_DEADLINE:?} or {BATCH_OUTPUT_BYTES} byte batch budget");
-                return Err(batch.failure(&row, &reason).into());
+                return Err(batch.failure(&row.id, &reason).into());
             }
+            if !over {
+                outputs.push(output);
+            }
+            break;
         }
+        outputs.push(output);
     }
+    batch.shrink(outputs.len());
+    Ok((batch, outputs))
 }

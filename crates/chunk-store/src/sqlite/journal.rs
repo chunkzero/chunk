@@ -124,7 +124,7 @@ pub(super) fn install(
 }
 
 /// The IDs of the expands in `new` that a finish in `new` completes, all over tables with no rows, where no
-/// resident deployment declares a removed field or lacks an added required one.
+/// resident deployment declares a removed field or lacks an added one.
 fn direct(
     connection: &Connection,
     current: &DatabaseSchema,
@@ -133,15 +133,7 @@ fn direct(
 ) -> Result<BTreeSet<String>> {
     let mut direct = BTreeSet::new();
     for expand in new.iter().filter(|expand| new.iter().any(|finish| finish.finishes.as_ref() == Some(&expand.id))) {
-        let mut empty = expand.tables.iter().all(|(name, change)| {
-            let required = |field: &String| {
-                expand.schema.get(name).and_then(|table| table.fields.get(field)).is_some_and(|field| !field.optional)
-            };
-            residents.iter().filter_map(|resident| resident.tables.get(name)).all(|table| {
-                !change.removed.iter().any(|field| table.fields.contains_key(field))
-                    && change.added.iter().filter(|field| required(field)).all(|field| table.fields.contains_key(field))
-            })
-        });
+        let mut empty = droppable(expand, residents);
         for table in expand.tables.keys().filter(|table| current.contains_key(*table)) {
             let rows = connection.query_row(&format!("SELECT EXISTS (SELECT 1 FROM {})", quote(table)), [], |row| {
                 row.get::<_, bool>(0)

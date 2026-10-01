@@ -229,6 +229,19 @@ fn an_empty_table_applies_finished_expands_directly_and_a_populated_one_needs_an
     assert!(error.contains("0004_title") && error.contains("intermediate release"), "{error}");
 }
 
+#[test]
+fn an_empty_table_keeps_syncing_optional_additions_for_a_retained_writer() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut history = journal(3);
+    for entry in &mut history[1..] {
+        entry.schema.get_mut("fighters").unwrap().fields.get_mut("displayName").unwrap().optional = true;
+    }
+    let mut store = SqliteStore::open(directory.path().join("data.db"), "local").unwrap();
+    store.install_deployment(&deployment("old", 1)).unwrap();
+    store.install_deployment(&deployed("finished", &history)).unwrap();
+    assert_eq!(store.migrations().unwrap().len(), 1, "the retained writer lacks the optional displayName");
+}
+
 /// A journal that expands `fighters` with the required integer `count` and finishes it.
 fn counted() -> Vec<Migration> {
     let fields = |count: bool| -> DatabaseSchema {
