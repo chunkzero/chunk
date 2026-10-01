@@ -6,6 +6,7 @@
 mod connection;
 mod gateway;
 mod handshake;
+mod health;
 mod limits;
 mod proxy_header;
 mod routes;
@@ -30,6 +31,8 @@ const MAX_PENDING_PER_CLIENT: usize = 32;
 pub struct Config {
     /// Where players connect.
     pub bind: SocketAddr,
+    /// Where to serve `GET /ready`; no health listener when unset.
+    pub health_bind: Option<SocketAddr>,
     /// The management service routes come from.
     pub management_url: String,
     /// The edge token management's `EdgeService` accepts.
@@ -42,13 +45,14 @@ pub struct Config {
 }
 
 impl Config {
-    /// Reads `CHUNK_BIND` (default `0.0.0.0:25565`), `CHUNK_MANAGEMENT_URL`, `CHUNK_EDGE_TOKEN`,
-    /// `CHUNK_HANDSHAKE_TIMEOUT_MS` (default 5000) and `CHUNK_WAKE_TIMEOUT_MS` (default 25000).
+    /// Reads `CHUNK_BIND` (default `0.0.0.0:25565`), `CHUNK_HEALTH_BIND` (default unset), `CHUNK_MANAGEMENT_URL`,
+    /// `CHUNK_EDGE_TOKEN`, `CHUNK_HANDSHAKE_TIMEOUT_MS` (default 5000) and `CHUNK_WAKE_TIMEOUT_MS` (default 25000).
     /// # Errors
     /// Reports missing or invalid variables.
     pub fn from_env() -> io::Result<Self> {
         Ok(Self {
             bind: optional("CHUNK_BIND")?.unwrap_or(([0, 0, 0, 0], 25565).into()),
+            health_bind: optional("CHUNK_HEALTH_BIND")?,
             management_url: required("CHUNK_MANAGEMENT_URL")?,
             edge_token: required("CHUNK_EDGE_TOKEN")?,
             handshake_timeout: milliseconds("CHUNK_HANDSHAKE_TIMEOUT_MS", HANDSHAKE_TIMEOUT)?,
@@ -73,9 +77,10 @@ struct Shared {
     wake_timeout: Duration,
 }
 
-/// The player listener.
+/// The player listener, and the health listener if configured.
 pub struct Edge {
     listener: TcpListener,
+    health: Option<TcpListener>,
     config: Config,
 }
 
@@ -85,7 +90,22 @@ impl Edge {
     pub async fn bind(config: Config) -> io::Result<Self> {
         let listener = TcpListener::bind(config.bind).await?;
         tracing::info!(address = %listener.local_addr()?, "edge listening");
-        Ok(Self { listener, config })
+        let health = match config.health_bind {
+            Some(address) => {
+                let health = TcpListener::bind(address).await?;
+                tracing::info!(address = %health.local_addr()?, "edge serving readiness");
+                Some(health)
+            }
+            None => None,
+        };
+        Ok(Self { listener, health, config })
+    }
+
+    /// The health listener's address, if configured.
+    /// # Errors
+    /// Reports a listener whose address cannot be read.
+    pub fn health_addr(&self) -> io::Result<Option<SocketAddr>> {
+        self.health.as_ref().map(TcpListener::local_addr).transpose()
     }
 
     /// # Errors
@@ -101,6 +121,7 @@ impl Edge {
         let routes = routes::Routes::default();
         let management = Client::new(&self.config.management_url).with_token(&self.config.edge_token);
         let watcher = tokio::spawn(routes::watch(management.clone(), routes.clone()));
+        let health = self.health.map(|listener| tokio::spawn(health::serve(listener, routes.clone())));
         let shared = Arc::new(Shared {
             routes,
             management,
@@ -127,6 +148,9 @@ impl Edge {
             }
         }
         watcher.abort();
+        if let Some(health) = health {
+            health.abort();
+        }
         connections.shutdown().await;
         Ok(())
     }

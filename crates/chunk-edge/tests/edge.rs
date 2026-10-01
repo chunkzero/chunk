@@ -170,6 +170,7 @@ fn gateway_status(gateway: TcpListener, status: &Value) -> Arc<AtomicUsize> {
 
 struct Harness {
     edge: SocketAddr,
+    health: SocketAddr,
     gateways: [TcpListener; 2],
     management: Arc<Management>,
     streams: mpsc::UnboundedReceiver<RouteStream>,
@@ -188,6 +189,7 @@ impl Harness {
         });
         let config = Config {
             bind: "127.0.0.1:0".parse().unwrap(),
+            health_bind: Some("127.0.0.1:0".parse().unwrap()),
             management_url: serve(management.clone()).await,
             edge_token: "edge-token".into(),
             handshake_timeout: Duration::from_millis(200),
@@ -195,15 +197,26 @@ impl Harness {
         };
         let edge = Edge::bind(config).await.unwrap();
         let address = edge.local_addr().unwrap();
+        let health = edge.health_addr().unwrap().unwrap();
         let stop = CancellationToken::new();
         tokio::spawn(edge.run(stop.clone()));
         let gateways =
             [TcpListener::bind("127.0.0.1:0").await.unwrap(), TcpListener::bind("127.0.0.1:0").await.unwrap()];
-        Self { edge: address, gateways, management, streams: stream_receiver, stop }
+        Self { edge: address, health, gateways, management, streams: stream_receiver, stop }
     }
 
     async fn next_stream(&mut self) -> RouteStream {
         timeout(Duration::from_secs(5), self.streams.recv()).await.expect("the edge watched routes").unwrap()
+    }
+
+    /// The status line of the health listener's answer to `GET path`.
+    async fn health(&self, path: &str) -> String {
+        let mut client = TcpStream::connect(self.health).await.unwrap();
+        let request = format!("GET {path} HTTP/1.1\r\nHost: edge\r\nConnection: close\r\n\r\n");
+        client.write_all(request.as_bytes()).await.unwrap();
+        let mut response = String::new();
+        timeout(Duration::from_secs(2), client.read_to_string(&mut response)).await.expect("an answer").unwrap();
+        response.lines().next().unwrap().to_owned()
     }
 
     fn calls(&self) -> Vec<String> {
@@ -295,6 +308,28 @@ impl Harness {
         let reason: Value = serde_json::from_str(&string_field(&packet, 0)).unwrap();
         reason["text"].as_str().unwrap().to_owned()
     }
+}
+
+#[tokio::test]
+async fn reports_ready_once_routes_have_loaded() {
+    let mut harness = Harness::start().await;
+    let routes = harness.next_stream().await;
+    assert_eq!(harness.health("/ready").await, "HTTP/1.1 503 Service Unavailable");
+    assert_eq!(harness.health("/other").await, "HTTP/1.1 404 Not Found");
+
+    routes.send(true, vec![]).await;
+    for _ in 0..100 {
+        if harness.health("/ready").await == "HTTP/1.1 200 OK" {
+            // Losing management does not make the edge unready.
+            drop(routes);
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(harness.health("/ready").await, "HTTP/1.1 200 OK");
+            harness.stop.cancel();
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the edge never became ready");
 }
 
 #[tokio::test]

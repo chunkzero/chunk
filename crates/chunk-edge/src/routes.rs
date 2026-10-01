@@ -4,7 +4,10 @@ use std::{
     collections::HashMap,
     io,
     net::SocketAddr,
-    sync::{Arc, PoisonError, RwLock},
+    sync::{
+        Arc, PoisonError, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -31,6 +34,8 @@ struct Table {
     entries: RwLock<HashMap<String, Entry>>,
     /// Sent after every update.
     changed: watch::Sender<()>,
+    /// Whether management has sent the table at least once.
+    loaded: AtomicBool,
 }
 
 /// A route, with the status cached for it while it is unchanged.
@@ -49,7 +54,11 @@ impl Entry {
 
 impl Default for Routes {
     fn default() -> Self {
-        Self(Arc::new(Table { entries: RwLock::default(), changed: watch::Sender::new(()) }))
+        Self(Arc::new(Table {
+            entries: RwLock::default(),
+            changed: watch::Sender::new(()),
+            loaded: AtomicBool::new(false),
+        }))
     }
 }
 
@@ -57,6 +66,11 @@ impl Routes {
     /// The route of `hostname`, if it has one.
     pub(crate) fn get(&self, hostname: &str) -> Option<Entry> {
         self.0.entries.read().unwrap_or_else(PoisonError::into_inner).get(hostname).cloned()
+    }
+
+    /// Whether management has sent the table at least once; it stays true while management is unreachable.
+    pub(crate) fn loaded(&self) -> bool {
+        self.0.loaded.load(Ordering::Acquire)
     }
 
     /// Waits until `route`'s hostname lists gateways for the same environment, and returns them; None once it routes
@@ -125,7 +139,11 @@ async fn follow(client: &Client, routes: &Routes, backoff: &mut Duration) -> io:
             *backoff = MIN_BACKOFF;
             tracing::info!(routes = update.routes.len(), "routes loaded");
         }
+        let loaded = update.reset;
         routes.apply(update);
+        if loaded {
+            routes.0.loaded.store(true, Ordering::Release);
+        }
     }
 }
 
