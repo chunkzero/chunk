@@ -242,6 +242,21 @@ fn migration_snapshots_must_follow_their_declared_changes() {
         finish(new.clone(), &[("fighters", table(&[], &["name"], false))]),
     ];
     validate_migrations(&good).unwrap();
+    let title = schema(&[("title", Schema::String)]);
+    let again = |id: &str| {
+        entry(
+            id,
+            MigrationKind::Expand,
+            None,
+            &[("fighters", table(&["title"], &["displayName"], true))],
+            title.clone(),
+        )
+    };
+    validate_migrations(&[good.as_slice(), &[again("0004_b")]].concat()).unwrap();
+    let mut chained = good.to_vec();
+    chained.remove(2);
+    chained.push(again("0003_b"));
+    assert!(validate_migrations(&chained).is_err(), "a table's second expand waits for the first one's finish");
 
     let additive = |schema| entry("0002_additive", MigrationKind::Additive, None, &[], schema);
     let mut grown = old.clone();
@@ -259,8 +274,13 @@ fn migration_snapshots_must_follow_their_declared_changes() {
 
     let undeclared = schema(&[("name", Schema::Number)]);
     let wrong_table = [("players", table(&["displayName"], &["name"], true))];
+    let retyped = [("fighters", table(&["name"], &["name"], true))];
+    let mut optional = old.clone();
+    optional.get_mut("fighters").unwrap().fields.get_mut("name").unwrap().optional = true;
     let rejected = [
-        vec![baseline.clone(), expand(undeclared, &rename)],
+        vec![baseline.clone(), expand(optional, &retyped)],
+        vec![baseline.clone(), expand(undeclared.clone(), &rename)],
+        vec![baseline.clone(), expand(undeclared, &retyped)],
         vec![baseline.clone(), expand(new.clone(), &[("fighters", table(&["displayName"], &[], true))])],
         vec![baseline.clone(), expand(new.clone(), &wrong_table)],
         vec![
@@ -283,4 +303,19 @@ fn migration_snapshots_must_follow_their_declared_changes() {
     for migrations in rejected {
         assert!(validate_migrations(&migrations).is_err(), "{migrations:?}");
     }
+}
+
+#[test]
+fn migrations_reject_reserved_tables() {
+    use crate::{Migration, MigrationKind, validate_migrations};
+    let schema: DatabaseSchema = [("chunk_control".to_owned(), TableSchema::default())].into();
+    let baseline = Migration {
+        id: "0001_init".into(),
+        hash: "0".repeat(64),
+        kind: MigrationKind::Baseline,
+        finishes: None,
+        tables: BTreeMap::new(),
+        schema,
+    };
+    assert!(validate_migrations(&[baseline]).is_err());
 }

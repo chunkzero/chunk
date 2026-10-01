@@ -57,7 +57,10 @@ mod snapshot;
 mod sqlite;
 mod work;
 
-pub use chunk_contract::DatabaseSchema;
+/// The largest stored document, as JSON.
+pub const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+
+pub use chunk_contract::{DatabaseSchema, SYSTEM_TABLE_PREFIX, is_system_table};
 pub use jobs::{Job, JobCommand, JobIntent, JobState, Jobs, WakeHandoff};
 pub use model::{
     Commit, Document, DocumentKey, Epoch, IndexDefinition, IndexRange, KeyRange, Operation, Outcome, ReadBudget,
@@ -66,17 +69,9 @@ pub use model::{
 pub use replication::{Listed, ObjectStorage, Replication, ReplicationProgress, Replicator, S3Bucket, S3Credentials};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
-pub use work::{PendingWork, Work};
-
-/// Tables whose names start with this prefix, in any letter case, belong to the
-/// environment itself. App deployments may not declare them.
-pub const SYSTEM_TABLE_PREFIX: &str = "chunk_";
-
-/// Whether `table` is reserved for the environment by [`SYSTEM_TABLE_PREFIX`].
-#[must_use]
-pub fn is_system_table(table: &str) -> bool {
-    table.get(..SYSTEM_TABLE_PREFIX.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(SYSTEM_TABLE_PREFIX))
-}
+pub use work::{
+    Backfill, BackfillRow, PendingWork, Transform, Work, compatible_field, rollback_error, rolled_back_past,
+};
 
 /// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
@@ -86,13 +81,23 @@ pub trait Storage: Send {
     /// Rejects reused identities, changed deployment bindings or storage failures.
     fn prepare_operation(&mut self, operation: &Operation, context: RetryContext) -> Result<RetryContext>;
 
-    /// Retains a deployment, installs its new tables and optional fields, and
-    /// records the work it waits on, such as building its indexes, in one
-    /// transaction. Installing it again records work it still lacks.
+    /// Retains a deployment, applies its schema and records the work it waits
+    /// on, such as building its indexes, in one transaction. Installing it
+    /// again records work it still lacks.
+    ///
+    /// Without a migration journal on either side, its new tables and optional
+    /// fields are installed. Otherwise its journal and the environment's applied
+    /// migrations must be prefix-related with matching hashes, and the stored
+    /// schema must match the applied ones. The journal's new entries are
+    /// applied: an expand adds its fields and records their backfills, and a
+    /// finish schedules dropping the old shape once no resident deployment
+    /// declares it. A shorter journal installs only while the store holds
+    /// every field the deployment declares.
     /// # Errors
     /// Rejects incompatible schemas, [system tables](is_system_table), retired
-    /// identities and storage failures. A storage failure that changed nothing
-    /// is [`Error::RolledBack`].
+    /// identities and storage failures, and journals with
+    /// [`Error::Migration`]. A storage failure that changed nothing is
+    /// [`Error::RolledBack`].
     fn install_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision>;
 
     /// Work installed deployments wait on, in the order it runs.
@@ -100,11 +105,38 @@ pub trait Storage: Send {
     /// Reports storage failures or corrupt work records.
     fn pending_work(&self) -> Result<Vec<PendingWork>>;
 
-    /// Runs one item of pending work in its own write, without changing document
-    /// revisions. Work no longer pending is done already.
+    /// Runs one item of pending work, or one batch of a backfill through
+    /// `transform`, in its own write, without changing document revisions. Work
+    /// no longer pending is done already.
     /// # Errors
-    /// Reports storage failures. A failure that changed nothing is [`Error::RolledBack`].
-    fn run_work(&mut self, id: u64) -> Result<()>;
+    /// Reports storage failures, and transforms that fail or produce invalid
+    /// rows with [`Error::Migration`]. A failure that changed nothing is
+    /// [`Error::RolledBack`].
+    fn run_work(&mut self, id: u64, transform: &mut Transform<'_>) -> Result<()>;
+
+    /// Reads the next batch of at most `rows` rows of backfill `id`, for the caller to transform and
+    /// [commit](Storage::commit_backfill). A backfill with no rows left finishes and yields `None`, as does work
+    /// no longer pending.
+    /// # Errors
+    /// Reports storage failures or corrupt work records.
+    fn read_backfill(&mut self, id: u64, rows: usize) -> Result<Option<Backfill>>;
+
+    /// Commits `batch` with `outputs`, one transformed row for each of its rows, and advances the backfill. A row
+    /// whose revision changed since it was read was synchronized by its write and is skipped. Does nothing if the
+    /// backfill is no longer at the batch's cursor.
+    /// # Errors
+    /// As [`Storage::run_work`].
+    fn commit_backfill(&mut self, id: u64, batch: &Backfill, outputs: &[serde_json::Value]) -> Result<()>;
+
+    /// Applied expand migrations whose old shape is still stored, in journal order.
+    /// # Errors
+    /// Reports storage failures or corrupt records.
+    fn migrations(&self) -> Result<Vec<chunk_contract::Migration>>;
+
+    /// The expand migrations whose old shape was dropped.
+    /// # Errors
+    /// Reports storage failures or corrupt records.
+    fn contracted(&self) -> Result<Vec<chunk_contract::Migration>>;
 
     /// Removes an inactive deployment, permanently retiring its identity. Indexes
     /// and pending work that no remaining deployment or schema declares go with it.
@@ -236,6 +268,8 @@ pub enum Error {
     OperationMismatch,
     #[error("invalid persistence request: {0}")]
     Invalid(&'static str),
+    #[error("{0}")]
+    Migration(String),
     #[error("local database size limit reached")]
     Capacity,
     #[error("scheduled job budget reached; retry once jobs finish or expire")]
@@ -270,6 +304,7 @@ impl Error {
             self,
             Self::Conflict { .. }
                 | Self::Invalid(_)
+                | Self::Migration(_)
                 | Self::Capacity
                 | Self::JobBudget
                 | Self::OperationMismatch

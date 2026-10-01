@@ -23,6 +23,7 @@ pub(crate) struct Prepared {
     pub arguments: Json,
     pub timestamp: i64,
     pub seed: u64,
+    pub json_bytes: usize,
     pub env: Json,
     pub runner: Runner,
 }
@@ -46,7 +47,7 @@ impl State {
         cancellation: &Cancellation,
     ) -> Result<Execution, Error> {
         self.calls += 1;
-        let Prepared { export, caller, arguments, runner, timestamp, seed, env } = prepared;
+        let Prepared { export, caller, arguments, runner, timestamp, seed, json_bytes, env } = prepared;
         let (capabilities, action) = match runner {
             Runner::Transaction(capabilities) => (Some(capabilities), None),
             Runner::Action(action) => (None, Some(action)),
@@ -57,7 +58,7 @@ impl State {
         self.runtime.op_state().borrow_mut().put(action);
         self.runtime.op_state().borrow_mut().put(crate::actions::Env(env));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
-            let result = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str()));
+            let result = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str(), json_bytes));
             if !is_action {
                 executor.block_on(engine.drain())?;
             }
@@ -161,7 +162,13 @@ impl State {
         self.runtime.run_event_loop(PollEventLoopOptions::default()).await.map_err(js_error)
     }
 
-    async fn invoke(&mut self, export: &str, caller: &str, arguments: &str) -> Result<String, Error> {
+    async fn invoke(
+        &mut self,
+        export: &str,
+        caller: &str,
+        arguments: &str,
+        json_bytes: usize,
+    ) -> Result<String, Error> {
         let args = {
             deno_core::scope!(scope, &mut self.runtime);
             let namespace = v8::Local::new(scope, self.namespace.as_ref().expect("initialized"));
@@ -188,7 +195,7 @@ impl State {
         let output = v8::Local::new(scope, output);
         let output = v8::Local::<v8::String>::try_from(output).map_err(js_error)?;
         let encoded = output.to_rust_string_lossy(scope);
-        if encoded.len() > bounds::JSON_BYTES {
+        if encoded.len() > json_bytes {
             return Err(Error::Invalid("result exceeds size limit"));
         }
         // Durable outcomes use serde_json too; reject unsupported depth and Unicode

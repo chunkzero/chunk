@@ -185,7 +185,8 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
             .execute_batch(
                 "DROP INDEX _chunk_index_70726f66696c6573_62795f636f696e73_636f696e73;
                  DROP TABLE _chunk_indexes;
-                 DROP TABLE _chunk_work;",
+                 DROP TABLE _chunk_work;
+                 DROP TABLE _chunk_applied;",
             )
             .unwrap();
         if version < 8 {
@@ -229,7 +230,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome.clone()));
         let pending = store.pending_work().unwrap();
         assert_eq!(pending.len(), 1);
-        store.run_work(pending[0].id).unwrap();
+        store.run_work(pending[0].id, &mut |_, _, _| Err("no migrations".to_owned())).unwrap();
         assert!(store.pending_work().unwrap().is_empty());
         assert_eq!(store.snapshot().unwrap().scan_index(&by_coins()).unwrap()[0].1.value, json!({"coins": 7}));
         assert_eq!(store.prepare_operation(&operation("failed"), context.clone()).unwrap(), context);

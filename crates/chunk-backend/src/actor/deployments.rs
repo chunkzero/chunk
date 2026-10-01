@@ -2,19 +2,40 @@ use super::{Actor, MAX_DEPLOYMENTS};
 use crate::{Error, Result, commit::Job, reads::View, service::Request};
 use chunk_contract::Deployment;
 use chunk_js::{DeploymentId, Limits};
-use chunk_store::{IndexDefinition, PendingWork, Snapshot};
-use std::sync::Arc;
+use chunk_store::{IndexDefinition, Snapshot};
+use std::{collections::BTreeSet, sync::Arc};
 
 impl Actor {
-    /// Whether `snapshot` has built every index `deployment` declares, once its tables and fields are installed.
-    pub(super) fn schema_ready(deployment: &Deployment, snapshot: &Snapshot) -> Result<bool> {
+    /// Whether `snapshot` has built every index `deployment` declares and no pending work blocks it, once its
+    /// tables and fields are installed.
+    pub(super) fn schema_ready(
+        deployment: &Deployment,
+        snapshot: &Snapshot,
+        work: &super::readiness::Work,
+    ) -> Result<bool> {
+        let journal = &deployment.contracts.migrations;
+        if chunk_store::rolled_back_past(&work.contracted, &deployment.tables, journal).is_some() {
+            return Err(Error::Contract);
+        }
+        let migrating: BTreeSet<_> = work
+            .migrations
+            .iter()
+            .flat_map(|migration| &migration.tables)
+            .flat_map(|(table, change)| change.added.iter().chain(&change.removed).map(move |field| (table, field)))
+            .collect();
         for (name, table) in &deployment.tables {
             let current = snapshot.schema().get(name).ok_or(Error::Contract)?;
-            if table.fields.iter().any(|(name, field)| current.fields.get(name) != Some(field)) {
+            let serves = |(field, declared)| {
+                current.fields.get(field).is_some_and(|stored| {
+                    chunk_store::compatible_field(stored, declared, migrating.contains(&(name, field)))
+                })
+            };
+            if !table.fields.iter().all(serves) {
                 return Err(Error::Contract);
             }
         }
-        Ok(IndexDefinition::declared(&deployment.tables).all(|index| snapshot.indexes().contains(&index)))
+        let blocked = work.pending.iter().any(|pending| pending.work.blocks(deployment));
+        Ok(!blocked && IndexDefinition::declared(&deployment.tables).all(|index| snapshot.indexes().contains(&index)))
     }
 
     /// Installs `deployment`, unless it is resident and ready. Returns whether it started.
@@ -53,20 +74,20 @@ impl Actor {
         Ok(true)
     }
 
-    pub(super) fn installed(&mut self, result: Result<(Snapshot, Vec<PendingWork>)>) {
+    pub(super) fn installed(&mut self, result: Result<(Snapshot, crate::commit::Stored)>) {
         let Some((deployment, reply)) = self.deploying.take() else {
             return;
         };
         let id = DeploymentId::new(&deployment.id).expect("validated deployment");
         let resident = self.versions.contains_key(&id);
-        let installed = result.and_then(|(snapshot, pending)| {
-            let ready = Self::schema_ready(&deployment, &snapshot)?;
-            Ok((snapshot, pending, ready))
+        let installed = result.and_then(|(snapshot, stored)| {
+            self.work.update(stored);
+            let ready = Self::schema_ready(&deployment, &snapshot, &self.work)?;
+            Ok((snapshot, ready))
         });
         match installed {
-            Ok((snapshot, pending, ready)) => {
+            Ok((snapshot, ready)) => {
                 self.view = Arc::new(View::new(snapshot));
-                self.work.pending = pending;
                 self.work.failed.clear();
                 if self.versions.insert(id.clone(), Some(deployment)).is_none() {
                     self.installed.push(id.clone());
@@ -138,13 +159,13 @@ impl Actor {
         self.releasing = Some((id, reply));
     }
 
-    pub(super) fn released(&mut self, result: Result<(bool, Vec<PendingWork>)>) {
+    pub(super) fn released(&mut self, result: Result<(bool, crate::commit::Stored)>) {
         let Some((id, reply)) = self.releasing.take() else {
             return;
         };
         match result {
-            Ok((_, pending)) => {
-                self.work.pending = pending;
+            Ok((_, stored)) => {
+                self.work.update(stored);
                 self.unready.remove(&id);
                 self.work.finish(|waiting, _| (waiting == &id).then_some(Err(Error::Unknown)));
                 self.versions.remove(&id);

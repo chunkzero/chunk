@@ -22,6 +22,7 @@ mod effects;
 mod evaluate;
 mod hooks;
 mod limits;
+mod migrations;
 mod moves;
 mod reads;
 mod send;
@@ -74,6 +75,8 @@ pub enum Error {
     NotReady,
     #[error("deployment is retiring")]
     Retired,
+    #[error("{0}")]
+    Migration(String),
     #[error("operation ID was reused for a different request")]
     OperationMismatch,
     #[error("commit pipeline failed; recover the operation outcome after restarting the backend")]
@@ -97,6 +100,7 @@ impl From<chunk_store::Error> for Error {
     fn from(error: chunk_store::Error) -> Self {
         match error {
             chunk_store::Error::JobBudget => Limit::Jobs.exceeded(),
+            chunk_store::Error::Migration(message) => Self::Migration(message),
             error => Self::Storage(error.into()),
         }
     }
@@ -114,7 +118,7 @@ impl From<serde_json::Error> for Error {
 
 impl Error {
     pub(crate) fn is_rejected_commit(&self) -> bool {
-        matches!(self, Self::Overloaded(Limit::Jobs))
+        matches!(self, Self::Overloaded(Limit::Jobs) | Self::Migration(_))
             || matches!(self, Self::Storage(error) if matches!(error.as_ref(), chunk_store::Error::Conflict { .. } | chunk_store::Error::Invalid(_) | chunk_store::Error::Capacity | chunk_store::Error::OperationMismatch | chunk_store::Error::RolledBack(_)))
     }
 }

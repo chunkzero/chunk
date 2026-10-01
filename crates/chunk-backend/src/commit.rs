@@ -26,9 +26,19 @@ pub(crate) enum Job {
     Install {
         deployment: Arc<chunk_contract::Deployment>,
     },
-    /// Runs one item of pending work.
+    /// Runs one item of pending work other than a backfill.
     Work {
         id: u64,
+    },
+    /// Reads the next batch of a backfill.
+    ReadBackfill {
+        id: u64,
+    },
+    /// Commits the rows of a batch that were transformed, skipping those written since they were read.
+    CommitBackfill {
+        id: u64,
+        batch: chunk_store::Backfill,
+        outputs: Vec<serde_json::Value>,
     },
     Commit {
         expected: Revision,
@@ -50,6 +60,9 @@ pub(crate) enum Job {
 /// acknowledgement latency low.
 const MAX_BATCH: usize = 64;
 
+/// The rows a backfill batch reads at most.
+const BACKFILL_ROWS: usize = 256;
+
 /// Every system commit records an operation with a unique ID, so they share one request fingerprint.
 const FINGERPRINT: [u8; 32] = *b"chunk-environment-system-commit!";
 
@@ -58,9 +71,17 @@ pub(crate) struct Initial {
     pub snapshot: Snapshot,
     pub deployments: Vec<chunk_contract::Deployment>,
     pub jobs: chunk_store::Jobs,
-    pub work: Vec<PendingWork>,
+    pub stored: Stored,
     /// The deployments whose retirement an earlier run committed.
     pub retiring: Vec<String>,
+}
+
+/// The store's pending work and its active expand migrations.
+pub(crate) struct Stored {
+    pub work: Vec<PendingWork>,
+    pub migrations: Vec<chunk_contract::Migration>,
+    /// The expands whose old shape was dropped.
+    pub contracted: Vec<chunk_contract::Migration>,
 }
 
 /// How far the log has advanced.
@@ -90,7 +111,7 @@ impl Committer {
                     snapshot: store.snapshot()?,
                     deployments: store.deployments()?,
                     jobs: store.job_command(chunk_store::JobCommand::Recover)?,
-                    work: store.pending_work()?,
+                    stored: stored(store.as_ref())?,
                     retiring: store.retiring()?,
                 })
             })();
@@ -176,10 +197,10 @@ fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut 
             let result = if *failed {
                 Err(Error::CommitFailed)
             } else {
-                store.release_deployment(&id).map_err(Error::from).and_then(|released| {
-                    let work = store.pending_work().map_err(|_| Error::CommitFailed)?;
-                    Ok((released, work))
-                })
+                store
+                    .release_deployment(&id)
+                    .map_err(Error::from)
+                    .and_then(|released| Ok((released, stored(store).map_err(|_| Error::CommitFailed)?)))
             };
             *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
             Event::Released { result }
@@ -204,7 +225,29 @@ fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut 
             let result = if *failed {
                 Err(Error::CommitFailed)
             } else {
-                store.run_work(id).map_err(Error::from).and_then(|()| current(store))
+                let mut transform = |_: &str, _: &str, _| Err("backfills run outside the commit lane".to_owned());
+                store.run_work(id, &mut transform).map_err(Error::from).and_then(|()| current(store))
+            };
+            *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+            Event::Worked { id, result }
+        }
+        Job::ReadBackfill { id } => match if *failed {
+            Err(Error::CommitFailed)
+        } else {
+            store.read_backfill(id, BACKFILL_ROWS).map_err(Error::from)
+        } {
+            Ok(Some(batch)) => Event::BackfillRead { id, batch },
+            Ok(None) => Event::Worked { id, result: current(store) },
+            Err(error) => {
+                *failed |= !error.is_rejected_commit();
+                Event::Worked { id, result: Err(error) }
+            }
+        },
+        Job::CommitBackfill { id, batch, outputs } => {
+            let result = if *failed {
+                Err(Error::CommitFailed)
+            } else {
+                store.commit_backfill(id, &batch, &outputs).map_err(Error::from).and_then(|()| current(store))
             };
             *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
             Event::Worked { id, result }
@@ -223,9 +266,13 @@ fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut 
 }
 
 /// A snapshot after a durable write, with the work still pending. Failing to read them is fatal.
-fn current(store: &mut dyn Storage) -> Result<(Snapshot, Vec<PendingWork>)> {
+fn current(store: &mut dyn Storage) -> Result<(Snapshot, Stored)> {
     let snapshot = store.snapshot().map_err(|_| Error::CommitFailed)?;
-    Ok((snapshot, store.pending_work().map_err(|_| Error::CommitFailed)?))
+    Ok((snapshot, stored(store).map_err(|_| Error::CommitFailed)?))
+}
+
+fn stored(store: &dyn Storage) -> chunk_store::Result<Stored> {
+    Ok(Stored { work: store.pending_work()?, migrations: store.migrations()?, contracted: store.contracted()? })
 }
 
 /// Installs system tables, reporting whether that advanced the revision, and reads the store.

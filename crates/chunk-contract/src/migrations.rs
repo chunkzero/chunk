@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +13,8 @@ const MAX_MIGRATIONS: usize = 256;
 /// entry's kind, snapshot and source.
 ///
 /// - `Expand` changes the schema to `schema`. For each table in `tables`, `added` fields are new and `removed`
-///   fields lose their old shape; a field in both changed its definition. The backend bundle exports
+///   fields lose their old shape. A table has at most one unfinished expand, and a field keeps its definition
+///   or is renamed. The backend bundle exports
 ///   `__chunk_migrate(_, { migration, table, direction, rows })`, which maps each row through the migration's
 ///   `to` (`direction: "to"`, a row of the previous snapshot, returning exactly the `added` fields) or `back`
 ///   (`"back"`, a row of `schema`, returning exactly the `removed` fields) and returns the results in order. `back`
@@ -57,6 +58,20 @@ pub struct MigrationTable {
     pub back: bool,
 }
 
+impl Migration {
+    /// The fields of `table` a transform reads: for `to`, the previous snapshot's; for `back`, this one's.
+    #[must_use]
+    pub fn input_fields(&self, table: &str, back: bool) -> BTreeSet<&str> {
+        let Some(change) = self.tables.get(table) else { return BTreeSet::new() };
+        let current = self.schema.get(table).into_iter().flat_map(|table| table.fields.keys());
+        if back {
+            return current.map(String::as_str).collect();
+        }
+        let kept = current.filter(|field| !change.added.contains(field));
+        kept.chain(&change.removed).map(String::as_str).collect()
+    }
+}
+
 /// Splits a migration ID into its namespace (empty without a prefix) and number.
 #[must_use]
 pub fn migration_number(id: &str) -> Option<(&str, u32)> {
@@ -73,7 +88,7 @@ pub fn migration_number(id: &str) -> Option<(&str, u32)> {
 
 /// # Errors
 /// Rejects invalid IDs, misordered or duplicate entries, finishes without an open expand, invalid snapshots and
-/// snapshots that drop a table or differ from the previous one by more than the entry declares.
+/// reserved tables, snapshots that drop a table or differ from the previous one by more than the entry declares.
 pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str> {
     if migrations.len() > MAX_MIGRATIONS {
         return Err("too many migrations");
@@ -92,6 +107,9 @@ pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str>
             return Err("invalid migration hash");
         }
         crate::validate(&migration.schema)?;
+        if migration.schema.keys().chain(migration.tables.keys()).any(|table| crate::is_system_table(table)) {
+            return Err("migrations can't declare a reserved chunk_ table");
+        }
         for (table, changes) in &migration.tables {
             crate::validate_name(table)?;
             changes.added.iter().chain(&changes.removed).try_for_each(|field| crate::validate_name(field))?;
@@ -106,6 +124,10 @@ pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str>
                     return Err("an expand migration changes tables and finishes nothing");
                 }
                 require_declared_changes(before, migration)?;
+                if open.values().any(|earlier| earlier.tables.keys().any(|table| migration.tables.contains_key(table)))
+                {
+                    return Err("finish the earlier migration of a table before changing it again");
+                }
                 open.insert(migration.id.as_str(), migration);
             }
             MigrationKind::Finish => {
@@ -168,6 +190,9 @@ fn require_declared_changes(before: &DatabaseSchema, expand: &Migration) -> Resu
                 .collect()
         };
         let (added, removed) = (differing(&table.fields, &old.fields), differing(&old.fields, &table.fields));
+        if added.iter().any(|field| old.fields.contains_key(field)) {
+            return Err("changing a field in place isn't supported; rename the field instead");
+        }
         match expand.tables.get(name) {
             Some(declared) => {
                 if declared.added != added || declared.removed != removed || (added.is_empty() && removed.is_empty()) {

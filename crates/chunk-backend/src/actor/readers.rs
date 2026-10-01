@@ -54,8 +54,23 @@ pub(crate) struct Evaluated {
     pub reads: Dependencies,
 }
 
+/// A backfill batch for a read engine to transform with `to` in the bundle of a resident deployment.
+pub(crate) struct Compute {
+    pub id: u64,
+    pub batch: chunk_store::Backfill,
+    pub deployment: DeploymentId,
+    pub source: Arc<Source>,
+}
+
+pub(crate) struct Computed {
+    pub worker: usize,
+    pub id: u64,
+    pub result: Result<(chunk_store::Backfill, Vec<serde_json::Value>)>,
+}
+
 enum Work {
     Read(Box<Read>),
+    Compute(Box<Compute>, Cancellation),
     Release(DeploymentId),
 }
 
@@ -125,6 +140,26 @@ impl Readers {
         }
     }
 
+    /// Hands the batch to an idle worker, or returns it if none can take it.
+    pub fn send_compute(&mut self, compute: Compute) -> std::result::Result<(), Box<Compute>> {
+        let Some(worker) = self.workers.iter_mut().find(|worker| worker.busy.is_none() && worker.jobs.is_some()) else {
+            return Err(Box::new(compute));
+        };
+        let deployment = compute.deployment.clone();
+        let jobs = worker.jobs.as_ref().expect("live worker");
+        match jobs.send(Work::Compute(Box::new(compute), self.stop.clone())) {
+            Ok(()) => {
+                worker.busy = Some(deployment);
+                Ok(())
+            }
+            Err(mpsc::SendError(work)) => {
+                worker.jobs = None;
+                let Work::Compute(compute, _) = work else { unreachable!("sent a batch") };
+                Err(compute)
+            }
+        }
+    }
+
     pub fn done(&mut self, worker: usize) {
         self.workers[worker].busy = None;
     }
@@ -165,6 +200,19 @@ fn work(index: usize, incoming: &mpsc::Receiver<Work>, events: &tokio::sync::mps
                 }
                 continue;
             }
+            Work::Compute(compute, stop) => {
+                let Compute { id, batch, deployment, source } = *compute;
+                let result = match &mut engine {
+                    Ok(engine) => load(engine, &mut loaded, &deployment, &source)
+                        .and_then(|()| crate::migrations::backfill(engine, &deployment, batch, &stop)),
+                    Err(error) => Err(error.clone()),
+                };
+                let computed = Computed { worker: index, id, result };
+                if events.blocking_send(Event::Computed(Box::new(computed))).is_err() {
+                    break;
+                }
+                continue;
+            }
             Work::Read(read) => *read,
         };
         let (result, reads) = match &mut engine {
@@ -179,15 +227,8 @@ fn work(index: usize, incoming: &mpsc::Receiver<Work>, events: &tokio::sync::mps
 }
 
 fn run(engine: &mut Engine, loaded: &mut BTreeSet<DeploymentId>, read: &Read) -> (Result<String>, Dependencies) {
-    let deployment = &read.call.deployment;
-    if !loaded.contains(deployment) {
-        let source = &read.source;
-        if let Err(error) =
-            engine.register_with_env(deployment.clone(), source.code.clone(), source.limits, source.env.clone())
-        {
-            return (Err(error.into()), Dependencies::default());
-        }
-        loaded.insert(deployment.clone());
+    if let Err(error) = load(engine, loaded, &read.call.deployment, &read.source) {
+        return (Err(error), Dependencies::default());
     }
     let timer = Timer::start();
     let target = Target {
@@ -202,4 +243,17 @@ fn run(engine: &mut Engine, loaded: &mut BTreeSet<DeploymentId>, read: &Read) ->
         Ticket::Watch(_) => Phase::Reevaluate,
     });
     (result.map(|execution| execution.value), reads)
+}
+
+fn load(
+    engine: &mut Engine,
+    loaded: &mut BTreeSet<DeploymentId>,
+    deployment: &DeploymentId,
+    source: &Source,
+) -> Result<()> {
+    if !loaded.contains(deployment) {
+        engine.register_with_env(deployment.clone(), source.code.clone(), source.limits, source.env.clone())?;
+        loaded.insert(deployment.clone());
+    }
+    Ok(())
 }

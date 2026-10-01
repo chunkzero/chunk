@@ -6,6 +6,7 @@ use crate::{
 use serde_json::json;
 
 mod jobs;
+mod migrations;
 mod queries;
 mod retention;
 mod schemas;

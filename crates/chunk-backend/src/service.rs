@@ -303,15 +303,22 @@ pub(crate) enum Event {
         result: Result<(Update, Snapshot, Option<chunk_store::Jobs>)>,
     },
     Installed {
-        result: Result<(Snapshot, Vec<chunk_store::PendingWork>)>,
+        result: Result<(Snapshot, crate::commit::Stored)>,
     },
     /// One item of pending work ran.
     Worked {
         id: u64,
-        result: Result<(Snapshot, Vec<chunk_store::PendingWork>)>,
+        result: Result<(Snapshot, crate::commit::Stored)>,
     },
+    /// The next batch of a backfill, read for a worker to transform.
+    BackfillRead {
+        id: u64,
+        batch: chunk_store::Backfill,
+    },
+    /// A worker transformed a backfill batch.
+    Computed(Box<crate::actor::Computed>),
     Released {
-        result: Result<(bool, Vec<chunk_store::PendingWork>)>,
+        result: Result<(bool, crate::commit::Stored)>,
     },
     Evaluated(Box<crate::actor::Evaluated>),
     /// System commits up to `revision` that precede every app commit not yet acknowledged,
@@ -562,9 +569,10 @@ impl Backend {
         self.ready(id).await
     }
 
-    /// Validates and durably retains a deployment, installing its new tables and optional fields at a commit
-    /// barrier. The work it waits on, such as building its indexes, then runs in the background, and the deployment
-    /// accepts calls once that is done. Installing a resident deployment that is not ready installs it again and
+    /// Validates and durably retains a deployment, applying its schema at a commit barrier: its migration journal's
+    /// new entries, or without journals its new tables and optional fields. The work it waits on, such as building
+    /// its indexes and backfilling its migrations, then runs in the background, and the deployment accepts calls
+    /// once that is done. Installing a resident deployment that is not ready installs it again and
     /// retries its failed work. Restart reloads retained bundles and resumes their work.
     /// # Errors
     /// Rejects incompatible metadata, invalid JS, pending commits or retention limits.

@@ -132,10 +132,10 @@ fn migrations_are_typed_from_snapshots_and_callable_from_the_bundle() {
         (&["displayName".to_owned()][..], &["name".to_owned()][..], true)
     );
 
-    assert_eq!(migrate_to(output.path(), "Ann"), r#"[{"displayName":"Ann"}]"#);
+    assert_eq!(migrate_to(output.path(), "Ann").unwrap(), r#"[{"displayName":"Ann"}]"#);
 }
 
-fn migrate_to(output: &Path, name: &str) -> String {
+fn migrate_to(output: &Path, name: &str) -> Result<String, String> {
     use chunk_js::{Cancellation, DeploymentId, Engine, Invocation, Key, Limits, Mode, ReadHost};
     struct Host;
     impl ReadHost for Host {
@@ -163,7 +163,10 @@ fn migrate_to(output: &Path, name: &str) -> String {
         timestamp: 0,
         seed: 0,
     };
-    engine.execute(&id, invocation, Box::new(Host), &Cancellation::default()).unwrap().value
+    engine
+        .execute(&id, invocation, Box::new(Host), &Cancellation::default())
+        .map(|run| run.value)
+        .map_err(|e| e.to_string())
 }
 
 #[test]
@@ -200,7 +203,7 @@ fn compilation_uses_the_captured_migrations_and_ignores_package_imports() {
     let path = root.join("server/migrations/0002_display_name.ts");
     fs::write(&path, fs::read_to_string(&path).unwrap().replace("old.name", "old.displayName")).unwrap();
     crate::compiler::compile_journal(&root, output.path(), &captured, false).unwrap();
-    assert_eq!(migrate_to(output.path(), "Ann"), r#"[{"displayName":"Ann"}]"#);
+    assert_eq!(migrate_to(output.path(), "Ann").unwrap(), r#"[{"displayName":"Ann"}]"#);
 
     // Another compilation rewriting the shared declarations can't loosen what this one is checked against.
     fs::write(&path, fs::read_to_string(&path).unwrap().replace("{ displayName: old.displayName }", "{ }")).unwrap();
@@ -268,7 +271,11 @@ fn tables_stay_in_history_and_the_journal_stops_at_the_contract_limit() {
     let start = |journal| pending_from(project.path().to_owned(), journal, both.clone());
     create(start(Journal::read(project.path()).unwrap()), "init", &Renames::new()).unwrap();
 
-    let stats: DatabaseSchema = [("stats".to_owned(), table(Schema::Number))].into();
+    let score = TableSchema {
+        fields: [("score".to_owned(), Field { schema: Schema::Number, optional: false })].into(),
+        indexes: BTreeMap::new(),
+    };
+    let stats: DatabaseSchema = [("stats".to_owned(), score)].into();
     let next = pending_from(project.path().to_owned(), Journal::read(project.path()).unwrap(), stats.clone());
     create(next, "stats", &Renames::new()).unwrap();
     let journal = Journal::read(project.path()).unwrap();

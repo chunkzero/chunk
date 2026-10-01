@@ -16,14 +16,14 @@ use crate::{
 };
 
 #[derive(Default)]
-struct Memory(Mutex<BTreeMap<String, (Vec<u8>, SystemTime)>>);
+pub(crate) struct Memory(Mutex<BTreeMap<String, (Vec<u8>, SystemTime)>>);
 
 impl Memory {
     fn keys(&self) -> Vec<String> {
         self.0.lock().unwrap().keys().cloned().collect()
     }
 
-    fn copy(&self) -> Arc<Self> {
+    pub(crate) fn copy(&self) -> Arc<Self> {
         Arc::new(Self(Mutex::new(self.0.lock().unwrap().clone())))
     }
 }
@@ -63,7 +63,7 @@ impl ObjectStorage for Memory {
 }
 
 /// Uploads only on flush, so tests control every object.
-fn manual(storage: &Arc<Memory>) -> Replication {
+pub(crate) fn manual(storage: &Arc<Memory>) -> Replication {
     manual_on(storage.clone())
 }
 
@@ -71,7 +71,12 @@ fn manual_on(storage: Arc<dyn ObjectStorage>) -> Replication {
     Replication { batch_delay: Duration::from_secs(3600), ..Replication::new(storage) }
 }
 
-fn open(path: &Path, replication: Replication) -> (SqliteStore, Replicator) {
+/// Snapshots after every two segments.
+pub(crate) fn snapshotting(storage: &Arc<Memory>) -> Replication {
+    Replication { snapshot_segments: 2, ..manual(storage) }
+}
+
+pub(crate) fn open(path: &Path, replication: Replication) -> (SqliteStore, Replicator) {
     SqliteStore::open_replicated(path, "local", replication).unwrap()
 }
 
@@ -87,12 +92,12 @@ fn eventually(what: &str, done: impl Fn() -> bool) {
     }
 }
 
-fn count(storage: &Memory, kind: &str) -> usize {
+pub(crate) fn count(storage: &Memory, kind: &str) -> usize {
     storage.keys().iter().filter(|key| key.contains(kind)).count()
 }
 
 /// Every schema object and row except replication bookkeeping.
-fn dump(path: &Path) -> Vec<String> {
+pub(crate) fn dump(path: &Path) -> Vec<String> {
     let connection = Connection::open(path).unwrap();
     let mut lines = Vec::new();
     let mut tables = connection.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY name").unwrap();
@@ -602,6 +607,7 @@ fn a_crash_right_after_a_format_migration_still_forces_a_new_snapshot() {
              ALTER TABLE _chunk_jobs DROP COLUMN updated_at;
              DROP TABLE _chunk_indexes;
              DROP TABLE _chunk_work;
+             DROP TABLE _chunk_applied;
              PRAGMA user_version = 7;",
         )
         .unwrap();
@@ -638,6 +644,7 @@ fn format_7_snapshots_and_segments_restore_and_fork_before_migrating() {
              ALTER TABLE _chunk_jobs DROP COLUMN updated_at;
              DROP TABLE _chunk_indexes;
              DROP TABLE _chunk_work;
+             DROP TABLE _chunk_applied;
              DELETE FROM _chunk_log;
              UPDATE _chunk_metadata SET epoch = 1, log_sequence = 1;
              PRAGMA user_version = 7;",

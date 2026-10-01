@@ -27,6 +27,7 @@ mod commands;
 mod deployments;
 mod index;
 mod jobs;
+mod migrations;
 mod pipeline;
 mod queries;
 mod readers;
@@ -34,7 +35,7 @@ mod readiness;
 mod subscriptions;
 mod watches;
 
-pub(crate) use readers::Evaluated;
+pub(crate) use readers::{Computed, Evaluated};
 
 /// How many deployments the backend holds at once.
 pub const MAX_DEPLOYMENTS: usize = 16;
@@ -108,7 +109,8 @@ impl Actor {
         memory: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
         let (committer, initial) = Committer::new(store, events.clone())?;
-        let crate::commit::Initial { snapshot, deployments, jobs: scheduled, work, retiring } = initial;
+        let crate::commit::Initial { snapshot, deployments, jobs: scheduled, stored, retiring } = initial;
+        let work = readiness::Work::new(stored);
         let mut js = Engine::new()?;
         let mut versions = BTreeMap::new();
         let mut installed = Vec::new();
@@ -117,7 +119,7 @@ impl Actor {
         for deployment in deployments {
             deployment.validate().map_err(Error::Invalid)?;
             let id = DeploymentId::new(&deployment.id)?;
-            if !Self::schema_ready(&deployment, &snapshot)? {
+            if !Self::schema_ready(&deployment, &snapshot, &work)? {
                 unready.insert(id.clone());
             }
             let env = effects.env(&deployment);
@@ -149,7 +151,7 @@ impl Actor {
             installed,
             retired,
             unready,
-            work: readiness::Work::new(work),
+            work,
             deploying: None,
             releasing: None,
             view: Arc::new(View::new(snapshot)),
@@ -231,6 +233,8 @@ impl Actor {
                     self.outstanding -= 1;
                     self.released(result);
                 }
+                Event::BackfillRead { id, batch } => self.backfill_read(id, batch),
+                Event::Computed(computed) => self.computed(*computed),
                 Event::Evaluated(evaluated) => self.evaluated(*evaluated),
                 Event::System { count, revision, snapshot } => self.system_committed(count, revision, snapshot),
                 Event::Failed => {

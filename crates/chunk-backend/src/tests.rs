@@ -104,6 +104,8 @@ struct ControlledStore {
     batch: Option<mpsc::Receiver<()>>,
     /// Holds the first item of pending work; it fails once the sender drops.
     work: Option<mpsc::Receiver<()>>,
+    /// Until set, pending work after its first run does nothing, leaving the commit thread free for writes.
+    pause: Option<(std::sync::Arc<std::sync::atomic::AtomicBool>, usize)>,
     /// The most successful commits one underlying write has persisted.
     largest_write: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -125,8 +127,26 @@ impl ControlledStore {
             batched: false,
             batch: None,
             work: None,
+            pause: None,
             largest_write: std::sync::Arc::default(),
         }
+    }
+
+    /// The outcome of work held back by `pause` or the `work` gate, if it is.
+    fn stalled(&mut self) -> Option<chunk_store::Result<()>> {
+        if let Some((open, runs)) = &mut self.pause {
+            if *runs > 0 && !open.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                return Some(Ok(()));
+            }
+            *runs += 1;
+        }
+        if let Some(gate) = self.work.take()
+            && gate.recv().is_err()
+        {
+            return Some(Err(chunk_store::Error::RolledBack(Box::new(chunk_store::Error::Invalid("stopped")))));
+        }
+        None
     }
 
     fn shared(&mut self, requests: Vec<Request>) -> Vec<chunk_store::Result<Reply>> {
@@ -203,13 +223,31 @@ impl Storage for ControlledStore {
     fn pending_work(&self) -> chunk_store::Result<Vec<chunk_store::PendingWork>> {
         self.inner.pending_work()
     }
-    fn run_work(&mut self, id: u64) -> chunk_store::Result<()> {
-        if let Some(gate) = self.work.take()
-            && gate.recv().is_err()
-        {
-            return Err(chunk_store::Error::RolledBack(Box::new(chunk_store::Error::Invalid("stopped"))));
+    fn run_work(&mut self, id: u64, transform: &mut chunk_store::Transform<'_>) -> chunk_store::Result<()> {
+        if let Some(stalled) = self.stalled() {
+            return stalled;
         }
-        self.inner.run_work(id)
+        self.inner.run_work(id, transform)
+    }
+    fn read_backfill(&mut self, id: u64, rows: usize) -> chunk_store::Result<Option<chunk_store::Backfill>> {
+        if let Some(stalled) = self.stalled() {
+            return stalled.map(|()| None);
+        }
+        self.inner.read_backfill(id, rows)
+    }
+    fn commit_backfill(
+        &mut self,
+        id: u64,
+        batch: &chunk_store::Backfill,
+        outputs: &[serde_json::Value],
+    ) -> chunk_store::Result<()> {
+        self.inner.commit_backfill(id, batch, outputs)
+    }
+    fn migrations(&self) -> chunk_store::Result<Vec<chunk_contract::Migration>> {
+        self.inner.migrations()
+    }
+    fn contracted(&self) -> chunk_store::Result<Vec<chunk_contract::Migration>> {
+        self.inner.contracted()
     }
     fn release_deployment(&mut self, id: &str) -> chunk_store::Result<bool> {
         self.inner.release_deployment(id)
@@ -856,5 +894,6 @@ mod effects;
 mod integration;
 mod jobs;
 mod limits;
+mod migrations;
 mod readiness;
 mod subscriptions;
