@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { action, internalAction, mutation, v } from "../src/index.ts";
+import { action, internalAction, mutation, query, v } from "../src/index.ts";
 
 test("actions expose scoped typed calls, preserving caller and invocation identity", async () => {
   const reference = {
@@ -87,7 +87,7 @@ test("actions forward named HTTP and secret capabilities without adding authorit
   assert.deepEqual(calls, ["token", ["payments", { path: "status", headers: { authorization: "fixture-token" } }]]);
 });
 
-test("actions move players through the platform, and mutations cannot", async () => {
+test("actions move players through the platform, and queries and mutations cannot", async () => {
   const player = "00000000-0000-0000-0000-000000000001";
   const destination = { key: "arena", session_type: "arena/default", machine_profile: "small" };
   const requests = [];
@@ -116,15 +116,17 @@ test("actions move players through the platform, and mutations cannot", async ()
   await assert.rejects(run({ state: "refused", reason: "busy" }));
   assert.deepEqual(requests[0], { kind: "move", player, destination });
 
-  let context;
-  const record = mutation({
-    args: {},
-    returns: v.null(),
-    handler: (ctx) => {
-      context = ctx;
-      return null;
-    },
-  });
-  record.handler({ caller: null, db: {}, scheduler: {} }, {});
-  assert.equal("routing" in context, false);
+  for (const define of [query, mutation]) {
+    let context;
+    const definition = define({
+      args: {},
+      returns: v.null(),
+      handler: (ctx) => {
+        context = ctx;
+        return null;
+      },
+    });
+    definition.handler({ caller: null, db: {}, scheduler: {} }, {});
+    assert.equal("routing" in context, false);
+  }
 });

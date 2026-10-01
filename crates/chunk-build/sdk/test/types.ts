@@ -383,6 +383,26 @@ mutation({
     return null;
   },
 });
+query({
+  args: {},
+  returns: v.null(),
+  handler: (ctx) => {
+    // @ts-expect-error only actions move players
+    void ctx.routing;
+    return null;
+  },
+});
+command("travel", {
+  handler: async (ctx) => {
+    await ctx.routing.enter({ key: "arena", session_type: "arena/default", machine_profile: "small" });
+    // @ts-expect-error commands route only their own player
+    void ctx.routing.move;
+  },
+});
+createHook("player.connect", (ctx) => {
+  // @ts-expect-error only actions move players
+  void ctx.routing;
+});
 
 import { defineApp, defineScope } from "../src/index.ts";
 
