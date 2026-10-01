@@ -4,7 +4,7 @@ use bytes::Bytes;
 use chunk_contract::ControlConnection;
 use chunk_management::v1::{
     AttachRequest, AttachResponse, DeploymentProgress, DeploymentState, DrainSettings, ObjectStore, ReleaseArtifact,
-    ReportStatusRequest,
+    ReportStatusRequest, Restore,
 };
 use chunk_proto::sync::v1::{CallRequest, call_response::Outcome, core_client::CoreClient, error::Code};
 use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
@@ -58,6 +58,8 @@ struct Management {
     epochs: Mutex<Vec<u64>>,
     /// The object storage each desired state grants.
     log_store: Mutex<Option<ObjectStore>>,
+    /// The fork restore each desired state carries.
+    restore: Mutex<Option<Restore>>,
     telemetry: Mutex<telemetry::Reports>,
     /// The drain settings each desired state carries, which management applies unless the environment sets its own.
     drain: Mutex<DrainSettings>,
@@ -137,6 +139,7 @@ impl Management {
             deployment_id: served.map(|(id, _, _)| id.clone()).unwrap_or_default(),
             release: served.map(|(_, release, _)| release.clone()),
             log_store: self.log_store.lock().unwrap().clone(),
+            restore: self.restore.lock().unwrap().clone(),
             stop_previous: served.is_some_and(|(id, _, _)| records.stopping.contains(id)),
             drain: Some(*self.drain.lock().unwrap()),
             ..Default::default()
@@ -391,6 +394,7 @@ impl Harness {
             alarm: Mutex::default(),
             epochs: Mutex::default(),
             log_store: Mutex::default(),
+            restore: Mutex::default(),
             telemetry: Mutex::default(),
             drain: Mutex::new(DrainSettings { max_age_seconds: 3 * 3600, deadline_seconds: 4 * 3600 }),
         });
@@ -453,6 +457,7 @@ impl Harness {
             fresh: false,
             defers_retirement: true,
             replication: None,
+            fork: None,
         }
     }
 

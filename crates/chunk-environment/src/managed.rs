@@ -703,9 +703,10 @@ impl Registration {
     /// before it opens the log, and only then knows the epoch a core attach carries. Attaches again until management
     /// answers, or returns `None` once `stop` is cancelled. Object storage management grants replaces `core`'s
     /// replication, and that attach keeps renewing its credentials while core restores and starts. It also names the
-    /// environment, whose variables deployments read, and grants the secrets core starts with.
+    /// environment, whose variables deployments read, grants the secrets core starts with and, for a fork, names the log
+    /// core forks from.
     /// # Errors
-    /// Reports a desired state for another environment or an invalid log store.
+    /// Reports a desired state for another environment, or an invalid log store or restore.
     pub(crate) async fn attach(
         management: &ManagementConfig,
         core: &mut CoreConfig,
@@ -740,6 +741,14 @@ impl Registration {
         let (log_store, replication) = LogStore::open(desired.log_store.as_ref())?;
         if replication.is_some() {
             core.replication = replication;
+        }
+        if let Some(restore) = &desired.restore {
+            core.fork = Some(log_store::fork_source(restore)?);
+            tracing::info!(
+                source = restore.source_environment_id,
+                snapshot = restore.snapshot_id,
+                "a fork; its first start forks the source's log"
+            );
         }
         core.environment_name = Some(desired.environment_name.clone()).filter(|name| !name.is_empty());
         core.secrets = secrets::decode(&desired);

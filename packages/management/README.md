@@ -129,6 +129,10 @@ environment removes its prefix, with the environment's own credentials, once its
 issuer removes it through `LogStoreIssuer.deleteEnvironment`. Deletion removes current objects only, so leave bucket
 versioning off, or add a lifecycle rule that expires noncurrent versions.
 
+Forks need log storage too. `ListSnapshots` and `ForkEnvironment` list the source's prefix with read-only credentials
+from `LogStoreIssuer.readGrant`, and `Attach` hands a fork's core the same kind for the source's prefix until that core
+first attaches, by which time the fork's own prefix holds a snapshot. Until then, deleting the source keeps its prefix.
+
 | Variable                             | Default                | Meaning                                                                                            |
 | ------------------------------------ | ---------------------- | -------------------------------------------------------------------------------------------------- |
 | `CHUNK_LOG_STORE_BUCKET`             | unset                  | The S3-compatible bucket. Unset turns log storage off.                                             |

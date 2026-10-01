@@ -78,6 +78,32 @@ async fn core_replicates_where_management_grants_and_a_fresh_core_restores_from_
     tokio::time::timeout(Duration::from_secs(60), running).await.unwrap().unwrap().unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_s_first_desired_state_names_the_log_its_core_forks() {
+    let harness = Harness::new().await;
+    let grant = |prefix: &str| ObjectStore {
+        endpoint: "http://127.0.0.1:9".into(),
+        bucket: "logs".into(),
+        prefix: prefix.into(),
+        access_key_id: "key".into(),
+        secret_access_key: "secret".into(),
+        ..ObjectStore::default()
+    };
+    *harness.management.restore.lock().unwrap() = Some(Restore {
+        source: Some(grant("env_source/")),
+        snapshot_id: "3-42".into(),
+        source_environment_id: "env_source".into(),
+    });
+    harness.management.grant(grant("env_test/"));
+    let mut config = harness.core();
+    let stop = CancellationToken::new();
+    let registration = Registration::attach(&harness.management_config(), &mut config, &stop).await.unwrap();
+    assert!(registration.is_some() && config.replication.is_some());
+    let fork = config.fork.expect("a fork source");
+    let snapshot = Some(chunk_store::SnapshotId { epoch: 3, sequence: 42 });
+    assert_eq!((fork.environment.as_str(), fork.snapshot), ("env_source", snapshot));
+}
+
 /// Waits until `log_store` signs with `token`.
 async fn renewed(log_store: &LogStore, token: &str) {
     let credentials = log_store.credentials().unwrap();

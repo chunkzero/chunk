@@ -103,7 +103,9 @@ message AttachResponse {
   repeated SecretValue secrets = 6;
   // Where to replicate the log; unset when replication is off.
   ObjectStore log_store = 7;
-  // Set for forks: when the local log is empty, restore this snapshot first.
+  // Set for forks until their core first attaches: while neither the local
+  // database nor log_store holds the fork's state yet, core creates it from
+  // this restore.
   Restore restore = 8;
   // Set for core: the lease this attach was granted. Constant for the stream.
   uint64 lease = 9;
@@ -149,7 +151,10 @@ message ObjectStore {
 message Restore {
   // The source environment's log, readable only.
   ObjectStore source = 1;
+  // A Snapshot.id of the source; empty restores its latest state.
   string snapshot_id = 2;
+  // The environment that wrote the source's log.
+  string source_environment_id = 3;
 }
 
 message ReportStatusRequest {

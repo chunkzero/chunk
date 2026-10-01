@@ -21,14 +21,19 @@ service ProjectService {
   rpc UpdateEnvironment(UpdateEnvironmentRequest) returns (UpdateEnvironmentResponse);
   // Creates a preview environment from a snapshot of another environment in
   // the same project. The fork deploys the source's active release and
-  // restores the snapshot on first start; the source is untouched. Idempotent
-  // by request_id.
+  // restores the snapshot on first start; the source is untouched, and its
+  // pending and running jobs are not carried over. Fails with
+  // FAILED_PRECONDITION when replication is off, the source is being deleted,
+  // has no active deployment or no snapshot, and with NOT_FOUND when
+  // snapshot_id names none of the source's snapshots. Idempotent by
+  // request_id.
   rpc ForkEnvironment(ForkEnvironmentRequest) returns (ForkEnvironmentResponse);
   // Stops an environment, returns its capacity and removes its routes and
   // domains. Idempotent.
   rpc DeleteEnvironment(DeleteEnvironmentRequest) returns (DeleteEnvironmentResponse);
-  // Lists an environment's snapshots in object storage, newest first. Empty
-  // when replication is off.
+  // Lists the snapshots stored in an environment's log, newest first. Empty
+  // when replication is off. Superseded snapshots are pruned once a newer one
+  // is old enough, so a listed snapshot may disappear.
   rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
 }
 
@@ -77,10 +82,13 @@ enum EnvironmentState {
 
 // A point in an environment's log that it can be restored or forked from.
 message Snapshot {
+  // `{epoch}-{log_sequence}` in decimal.
   string id = 1;
   string environment_id = 2;
   uint64 epoch = 3;
-  uint64 log_revision = 4;
+  // The last log sequence the snapshot contains.
+  uint64 log_sequence = 4;
+  // When the snapshot was stored.
   google.protobuf.Timestamp create_time = 5;
 }
 
@@ -159,7 +167,9 @@ message UpdateEnvironmentResponse {
 message ForkEnvironmentRequest {
   string request_id = 1;
   string source_environment_id = 2;
-  // Empty for the source's latest snapshot.
+  // One of the source's snapshots, restored alone. Empty restores the
+  // source's latest state when the fork first starts: its latest snapshot
+  // and the log after it.
   string snapshot_id = 3;
   // The fork's name, following Environment.name rules.
   string name = 4;

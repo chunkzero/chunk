@@ -15,8 +15,10 @@ import {
 import { callerOf, checkProjectAccess } from "../rpc/caller.ts";
 import { idempotent } from "../rpc/idempotency.ts";
 import { invalid, page, pageOf, required, seqAfter, slug, unique } from "../rpc/validate.ts";
+import { forkHandlers } from "./forks.ts";
 import {
   type EnvironmentRow,
+  hostnameOf,
   loadEnvironment,
   loadProject,
   type ProjectRow,
@@ -26,7 +28,8 @@ import {
 
 const maxDrainSeconds = 7 * 24 * 60 * 60;
 
-export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<typeof ProjectService>> {
+export function projectService(deps: Deps): Partial<ServiceImpl<typeof ProjectService>> {
+  const { sql, keys, edge } = deps;
   return {
     async createProject(request, context) {
       const caller = callerOf(context);
@@ -72,14 +75,13 @@ export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<t
       return idempotent({ sql, keys, caller, method: ProjectService.method.createEnvironment, request }, async (tx) => {
         const project = await loadProject(tx, caller, request.projectId);
         const id = newId("env");
-        const hostname = edge ? `${id.replace("_", "-")}.${edge.domain}` : "";
         const [row] = await unique(
           "an environment with this name already exists in the project",
           () =>
             tx<EnvironmentRow[]>`
             insert into environments (id, project_id, name, state, sleeping_ping, hostname)
             values (${id}, ${project.id}, ${name}, ${EnvironmentState.PENDING}, ${SleepingPingMode.CACHE},
-              ${hostname})
+              ${hostnameOf(id, edge)})
             returning *`,
         );
         await notify(tx, { kind: "environment", environmentId: id });
@@ -143,10 +145,6 @@ export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<t
       return {};
     },
 
-    async listSnapshots(request, context) {
-      // Log replication is not configurable yet, so no environment has snapshots.
-      await loadEnvironment(sql, callerOf(context), request.environmentId);
-      return { snapshots: [], nextPageToken: "" };
-    },
+    ...forkHandlers(deps),
   };
 }

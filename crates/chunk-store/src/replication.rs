@@ -20,16 +20,18 @@
 //! its later segments and continues under the next unused epoch. A writer
 //! checks for the next epoch's claim before and after each upload, on every
 //! flush and every `fence_interval` while idle; once it exists, the writer is
-//! fenced and its commits and flushes fail. A fork rebuilds the same state from
-//! another prefix and starts epoch 1 in its own, empty prefix.
+//! fenced and its commits and flushes fail. A fork rebuilds the state of
+//! another prefix, either its latest or one [`SnapshotId`] alone, and continues
+//! under the next unused epoch of its own prefix, which holds no snapshot yet.
 //!
 //! Once a snapshot is `retention` old, the uploader deletes the snapshots and
 //! segments it supersedes, one at a time between uploads and ownership checks.
 //! Claims stay, so epochs are never reused.
 
 use std::{
-    io,
+    fmt, io,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     thread::JoinHandle,
     time::{Duration, Instant, SystemTime},
@@ -71,6 +73,43 @@ pub trait ObjectStorage: Send + Sync {
     /// # Errors
     /// Reports transport or storage failures.
     fn delete(&self, key: &str) -> io::Result<()>;
+}
+
+/// A snapshot of an environment's replicated log, written `{epoch}-{sequence}` in decimal: the object
+/// `epochs/{epoch}/snapshots/{sequence}.db`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SnapshotId {
+    pub epoch: u64,
+    /// The last log sequence it contains.
+    pub sequence: u64,
+}
+
+impl fmt::Display for SnapshotId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.epoch, self.sequence)
+    }
+}
+
+impl FromStr for SnapshotId {
+    type Err = Error;
+
+    fn from_str(id: &str) -> Result<Self> {
+        let number = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit()).then(|| part.parse().ok()).flatten();
+        match id.split_once('-').map(|(epoch, sequence)| (number(epoch), number(sequence))) {
+            Some((Some(epoch), Some(sequence))) => Ok(Self { epoch, sequence }),
+            _ => Err(Error::Invalid("invalid snapshot ID")),
+        }
+    }
+}
+
+/// Another environment's replicated log, which a fork starts from.
+#[derive(Clone)]
+pub struct ForkSource {
+    pub replication: Replication,
+    /// The environment that wrote the log.
+    pub environment: String,
+    /// Forks this snapshot alone; unset forks the latest snapshot and the segments after it.
+    pub snapshot: Option<SnapshotId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

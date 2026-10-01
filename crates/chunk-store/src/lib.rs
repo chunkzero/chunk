@@ -66,7 +66,10 @@ pub use model::{
     Commit, Document, DocumentKey, Epoch, IndexDefinition, IndexRange, KeyRange, Operation, Outcome, ReadBudget,
     RetryContext, Revision, Write,
 };
-pub use replication::{Listed, ObjectStorage, Replication, ReplicationProgress, Replicator, S3Bucket, S3Credentials};
+pub use replication::{
+    ForkSource, Listed, ObjectStorage, Replication, ReplicationProgress, Replicator, S3Bucket, S3Credentials,
+    SnapshotId,
+};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
 pub use work::{

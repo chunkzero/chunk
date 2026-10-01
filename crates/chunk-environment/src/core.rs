@@ -61,6 +61,9 @@ pub struct CoreConfig {
     pub defers_retirement: bool,
     /// Where the log replicates; unset keeps it local only.
     pub replication: Option<chunk_store::Replication>,
+    /// Where a fork's state comes from while neither the local database nor `replication` holds it yet. Needs
+    /// `replication`.
+    pub fork: Option<chunk_store::ForkSource>,
 }
 
 /// The environment's backend and the control that writes through its store.
@@ -151,6 +154,7 @@ impl Core {
             secrets: config.secrets.clone(),
             state: config.state.join("backend"),
             replication: config.replication.clone(),
+            fork: config.fork.clone(),
         };
         self.backend =
             Some(Running { task: tokio::spawn(chunk_backend::server::run(backend, ready, stop.clone())), stop });

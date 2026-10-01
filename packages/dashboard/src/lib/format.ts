@@ -41,6 +41,7 @@ export const triggerLabels: Record<DeploymentTrigger, string> = {
   [DeploymentTrigger.DEPLOY]: "Deploy",
   [DeploymentTrigger.PROMOTE]: "Promote",
   [DeploymentTrigger.ROLLBACK]: "Rollback",
+  [DeploymentTrigger.FORK]: "Fork",
 };
 
 export const severityLabels: Record<LogSeverity, string> = {

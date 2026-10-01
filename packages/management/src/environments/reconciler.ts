@@ -255,6 +255,12 @@ async function reconcileEnvironment(run: Run, id: string) {
     if (failures.length > 0) throw failures[0];
     // Once no machine is left to write them, and bounded like a provider call so a stalled store holds up no worker.
     if (logStore) {
+      // Forks whose core hasn't attached yet still restore from this log, so it stays until they have or are deleted.
+      const [restoring] = await sql`
+        select 1 from environments
+        where forked_from_environment_id = ${id} and epoch = 0 and state <> ${EnvironmentState.DELETING}
+        limit 1`;
+      if (restoring) return;
       const bound = AbortSignal.any([AbortSignal.timeout(options.timeouts.callMs), ...(signal ? [signal] : [])]);
       await untilAborted(bound, logStore.deleteEnvironment(id, bound));
     }

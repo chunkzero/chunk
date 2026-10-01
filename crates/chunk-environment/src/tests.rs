@@ -60,6 +60,7 @@ fn core_config(directory: &Path) -> CoreConfig {
         fresh: false,
         defers_retirement: false,
         replication: None,
+        fork: None,
     }
 }
 

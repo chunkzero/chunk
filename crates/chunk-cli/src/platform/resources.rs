@@ -9,9 +9,9 @@ use std::{
 use chunk_management::{
     Client, Code,
     v1::{
-        CreateEnvironmentRequest, CreateProjectRequest, DeleteEnvironmentRequest, Environment, GetEnvironmentRequest,
-        ListAppsRequest, ListDeploymentsRequest, ListEnvironmentsRequest, ListProjectsRequest, LogEntry,
-        ReadLogsRequest,
+        CreateEnvironmentRequest, CreateProjectRequest, DeleteEnvironmentRequest, Environment, ForkEnvironmentRequest,
+        GetEnvironmentRequest, ListAppsRequest, ListDeploymentsRequest, ListEnvironmentsRequest, ListProjectsRequest,
+        ListSnapshotsRequest, LogEntry, ReadLogsRequest,
     },
 };
 use clap::{Args, Subcommand};
@@ -52,6 +52,25 @@ enum EnvironmentAction {
         /// Delete without asking, as a terminal-less run must.
         #[arg(long, short)]
         yes: bool,
+    },
+    /// Create one from a snapshot of another, running the source's active release. The source is untouched.
+    Fork {
+        /// The fork's name, following the same rules as create.
+        name: String,
+        /// The source environment's name or ID.
+        #[arg(long)]
+        from: String,
+        /// One of the source's snapshots, as `snapshots` lists them; defaults to the source's latest state.
+        #[arg(long)]
+        snapshot: Option<String>,
+        /// Copy the source's secrets; otherwise the fork starts with none.
+        #[arg(long)]
+        copy_secrets: bool,
+    },
+    /// List the snapshots stored in an environment's log, newest first.
+    Snapshots {
+        /// The environment's name or ID.
+        environment: String,
     },
 }
 
@@ -130,6 +149,35 @@ pub(super) async fn environments(options: Environments) -> io::Result<()> {
         Some(EnvironmentAction::Delete { environment, wait, yes }) => {
             let environment = session.environment_in(&project, &environment).await?;
             return delete_environment(client, &environment, wait, yes).await;
+        }
+        Some(EnvironmentAction::Fork { name, from, snapshot, copy_secrets }) => {
+            let source = session.environment_in(&project, &from).await?;
+            let request = ForkEnvironmentRequest {
+                request_id: request_id(),
+                source_environment_id: source.id.clone(),
+                snapshot_id: snapshot.unwrap_or_default(),
+                name,
+                copy_secrets,
+            };
+            let environment =
+                client.fork_environment(&request).await.map_err(api_error)?.environment.unwrap_or_default();
+            return cliclack::log::success(format!(
+                "Forked environment {} ({}) from {}; it starts with the source's active release",
+                environment.name, environment.id, source.name
+            ));
+        }
+        Some(EnvironmentAction::Snapshots { environment }) => {
+            let environment = session.environment_in(&project, &environment).await?;
+            let environment_id = &environment.id;
+            let snapshots = all(|page_token| async move {
+                let request = ListSnapshotsRequest { environment_id: environment_id.clone(), page_token, page_size: 0 };
+                client.list_snapshots(&request).await.map(|page| (page.snapshots, page.next_page_token))
+            })
+            .await?;
+            return table(
+                ["ID", "CREATED"],
+                snapshots.into_iter().map(|snapshot| [snapshot.id, time(snapshot.create_time)]),
+            );
         }
         None => {}
     }

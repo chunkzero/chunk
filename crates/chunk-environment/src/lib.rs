@@ -106,6 +106,7 @@ impl Config {
             fresh: false,
             defers_retirement: management.is_some(),
             replication: chunk_store::Replication::from_env().map_err(io::Error::other)?,
+            fork: None,
         };
         let gateway = services.contains(Service::Gateway).then_some(gateway);
         Ok(Self::Core { core: Box::new(core), gateway, management })

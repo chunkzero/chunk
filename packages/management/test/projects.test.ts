@@ -72,9 +72,9 @@ describe.skipIf(!databaseUrl)("ProjectService", () => {
     expect(await codeOf(projects.getEnvironment({ environmentId: production?.id ?? "" }))).toBe(Code.NotFound);
   });
 
-  test("forks are not implemented yet", async () => {
+  test("forks need log replication", async () => {
     expect(
       await codeOf(h.client(ProjectService).forkEnvironment({ requestId: crypto.randomUUID(), name: "fork" })),
-    ).toBe(Code.Unimplemented);
+    ).toBe(Code.FailedPrecondition);
   });
 });

@@ -25,6 +25,9 @@ pub struct Config {
     pub state: PathBuf,
     /// Where the log replicates; unset keeps it local only.
     pub replication: Option<chunk_store::Replication>,
+    /// Where a fork's state comes from while neither the local database nor `replication` holds it yet. Needs
+    /// `replication`.
+    pub fork: Option<chunk_store::ForkSource>,
 }
 
 /// Starts the backend, publishes readiness, and runs until `stop` or until another store fences this one, then stops
@@ -41,14 +44,18 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
         if !database.exists() {
             chunk_service::private_file(&database)?;
         }
-        let (store, replicator) = match config.replication {
-            Some(replication) => {
-                let (store, replicator) =
-                    chunk_store::SqliteStore::open_replicated(database, &config.environment, replication)
-                        .map_err(io::Error::other)?;
+        let environment = &config.environment;
+        let (store, replicator) = match (config.replication, &config.fork) {
+            (Some(replication), fork) => {
+                let (store, replicator) = match fork {
+                    Some(fork) => chunk_store::SqliteStore::open_forked(database, environment, replication, fork),
+                    None => chunk_store::SqliteStore::open_replicated(database, environment, replication),
+                }
+                .map_err(io::Error::other)?;
                 (store, Some(replicator))
             }
-            None => (chunk_store::SqliteStore::open(database, &config.environment).map_err(io::Error::other)?, None),
+            (None, Some(_)) => return Err(io::Error::other("a fork needs log replication")),
+            (None, None) => (chunk_store::SqliteStore::open(database, environment).map_err(io::Error::other)?, None),
         };
         let effects = crate::ActionEffects::new(config.environment.clone()).map_err(io::Error::other)?;
         let effects = effects.with_vars(config.vars).with_secrets(config.secrets);

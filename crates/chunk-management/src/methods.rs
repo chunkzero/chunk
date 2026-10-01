@@ -53,6 +53,10 @@ unary! {
     /// Starts deleting an environment, which finishes in the background; `get_environment` is not found once it has.
     delete_environment:
         "ProjectService" / "DeleteEnvironment" (DeleteEnvironmentRequest) -> DeleteEnvironmentResponse;
+    /// Creates an environment from a snapshot of another, deploying the source's active release to it.
+    fork_environment: "ProjectService" / "ForkEnvironment" (ForkEnvironmentRequest) -> ForkEnvironmentResponse;
+    /// Lists the snapshots stored in an environment's log, newest first.
+    list_snapshots: "ProjectService" / "ListSnapshots" (ListSnapshotsRequest) -> ListSnapshotsResponse;
 
     upload_release: "DeploymentService" / "UploadRelease" (UploadReleaseRequest) -> UploadReleaseResponse;
     complete_release_upload:

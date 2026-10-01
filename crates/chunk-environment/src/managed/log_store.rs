@@ -2,7 +2,7 @@
 
 use super::{ATTACH_IDLE, Interrupted, REATTACH, REQUEST_TIMEOUT, check, deadline};
 use chunk_management::{Client, Stream, v1};
-use chunk_store::{Replication, S3Bucket, S3Credentials};
+use chunk_store::{ForkSource, Replication, S3Bucket, S3Credentials};
 use std::{
     io,
     sync::{
@@ -152,6 +152,20 @@ impl Drop for Renewal {
     fn drop(&mut self) {
         self.stop.cancel();
     }
+}
+
+/// The log a fork's core starts from, as management's `restore` grants it to read.
+/// # Errors
+/// Rejects a restore without a source, an invalid grant or snapshot ID.
+pub(crate) fn fork_source(restore: &v1::Restore) -> io::Result<ForkSource> {
+    let grant = restore.source.as_ref().ok_or_else(|| io::Error::other("the restore names no source log"))?;
+    let replication = Replication::s3(&bucket(grant), credentials(grant)).map_err(io::Error::other)?;
+    let snapshot = Some(restore.snapshot_id.as_str()).filter(|id| !id.is_empty()).map(str::parse).transpose();
+    Ok(ForkSource {
+        replication,
+        environment: restore.source_environment_id.clone(),
+        snapshot: snapshot.map_err(io::Error::other)?,
+    })
 }
 
 fn bucket(grant: &v1::ObjectStore) -> S3Bucket {

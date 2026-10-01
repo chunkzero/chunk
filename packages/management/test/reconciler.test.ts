@@ -1455,7 +1455,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     env.close();
   });
 
-  test("deleting an environment revokes its token and removes its machines, then its log objects", async () => {
+  test("deleting an environment revokes its token and removes its machines, then its log objects once no fork restores from them", async () => {
     const env = await running();
     env.close();
     await h.client(ProjectService).deleteEnvironment({ environmentId: env.environmentId });
@@ -1465,6 +1465,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     let unavailable = true;
     const logStore = {
       grant: () => Promise.reject(new Error("unused")),
+      readGrant: () => Promise.reject(new Error("unused")),
       async deleteEnvironment(environmentId: string) {
         expect(machines.has(env.coreName)).toBe(false);
         if (unavailable) throw new Error("log store unavailable");
@@ -1475,6 +1476,13 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     expect(machines.has(env.coreName)).toBe(false);
     expect(await env.state()).toBe(EnvironmentState.DELETING);
     unavailable = false;
+    await h.sql`
+      insert into environments (id, project_id, name, state, sleeping_ping, forked_from_environment_id)
+      select 'env_fork', project_id, 'fork', ${EnvironmentState.PENDING}, 1, id from environments
+      where id = ${env.environmentId}`;
+    await reconcile({ ...h.deps, logStore }, options, epoch);
+    expect(deleted).toEqual([]);
+    await h.sql`update environments set epoch = 1 where id = 'env_fork'`;
     await reconcile({ ...h.deps, logStore }, options, epoch);
     expect(deleted).toContain(env.environmentId);
     expect(await codeOf(env.state())).toBe(Code.NotFound);
