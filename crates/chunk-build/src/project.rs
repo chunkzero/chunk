@@ -20,6 +20,7 @@ pub(crate) struct Inventory {
     pub scopes: BTreeMap<String, DomainScope>,
     pub modules: Vec<authoring::Module>,
     pub local: Option<LocalConfig>,
+    pub env: chunk_contract::EnvManifest,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +69,24 @@ pub struct LocalConfig {
 #[serde(deny_unknown_fields)]
 struct ProjectManifest {
     local: Option<LocalConfig>,
+    #[serde(default)]
+    vars: BTreeMap<String, String>,
+    #[serde(default)]
+    env: BTreeMap<String, EnvironmentSection>,
+    #[serde(default)]
+    secrets: SecretsSection,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvironmentSection {
+    vars: BTreeMap<String, String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretsSection {
+    required: BTreeSet<String>,
 }
 
 #[derive(Deserialize)]
@@ -117,6 +136,12 @@ pub(crate) fn inspect_inventory(root: &Path) -> io::Result<Inventory> {
     }) {
         return Err(invalid(&app_manifest_path(root, app), "machine_profile requires profiles in chunk.toml [local]"));
     }
+    inventory.env = chunk_contract::EnvManifest {
+        vars: manifest.vars,
+        environments: manifest.env.into_iter().map(|(name, section)| (name, section.vars)).collect(),
+        secrets: manifest.secrets.required,
+    };
+    inventory.env.validate().map_err(|error| invalid(&manifest_path, error))?;
     inventory.local = manifest.local;
     Ok(inventory)
 }

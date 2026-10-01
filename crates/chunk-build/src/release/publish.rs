@@ -107,6 +107,9 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
     } else if !project.modules.is_empty() {
         return Err(io::Error::other("backend is missing the project's domain manifest; recompile the backend"));
     }
+    if backend.contracts.env != project.env {
+        return Err(io::Error::other("compiled variables no longer match chunk.toml; recompile the backend"));
+    }
     insert(&mut files, "release.json".into(), serde_json::to_vec(&metadata).map_err(io::Error::other)?)?;
     let id = publication::digest(files.iter().map(|(name, bytes)| (name.as_str(), bytes.as_slice())));
     backend.id.clone_from(&id);

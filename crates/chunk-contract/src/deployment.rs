@@ -66,6 +66,8 @@ pub struct Contracts {
     pub session_configurations: Option<crate::SessionConfigurations>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destinations: Option<crate::DestinationManifest>,
+    #[serde(default, skip_serializing_if = "crate::EnvManifest::is_empty")]
+    pub env: crate::EnvManifest,
 }
 
 impl Deployment {
@@ -86,6 +88,7 @@ impl Deployment {
         }
         crate::validate(&self.tables)?;
         let contracts = &self.contracts;
+        contracts.env.validate().map_err(|_| "invalid variables or secret names")?;
         if let Some(methods) = &contracts.session_methods {
             methods.validate()?;
         }

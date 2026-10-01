@@ -183,3 +183,20 @@ fn tagged_unions_enums_and_api_null_normalization_share_one_schema() {
     value["result"] = json!("allow");
     assert!(schema.accepts(&value));
 }
+
+#[test]
+fn vars_resolve_by_environment_name() {
+    let manifest = crate::EnvManifest {
+        vars: [("MOTD".into(), "hello".into()), ("REGION".into(), "na".into())].into(),
+        environments: [("prod".into(), [("MOTD".into(), "welcome".into())].into())].into(),
+        secrets: ["API_KEY".into()].into(),
+    };
+    assert!(manifest.validate().is_ok());
+    let resolved = |environment| manifest.resolve(environment).into_iter().collect::<Vec<_>>();
+    let top = vec![("MOTD".to_owned(), "hello".to_owned()), ("REGION".to_owned(), "na".to_owned())];
+    assert_eq!(resolved(None), top);
+    assert_eq!(resolved(Some("staging")), top);
+    assert_eq!(resolved(Some("prod")), [("MOTD".to_owned(), "welcome".to_owned()), top[1].clone()]);
+    let shadowed = crate::EnvManifest { secrets: ["REGION".into()].into(), ..manifest };
+    assert!(shadowed.validate().is_err());
+}
