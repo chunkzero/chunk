@@ -56,7 +56,12 @@ pub(crate) fn evaluate(
         .map_err(Error::from)
         .and_then(|mut execution| {
             for log in &execution.logs {
-                tracing::info!(target: "chunk_backend::console", deployment = call.deployment.as_str(), function = call.function, level = log.level, message = log.message);
+                console!(
+                    log.level.as_str(),
+                    deployment = call.deployment.as_str(),
+                    function = call.function,
+                    message = log.message
+                );
             }
             let mut value = serde_json::from_str(&execution.value)?;
             if let Some(function) = function {

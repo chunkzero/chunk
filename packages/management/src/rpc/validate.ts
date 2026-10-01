@@ -1,10 +1,36 @@
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
-import { Code, ConnectError } from "@connectrpc/connect";
+import { Code, ConnectError, type Interceptor } from "@connectrpc/connect";
 
 import { isUniqueViolation } from "../db.ts";
 
 export function invalid(message: string): ConnectError {
   return new ConnectError(message, Code.InvalidArgument);
+}
+
+/** Postgres text and jsonb cannot hold NUL, so a request carrying one anywhere is refused before any query sees it. */
+export const refuseNul: Interceptor = (next) => (request) => {
+  if (!request.stream) {
+    checkNul(request.message);
+    return next(request);
+  }
+  return next({ ...request, message: checkedNul(request.message) });
+};
+
+async function* checkedNul<T>(messages: AsyncIterable<T>): AsyncIterable<T> {
+  for await (const message of messages) {
+    checkNul(message);
+    yield message;
+  }
+}
+
+function checkNul(message: unknown): void {
+  if (holdsNul(message)) throw invalid("strings must not contain NUL (U+0000)");
+}
+
+function holdsNul(value: unknown): boolean {
+  if (typeof value === "string") return value.includes("\0");
+  if (typeof value !== "object" || value === null || value instanceof Uint8Array) return false;
+  return Object.entries(value).some(([key, item]) => key.includes("\0") || holdsNul(item));
 }
 
 export function notFound(what: string): ConnectError {

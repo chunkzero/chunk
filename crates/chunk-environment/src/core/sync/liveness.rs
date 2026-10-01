@@ -54,6 +54,13 @@ impl Liveness {
         lock(&self.0).entry(id.to_owned()).or_default().released = true;
     }
 
+    /// The connections unreleased gateways last reported on their live streams.
+    pub(crate) fn connections(&self) -> u64 {
+        let gateways = lock(&self.0);
+        let heard = gateways.values().filter(|gateway| !gateway.released).filter_map(|gateway| gateway.heard);
+        heard.map(|(connections, _)| u64::from(connections)).sum()
+    }
+
     /// Whether a gateway may hold connections: its latest report counts some or is stale, or none came since its latest
     /// stream opened, including when no stream is live.
     pub(crate) fn active(&self) -> bool {

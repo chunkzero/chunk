@@ -316,6 +316,11 @@ impl Core {
         self.gateways.liveness.active()
     }
 
+    /// The player connections gateways last reported.
+    pub(crate) fn gateway_connections(&self) -> u64 {
+        self.gateways.liveness.connections()
+    }
+
     /// This machine's configured address on the environment's private network.
     pub(crate) fn private_address(&self) -> Option<IpAddr> {
         self.private_address
