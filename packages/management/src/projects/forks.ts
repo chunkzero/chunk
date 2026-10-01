@@ -1,6 +1,7 @@
 import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
 
+import { untilAborted } from "../abort.ts";
 import { notify } from "../changes.ts";
 import { newId } from "../crypto.ts";
 import type { Deps } from "../deps.ts";
@@ -111,17 +112,18 @@ export function forkHandlers({
 }
 
 /**
- * The snapshots stored in the environment's log, newest first, listed until the caller goes away or `listTimeoutMs`
- * passes.
+ * The snapshots stored in the environment's log, newest first. Issuing the read grant and listing give up once the
+ * caller goes away or `listTimeoutMs` passes.
  */
 async function storedSnapshots(
   logStore: LogStoreIssuer,
   environmentId: string,
   cancelled: AbortSignal,
 ): Promise<StoredSnapshot[]> {
+  const signal = AbortSignal.any([cancelled, AbortSignal.timeout(listTimeoutMs)]);
   try {
-    const grant = await logStore.readGrant(environmentId);
-    return await listSnapshots(grant, AbortSignal.any([cancelled, AbortSignal.timeout(listTimeoutMs)]));
+    const grant = await untilAborted(signal, logStore.readGrant(environmentId));
+    return await listSnapshots(grant, signal);
   } catch (error) {
     if (cancelled.aborted) throw new ConnectError("the caller went away", Code.Canceled);
     console.error("listing snapshots failed:", error);

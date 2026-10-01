@@ -1,3 +1,4 @@
+import { untilAborted } from "../abort.ts";
 import { issueEnvironmentToken } from "../auth/tokens.ts";
 import { notify } from "../changes.ts";
 import { advisoryLock, type Db, type Sql } from "../db.ts";
@@ -432,19 +433,6 @@ function capacityKey(request: Pick<CapacityRow, "environment_id" | "request_id">
 
 function teardownKey(request: Pick<CapacityRow, "environment_id" | "request_id">): string {
   return `teardown/${request.environment_id}/${request.request_id}`;
-}
-
-/** Settles like `work`, or rejects once `signal` aborts, whether or not `work` stops then. */
-async function untilAborted<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
-  const aborted = Promise.withResolvers<never>();
-  const abort = () => aborted.reject(signal.reason);
-  if (signal.aborted) abort();
-  signal.addEventListener("abort", abort, { once: true });
-  try {
-    return await Promise.race([work, aborted.promise]);
-  } finally {
-    signal.removeEventListener("abort", abort);
-  }
 }
 
 /**
