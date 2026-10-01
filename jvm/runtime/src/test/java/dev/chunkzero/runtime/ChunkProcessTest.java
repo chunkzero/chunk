@@ -170,6 +170,28 @@ class ChunkProcessTest {
     }
 
     @Test
+    void closingFailsMovesStillRetrying() throws Exception {
+        var core = new FakeCore();
+        var server = core.start();
+        core.lostMoves = Integer.MAX_VALUE;
+        try {
+            CompletableFuture<MoveResult> moved;
+            try (var process = new ChunkProcess(environment(server.getPort()))) {
+                moved =
+                        process.move(
+                                        "delivery",
+                                        Position.getDefaultInstance(),
+                                        new Destination("arena", "app/arena", "local"))
+                                .toCompletableFuture();
+                core.call("chunk:move");
+            }
+            assertThrows(ExecutionException.class, () -> moved.get(5, TimeUnit.SECONDS));
+        } finally {
+            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void stopsForGoodOnceCoreRejectsItsCredential() throws Exception {
         var core = new FakeCore();
         var server = core.start();

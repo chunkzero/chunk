@@ -26,7 +26,9 @@ import org.jetbrains.annotations.Nullable;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -42,6 +44,7 @@ public final class SessionBackend implements AutoCloseable {
     private final String deployment;
     private final CoreGrpc.CoreStub core;
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+    private final Set<CompletableFuture<JvmMoveResult>> moves = ConcurrentHashMap.newKeySet();
 
     SessionBackend(ManagedChannel channel, String credential, String deployment) {
         this.channel = channel;
@@ -80,6 +83,8 @@ public final class SessionBackend implements AutoCloseable {
                         .setMethod("chunk:move")
                         .setArguments(move.toByteString())
                         .build();
+        moves.add(result);
+        result.whenComplete((ignored, error) -> moves.remove(result));
         attempt(request, 0, result);
         return result;
     }
@@ -161,6 +166,8 @@ public final class SessionBackend implements AutoCloseable {
             Thread.currentThread().interrupt();
         } finally {
             scheduler.shutdownNow();
+            var closed = new IllegalStateException("The runtime closed before the move finished");
+            moves.forEach(move -> move.completeExceptionally(closed));
         }
     }
 
