@@ -242,6 +242,16 @@ class BackendSessionTest {
     }
 
     @Test
+    void closingWhileALostActionRepeatsLeavesItsOutcomeUnknown() throws Exception {
+        var pending =
+                session.perform(new ActionRef<Void, Long>("shared/lost", NULL, INTEGER), null);
+        assertTrue(fixture.lost.await(2, TimeUnit.SECONDS));
+        session.close();
+        var error = assertThrows(ExecutionException.class, () -> pending.get(2, TimeUnit.SECONDS));
+        assertInstanceOf(OutcomeUnknownException.class, error.getCause());
+    }
+
+    @Test
     void anActionCorePreparesNoOperationForNeverRuns() throws Exception {
         fixture.prepareError = Error.Code.CODE_DENIED;
         var error =
@@ -802,6 +812,7 @@ class BackendSessionTest {
         final ConcurrentHashMap<String, CallResponse> saved = new ConcurrentHashMap<>();
         final CopyOnWriteArrayList<CallRequest> calls = new CopyOnWriteArrayList<>();
         final CountDownLatch hanging = new CountDownLatch(1);
+        final CountDownLatch lost = new CountDownLatch(1);
         final CountDownLatch cancelled = new CountDownLatch(1);
         final LinkedBlockingQueue<StreamObserver<CallResponse>> partial =
                 new LinkedBlockingQueue<>();
@@ -831,6 +842,10 @@ class BackendSessionTest {
                 case "shared/partial" -> {
                     response.onNext(result("3"));
                     partial.add(response);
+                }
+                case "shared/lost" -> {
+                    lost.countDown();
+                    response.onError(Status.UNAVAILABLE.asRuntimeException());
                 }
                 case "shared/hang" -> {
                     ((ServerCallStreamObserver<CallResponse>) response)

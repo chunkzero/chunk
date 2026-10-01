@@ -16,6 +16,7 @@ import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
@@ -31,6 +32,11 @@ final class ActionCall<R> {
     /** Waits before each repeat; later repeats wait as long as the last. */
     private static final long[] RETRY_MILLIS = {100, 250, 500, 1000};
 
+    // The call's stages, which only move forward, so close never races the first send.
+    private static final int PREPARING = 0;
+    private static final int CALLING = 1;
+    private static final int CLOSED = 2;
+
     final CompletableFuture<R> result = new CompletableFuture<>();
     private final BackendSession session;
     private final Transport.Invocation invocation;
@@ -42,7 +48,7 @@ final class ActionCall<R> {
     /** Whether an earlier attempt may have reached core without the client learning its outcome. */
     private volatile boolean maybeSent;
 
-    private volatile boolean calling;
+    private final AtomicInteger stage = new AtomicInteger(PREPARING);
     private int retries;
 
     ActionCall(BackendSession session, Transport.Invocation invocation, JsonType<R> resultType) {
@@ -56,14 +62,12 @@ final class ActionCall<R> {
         attempt(observer -> session.transport.prepare(remaining(), observer), this::prepared);
     }
 
-    /**
-     * Ends the call as its session closes: unknown once it may have reached core, else cancelled.
-     */
+    /** Ends the call as its session closes: unknown once it was sent, else cancelled. */
     void close() {
-        if (maybeSent || calling)
+        if (stage.compareAndExchange(PREPARING, CLOSED) == PREPARING) result.cancel(false);
+        else
             result.completeExceptionally(
                     new OutcomeUnknownException("The session closed during the action", null));
-        else result.cancel(false);
     }
 
     private void prepared(CallResponse response, Throwable error) {
@@ -86,7 +90,7 @@ final class ActionCall<R> {
     }
 
     private void call() {
-        calling = true;
+        if (stage.compareAndExchange(PREPARING, CALLING) == CLOSED) return;
         attempt(
                 observer ->
                         session.transport.call(
@@ -95,7 +99,6 @@ final class ActionCall<R> {
     }
 
     private void called(CallResponse response, Throwable error) {
-        calling = false;
         if (error != null) {
             // Any status but UNAUTHENTICATED leaves open whether core handled the call.
             if (Status.fromThrowable(error).getCode() != Status.Code.UNAUTHENTICATED)
