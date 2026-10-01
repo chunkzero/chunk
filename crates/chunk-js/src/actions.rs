@@ -31,6 +31,16 @@ pub trait ActionHost: 'static {
         Box::pin(async { Err("HTTP effects unavailable".into()) })
     }
 
+    /// The names of the secrets the invocation may read through `ctx.env`.
+    fn secret_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// The value of secret `name`, copied into the isolate only when the action reads it.
+    fn secret(&self, _name: &str) -> Option<String> {
+        None
+    }
+
     fn platform(&self, _sequence: u32, _request: Json) -> Pin<Box<dyn Future<Output = Result<String, String>>>> {
         Box::pin(async { Err("Platform effects unavailable".into()) })
     }
@@ -44,7 +54,7 @@ pub struct ActionInvocation {
     pub timestamp: i64,
     pub seed: u64,
     pub deadline: Instant,
-    /// The JSON object `ctx.env` reads, with string values.
+    /// The JSON object of variables `ctx.env` reads, with string values. Secrets come from the host on demand.
     pub env: Json,
 }
 
@@ -151,7 +161,24 @@ fn op_chunk_env(state: &mut OpState) -> String {
     state.borrow::<Env>().0.as_str().to_owned()
 }
 
-deno_core::extension!(chunk_actions, ops = [op_chunk_action, op_chunk_action_id, op_chunk_env]);
+#[op2]
+#[string]
+fn op_chunk_secret_names(state: &mut OpState) -> String {
+    let names =
+        state.borrow::<Option<ActionCapabilities>>().as_ref().map(|capabilities| capabilities.host.secret_names());
+    serde_json::to_string(&names.unwrap_or_default()).expect("string list")
+}
+
+#[op2]
+#[string]
+fn op_chunk_secret(state: &mut OpState, #[string] name: &str) -> Option<String> {
+    state.borrow::<Option<ActionCapabilities>>().as_ref().and_then(|capabilities| capabilities.host.secret(name))
+}
+
+deno_core::extension!(
+    chunk_actions,
+    ops = [op_chunk_action, op_chunk_action_id, op_chunk_env, op_chunk_secret_names, op_chunk_secret]
+);
 
 #[cfg(test)]
 mod tests;

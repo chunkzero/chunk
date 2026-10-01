@@ -33,7 +33,7 @@ impl Actor {
         {
             return Err(Error::Busy);
         }
-        let env = self.actions.effects.env(deployment, None);
+        let env = self.actions.effects.env(deployment);
         self.js.register_with_env(id.clone(), deployment.source.clone(), Limits::default(), env.clone())?;
         let source = super::readers::Source { code: deployment.source.clone(), limits: Limits::default(), env };
         self.sources.insert(id.clone(), Arc::new(source));

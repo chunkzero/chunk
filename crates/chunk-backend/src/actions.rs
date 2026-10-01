@@ -106,6 +106,8 @@ pub(crate) struct Host {
     pub effects: Arc<crate::effects::ScopedEffects>,
     /// Set for an action, whose platform effects are moves; a command's go to its runner, and a hook has none.
     pub moves: Option<crate::moves::Slot>,
+    /// The secrets the invocation reads through `ctx.env`, fixed when it started; none for a hook.
+    pub secrets: Arc<crate::Secrets>,
 }
 
 struct CancelEffect(Cancellation);
@@ -116,6 +118,14 @@ impl Drop for CancelEffect {
 }
 
 impl chunk_js::ActionHost for Host {
+    fn secret_names(&self) -> Vec<String> {
+        self.secrets.names().map(str::to_owned).collect()
+    }
+
+    fn secret(&self, name: &str) -> Option<String> {
+        self.secrets.get(name).map(str::to_owned)
+    }
+
     fn platform(
         &self,
         sequence: u32,

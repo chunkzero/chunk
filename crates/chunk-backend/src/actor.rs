@@ -106,7 +106,7 @@ impl Actor {
             deployment.validate().map_err(Error::Invalid)?;
             Self::schema_ready(&deployment, snapshot.schema())?;
             let id = DeploymentId::new(&deployment.id)?;
-            let env = effects.env(&deployment, None);
+            let env = effects.env(&deployment);
             js.register_with_env(id.clone(), deployment.source.clone(), Limits::default(), env.clone())?;
             let source = readers::Source { code: deployment.source.clone(), limits: Limits::default(), env };
             sources.insert(id.clone(), Arc::new(source));

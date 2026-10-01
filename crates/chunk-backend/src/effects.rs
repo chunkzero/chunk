@@ -104,12 +104,9 @@ impl ActionEffects {
         self.secrets.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
-    /// `deployment`'s variables in this environment, with `secrets` over them, as the JSON object `ctx.env` reads.
-    pub(crate) fn env(&self, deployment: &Deployment, secrets: Option<&Secrets>) -> Json {
-        let mut env = deployment.contracts.env.resolve(self.vars.as_deref());
-        if let Some(secrets) = secrets {
-            env.extend(secrets.0.iter().map(|(name, value)| (name.clone(), value.clone())));
-        }
-        serde_json::to_value(env).expect("string map").into()
+    /// `deployment`'s variables in this environment, as the JSON object `ctx.env` reads. Actions read secrets over
+    /// them on demand.
+    pub(crate) fn env(&self, deployment: &Deployment) -> Json {
+        serde_json::to_value(deployment.contracts.env.resolve(self.vars.as_deref())).expect("string map").into()
     }
 }

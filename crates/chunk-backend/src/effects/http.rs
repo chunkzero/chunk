@@ -19,6 +19,8 @@ use crate::{Error, Result};
 const REQUEST_BYTES: usize = 64 * 1024;
 const RESPONSE_BYTES: usize = 128 * 1024;
 const HEADER_BYTES: usize = 8 * 1024;
+const RESPONSE_HEADERS: usize = 64;
+const RESPONSE_HEADER_BYTES: usize = 32 * 1024;
 const URL_BYTES: usize = 8 * 1024;
 const REDIRECTS: usize = 10;
 /// Bounds one fetch, redirects included. The action deadline also applies.
@@ -207,7 +209,7 @@ impl Fetcher {
         let mut header_bytes = 0;
         for (key, value) in response.headers() {
             header_bytes += key.as_str().len() + value.as_bytes().len();
-            if header_bytes > HEADER_BYTES || headers.len() >= 32 {
+            if header_bytes > RESPONSE_HEADER_BYTES || headers.len() >= RESPONSE_HEADERS {
                 return Err(Failure::Unknown("HTTP response header limit after dispatch"));
             }
             let value = value.to_str().map_err(|_| Failure::Unknown("HTTP response headers are not text"))?;

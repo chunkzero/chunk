@@ -129,22 +129,38 @@ impl Actions {
         }
     }
 
+    /// The effects an invocation started now reaches, with the secrets it keeps until it ends. Hooks read variables
+    /// only, and can't fetch.
+    fn host(
+        &self,
+        id: &ActionId,
+        invocation: &str,
+        cancellation: &Cancellation,
+        deadline: std::time::Instant,
+        purpose: &crate::commands::Purpose,
+        hook: bool,
+    ) -> Host {
+        Host {
+            effects: Arc::new(crate::effects::ScopedEffects {
+                invocation: invocation.to_owned(),
+                fetcher: (!hook).then(|| self.effects.fetcher.clone()),
+                slots: self.external_slots.clone(),
+                cancellation: cancellation.clone(),
+                deadline,
+            }),
+            id: id.clone(),
+            events: self.events.clone(),
+            slots: self.slots.clone(),
+            cancellation: cancellation.clone(),
+            moves: matches!(purpose, crate::commands::Purpose::Function).then(|| self.effects.moves.clone()),
+            secrets: if hook { Arc::default() } else { self.effects.secrets() },
+        }
+    }
+
     pub fn refuse_waiting(&mut self, error: &Error) {
         for waiting in self.waiting.drain(..) {
             waiting.reply.finish(Err(error.clone()));
         }
-    }
-
-    /// What an invocation of `deployment` starting now reads as `ctx.env`, the secrets it keeps until it ends, and how
-    /// it fetches. Hooks read the deployment's variables only, and can't fetch.
-    fn environment(
-        &self,
-        deployment: &Deployment,
-        hook: bool,
-    ) -> (Json, Arc<crate::Secrets>, Option<Arc<crate::effects::Fetcher>>) {
-        let secrets = self.effects.secrets();
-        let env = self.effects.env(deployment, (!hook).then_some(secrets.as_ref()));
-        (env, secrets, (!hook).then(|| self.effects.fetcher.clone()))
     }
 
     /// The `:job:` suffix keeps job identities outside the client-allocated incarnation, so `admit`
@@ -407,21 +423,7 @@ impl Actor {
         let events = self.actions.events.clone();
         let deadline =
             std::time::Instant::now() + if hook { crate::hooks::HOOK_TIMEOUT } else { Duration::from_secs(30) };
-        let (env, secrets, fetcher) = self.actions.environment(&deployment, hook);
-        let host = Host {
-            effects: Arc::new(crate::effects::ScopedEffects {
-                invocation: invocation_identity.clone(),
-                fetcher,
-                slots: self.actions.external_slots.clone(),
-                cancellation: cancellation.clone(),
-                deadline,
-            }),
-            id: id.clone(),
-            events: events.clone(),
-            slots: self.actions.slots.clone(),
-            cancellation: cancellation.clone(),
-            moves: matches!(purpose, crate::commands::Purpose::Function).then(|| self.actions.effects.moves.clone()),
-        };
+        let host = self.actions.host(&id, &invocation_identity, &cancellation, deadline, &purpose, hook);
         let invocation = ActionInvocation {
             id: invocation_identity,
             export: function.export,
@@ -430,8 +432,9 @@ impl Actor {
             timestamp: self.view.base.timestamp,
             seed,
             deadline,
-            env,
+            env: self.actions.effects.env(&deployment),
         };
+        let secrets = host.secrets.clone();
         let worker_id = id.clone();
         let worker_cancellation = cancellation.clone();
         let busy = self.actions.activity.begin();
