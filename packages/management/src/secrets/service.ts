@@ -18,6 +18,8 @@ interface SecretRow {
 
 const namePattern = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const maxValueBytes = 64 * 1024;
+const maxSecrets = 256;
+const utf8 = new TextDecoder("utf-8", { fatal: true });
 
 /** Binds a stored ciphertext to its environment and name. */
 export function secretContext(environmentId: string, name: string): string {
@@ -37,9 +39,15 @@ export function secretService({ sql, keys }: Deps): Partial<ServiceImpl<typeof S
     async setSecret(request, context) {
       const caller = callerOf(context);
       const name = secretName(request.name);
-      if (request.value.byteLength > maxValueBytes) throw invalid(`value must be at most ${maxValueBytes} bytes`);
+      secretValue(request.value);
       return idempotent({ sql, keys, caller, method: SecretService.method.setSecret, request }, async (tx) => {
         const environment = await loadEnvironment(tx, caller, request.environmentId);
+        // Serializes concurrent sets, so the limit holds.
+        await tx`select 1 from environments where id = ${environment.id} for update`;
+        const [held] = await tx<{ others: number }[]>`
+          select count(*)::int as others from secrets
+          where environment_id = ${environment.id} and name <> ${name} and ciphertext is not null`;
+        if ((held?.others ?? 0) >= maxSecrets) throw invalid(`an environment holds at most ${maxSecrets} secrets`);
         const ciphertext = await keys.cipher.seal(request.value, secretContext(environment.id, name));
         const [row] = await tx<SecretRow[]>`
           insert into secrets (environment_id, name, version, ciphertext)
@@ -75,6 +83,17 @@ export function secretService({ sql, keys }: Deps): Partial<ServiceImpl<typeof S
       return {};
     },
   };
+}
+
+function secretValue(value: Uint8Array): void {
+  if (value.byteLength === 0 || value.byteLength > maxValueBytes) {
+    throw invalid(`value must be 1 to ${maxValueBytes} bytes`);
+  }
+  try {
+    utf8.decode(value);
+  } catch {
+    throw invalid("value must be UTF-8 text");
+  }
 }
 
 function secretName(name: string): string {
