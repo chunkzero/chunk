@@ -29,7 +29,7 @@ A project's backend sources are:
 | Path                        | Contents                                                          | Function paths                       |
 | --------------------------- | ----------------------------------------------------------------- | ------------------------------------ |
 | `server/schema/index.ts`    | `export default defineSchema({...})`                              |                                      |
-| `server/**/*.ts`            | Shared functions and helpers                                      | `shared/<file path>/<export>`        |
+| `server/**/*.ts`            | Shared functions and helpers, except `server/migrations/`         | `shared/<file path>/<export>`        |
 | `apps/**/app.ts`            | An app: `export default defineApp({...})`                         |                                      |
 | `apps/**/scope.ts`          | Hooks and commands for the apps below it; `apps/scope.ts` is root |                                      |
 | `apps/<dir>/server/**/*.ts` | Functions local to the app in `apps/<dir>`                        | `apps/<app id>/<file path>/<export>` |
@@ -59,8 +59,41 @@ most 64 fields and 16 indexes, and a schema at most 128 tables.
 
 Tables are identified by their names in `defineSchema`, not by the files that declare them. Activating a deployment
 merges its schema into the environment's database: new tables, new optional fields and new indexes are added, and
-tables, fields and indexes the release omits are kept, because older deployments may still use them. Changing an
-existing field or index, or adding a required field to an existing table, is rejected.
+tables, fields and indexes the release omits are kept, because older deployments may still use them. Removing or
+changing a field, or adding a required field to an existing table, needs a migration.
+
+### Migrations
+
+`server/migrations/` holds the migration journal: `NNNN_<name>.ts` files, `meta/journal.json`, and a
+`meta/NNNN.snapshot.json` of the full schema after each entry. `chunk dev` and `chunk build` record additive changes
+(new tables, optional fields and indexes) as an entry with only a snapshot, and fail on any other change until you run
+`chunk migrate new`. Commit what they write. `chunk build --frozen`, for CI, writes nothing and fails instead.
+
+- `chunk migrate new <name>` diffs `server/schema/` against the last snapshot, asks whether removed fields were renamed
+  (`--rename table.old=new` answers without a terminal), and writes the migration. In a project without a journal it
+  records the current schema as a baseline instead.
+- `chunk migrate finish <NNNN>` writes the entry that drops the old shape once no running deployment needs it.
+- `chunk migrate check` finds conflicts, such as migrations from two branches with one number.
+- `chunk migrate squash` replaces finished history with one baseline.
+- `chunk migrate rehash <NNNN>` accepts an edit to a migration that was never deployed. The journal records a hash of
+  each migration and its snapshot, and the build rejects files that no longer match.
+
+```ts
+// server/migrations/0002_display_name.ts
+import { defineMigration } from "#chunk";
+
+export default defineMigration("0002_display_name", {
+  fighters: {
+    to: (old) => ({ displayName: old.name.trim() }),
+    back: (row) => ({ name: row.displayName }),
+  },
+});
+```
+
+Each migration is typed from its own snapshots: `old` is a row of the previous snapshot, `to` returns exactly the new
+fields, and the optional `back` returns exactly the removed ones from a current row. Transforms are pure functions of
+one row. Without `back`, older deployments see removed fields frozen until the migration is finished, and the build
+warns.
 
 ## Queries and mutations
 

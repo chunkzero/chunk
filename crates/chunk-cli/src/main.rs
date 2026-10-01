@@ -7,6 +7,7 @@ mod core;
 mod creation;
 mod generation;
 mod local;
+mod migration;
 mod nodes;
 mod platform;
 mod players;
@@ -40,6 +41,8 @@ enum Command {
         #[arg(default_value = ".")]
         project: PathBuf,
     },
+    /// Write and check schema migrations in server/migrations.
+    Migrate(migration::Options),
     #[command(flatten)]
     Platform(platform::Command),
     /// Move players or drain runtimes.
@@ -89,6 +92,9 @@ async fn run(cli: Cli) -> io::Result<()> {
         })
         .await
         .map_err(io::Error::other)?,
+        Command::Migrate(options) => {
+            tokio::task::spawn_blocking(move || migration::run(options)).await.map_err(io::Error::other)?
+        }
         Command::Platform(command) => platform::run(command).await,
         Command::Players(options) => players::run(options).await,
         Command::Nodes(options) => nodes::run(options).await,

@@ -260,7 +260,7 @@ class Smoke:
         chunk = ROOT / 'target/debug/chunk'
         if not chunk.exists():
             raise Failed('target/debug/chunk is missing; run `just toolchain`')
-        self.run([str(chunk), 'build', str(ROOT / 'examples/local'), '--output', str(self.work / 'release')],
+        self.run([str(chunk), 'build', '--frozen', str(ROOT / 'examples/local'), '--output', str(self.work / 'release')],
                  'build-release.log')
         [self.archive] = (self.work / 'release').glob('*.tar.gz')
         with tarfile.open(self.archive) as archive:

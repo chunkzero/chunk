@@ -17,10 +17,14 @@ pub(crate) struct Options {
     /// Release output directory (defaults to PROJECT/dist).
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Fail instead of recording additive schema changes in server/migrations/, for CI.
+    #[arg(long)]
+    pub frozen: bool,
 }
 
 pub(crate) struct Project {
     pub root: PathBuf,
+    pub frozen: bool,
     pub metadata: ProjectMetadata,
     pub output: PathBuf,
 }
@@ -48,13 +52,13 @@ pub(crate) fn prepare(options: &Options) -> io::Result<Project> {
             return Err(io::Error::other("release output must be separate from project sources and build outputs"));
         }
     }
-    inspect(root, output)
+    Ok(Project { frozen: options.frozen, ..inspect(root, output)? })
 }
 
 /// Inspects the project at canonical `root`, whose releases publish into `output`.
 pub(crate) fn inspect(root: PathBuf, output: PathBuf) -> io::Result<Project> {
     let metadata = chunk_build::project::inspect(&root)?;
-    Ok(Project { root, metadata, output })
+    Ok(Project { root, frozen: false, metadata, output })
 }
 
 pub(crate) async fn run(options: Options) -> io::Result<()> {
@@ -62,6 +66,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
         let project = prepare(&options)?;
         cliclack::log::info("Building application release…")?;
         let built = execute(&project, BuildMode::Release, stop, Progress::default()).await?;
+        warn_irreversible(&project.root.join(".chunk/build/backend/contract.json"))?;
         let release = built.release.archive.as_ref().unwrap_or(&built.release.directory);
         cliclack::log::success(format!("Built → {}", release.display()))
     })
@@ -77,7 +82,7 @@ pub(crate) async fn execute(
     cancelled(&stop)?;
     let started = Instant::now();
     progress.emit(Event::Started(Phase::Compile));
-    gradle::run(&project.root, &std::env::current_exe()?, mode, &stop, &progress).await?;
+    gradle::run(&project.root, &std::env::current_exe()?, mode, project.frozen, &stop, &progress).await?;
     progress.emit(Event::Finished(Phase::Compile, started.elapsed()));
     cancelled(&stop)?;
     let started = Instant::now();
@@ -101,6 +106,28 @@ pub(crate) async fn execute(
     cancelled(&stop)?;
     progress.emit(Event::Finished(Phase::Release, started.elapsed()));
     Ok(built)
+}
+
+/// Warns about expand migrations whose removed fields have no `back`, so older deployments see them frozen.
+fn warn_irreversible(contract: &std::path::Path) -> io::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Contract {
+        #[serde(default)]
+        migrations: Vec<chunk_contract::Migration>,
+    }
+    let contract: Contract = serde_json::from_slice(&std::fs::read(contract)?).map_err(io::Error::other)?;
+    for migration in &contract.migrations {
+        for (table, change) in &migration.tables {
+            if migration.kind == chunk_contract::MigrationKind::Expand && !change.back && !change.removed.is_empty() {
+                cliclack::log::warning(format!(
+                    "Migration {} has no back for {table}; older deployments see {} frozen until it's finished",
+                    migration.id,
+                    change.removed.join(", ")
+                ))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn cancelled(stop: &CancellationToken) -> io::Result<()> {

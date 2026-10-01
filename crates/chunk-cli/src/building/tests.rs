@@ -39,7 +39,7 @@ impl Fixture {
         fs::write(root.join("fixture/source.mjs"), "export const value = 1;").unwrap();
         fs::write(
             root.join("fixture/contract.json"),
-            br#"{"contract_version":2,"runtime_profile":"transactional_v1","tables":{},"functions":{}}"#,
+            br#"{"contract_version":3,"runtime_profile":"transactional_v1","tables":{},"functions":{}}"#,
         )
         .unwrap();
         fs::write(
@@ -63,7 +63,7 @@ impl Fixture {
     }
 
     fn project(&self) -> Project {
-        prepare(&Options { project: self.root.clone(), output: None }).unwrap()
+        prepare(&Options { project: self.root.clone(), output: None, frozen: false }).unwrap()
     }
 }
 
@@ -97,11 +97,20 @@ async fn project_build_packages_only_after_the_requested_gradle_task_finishes() 
     assert!(built.release.directory.join("backend.json").is_file());
     assert_eq!(built.java.version, 25);
     assert_eq!(built.java.executable, fixture.root.join("jdk/bin/java"));
-    let explicit =
-        prepare(&Options { project: fixture.root.clone(), output: Some("target/consumer-releases".into()) }).unwrap();
+    let explicit = prepare(&Options {
+        project: fixture.root.clone(),
+        output: Some("target/consumer-releases".into()),
+        frozen: false,
+    })
+    .unwrap();
     assert_eq!(explicit.output, std::env::current_dir().unwrap().join("target/consumer-releases"));
     assert!(
-        prepare(&Options { project: fixture.root.clone(), output: Some(fixture.root.join(".chunk/build")) }).is_err()
+        prepare(&Options {
+            project: fixture.root.clone(),
+            output: Some(fixture.root.join(".chunk/build")),
+            frozen: false
+        })
+        .is_err()
     );
 }
 
@@ -110,7 +119,7 @@ async fn invalid_metadata_wrapper_failure_and_missing_descriptors_do_not_publish
     let fixture = Fixture::new();
     fs::write(fixture.root.join("chunk.toml"), "domains=[]").unwrap();
     assert!(
-        prepare(&Options { project: fixture.root.clone(), output: None })
+        prepare(&Options { project: fixture.root.clone(), output: None, frozen: false })
             .err()
             .unwrap()
             .to_string()
@@ -153,8 +162,15 @@ async fn build_output_streams_before_exit_and_drains_the_final_line() {
     });
     let root = fixture.root.clone();
     let running = tokio::spawn(async move {
-        gradle::run(&root, &std::env::current_exe().unwrap(), BuildMode::Dev, &CancellationToken::new(), &progress)
-            .await
+        gradle::run(
+            &root,
+            &std::env::current_exe().unwrap(),
+            BuildMode::Dev,
+            false,
+            &CancellationToken::new(),
+            &progress,
+        )
+        .await
     });
     let mut lines = Vec::new();
     for _ in 0..2 {
@@ -179,7 +195,7 @@ async fn cancellation_and_dropped_builds_stop_wrapper_descendants() {
         let stop = CancellationToken::new();
         let executable = std::env::current_exe().unwrap();
         let progress = Progress::default();
-        let mut running = Box::pin(gradle::run(&fixture.root, &executable, BuildMode::Dev, &stop, &progress));
+        let mut running = Box::pin(gradle::run(&fixture.root, &executable, BuildMode::Dev, false, &stop, &progress));
         tokio::select! {
             result = &mut running => panic!("wrapper exited before cancellation: {result:?}"),
             () = async {

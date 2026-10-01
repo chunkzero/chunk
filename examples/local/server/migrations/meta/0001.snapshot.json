@@ -1,0 +1,27 @@
+{
+  "profiles": {
+    "fields": {
+      "coins": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      },
+      "player": {
+        "schema": {
+          "type": "player"
+        },
+        "optional": false
+      },
+      "visits": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      }
+    },
+    "indexes": {
+      "by_player": ["player"]
+    }
+  }
+}

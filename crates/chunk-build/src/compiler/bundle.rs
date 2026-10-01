@@ -14,14 +14,24 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     fs, io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 const ENTRY: &str = "\0chunk-entry";
 
+/// A migration source as verified against its hash; the bundle uses `code` instead of rereading `path`.
+pub(super) struct MigrationSource {
+    pub id: String,
+    pub path: PathBuf,
+    pub code: String,
+}
+
 #[derive(Debug)]
 struct Boundary {
     entry: Option<String>,
+    /// Migration code by path. Migrations may import only `#chunk`, which resolves to `chunk`.
+    migrations: BTreeMap<String, String>,
+    chunk: String,
     exports: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
 }
 impl Plugin for Boundary {
@@ -58,6 +68,14 @@ impl Plugin for Boundary {
             if source == ENTRY {
                 return Ok(Some(HookResolveIdOutput::from_id(ENTRY)));
             }
+            if let Some(importer) = args.importer
+                && self.migrations.contains_key(importer)
+            {
+                if source == "#chunk" {
+                    return Ok(Some(HookResolveIdOutput::from_id(self.chunk.as_str())));
+                }
+                anyhow::bail!("{importer} imports {source}; migrations may import only from #chunk");
+            }
             let scheme = source
                 .split_once(':')
                 .is_some_and(|(scheme, _)| !scheme.is_empty() && scheme.bytes().all(|b| b.is_ascii_alphabetic()));
@@ -79,7 +97,10 @@ impl Plugin for Boundary {
                     .as_ref()
                     .map(|code| HookLoadOutput { code: code.as_str().into(), ..Default::default() }));
             }
-            Ok(None)
+            Ok(self
+                .migrations
+                .get(args.id)
+                .map(|code| HookLoadOutput { code: code.as_str().into(), ..Default::default() }))
         })())
     }
 }
@@ -98,13 +119,19 @@ pub(super) async fn build(
     output: &Path,
     sdk: &Path,
     files: &[Source<'_>],
+    migrations: &[MigrationSource],
     inventory: &Inventory,
 ) -> io::Result<()> {
     let entries: Vec<_> = files.iter().filter(|source| !source.path.to_string_lossy().ends_with(".d.ts")).collect();
     let discovered_exports = Arc::new(Mutex::new(BTreeMap::new()));
     let mut discovery = Bundler::with_plugins(
         options(root, entries.iter().map(|source| source.path.to_string_lossy().into_owned()).collect()),
-        vec![Arc::new(Boundary { entry: None, exports: discovered_exports.clone() })],
+        vec![Arc::new(Boundary {
+            entry: None,
+            migrations: BTreeMap::new(),
+            chunk: String::new(),
+            exports: discovered_exports.clone(),
+        })],
     )
     .map_err(error)?;
     let discovered = discovery.generate().await;
@@ -114,7 +141,8 @@ pub(super) async fn build(
         return Err(error(warning));
     }
     let modules = std::mem::take(&mut *discovered_exports.lock().map_err(error)?);
-    let source = entry_source(root, sdk, &entries, &modules, inventory)?;
+    let mut source = entry_source(root, sdk, &entries, &modules, inventory)?;
+    migration_source(sdk, migrations, &mut source)?;
     let mut config = options(root, vec![ENTRY.into()]);
     config.dir = Some(output.to_string_lossy().into_owned());
     config.entry_filenames = Some("source.mjs".to_string().into());
@@ -126,9 +154,12 @@ pub(super) async fn build(
         compress: None,
         remove_whitespace: true,
     }));
-    let mut bundler =
-        Bundler::with_plugins(config, vec![Arc::new(Boundary { entry: Some(source), exports: Arc::default() })])
-            .map_err(error)?;
+    let migration_code =
+        migrations.iter().map(|migration| (migration.path.to_string_lossy().into_owned(), migration.code.clone()));
+    let chunk = root.join(".chunk/generated/index.ts").to_string_lossy().into_owned();
+    let boundary =
+        Boundary { entry: Some(source), migrations: migration_code.collect(), chunk, exports: Arc::default() };
+    let mut bundler = Bundler::with_plugins(config, vec![Arc::new(boundary)]).map_err(error)?;
     let result = bundler.generate().await;
     bundler.close().await.map_err(error)?;
     let result = result.map_err(error)?;
@@ -157,13 +188,21 @@ fn write_output(assets: &[Output], root: &Path, output: &Path) -> io::Result<()>
                 } else {
                     name.into()
                 };
-                *source = relative.replace('\\', "/").into();
+                *source = staged_migration(&relative.replace('\\', "/")).into();
             }
         }
     }
     fs::write(output.join("source.mjs"), &chunk.code)?;
     fs::write(output.join("source.mjs.map"), serde_json::to_vec(&map).map_err(error)?)?;
     Ok(())
+}
+
+/// Names a migration staged at `.chunk/compile-*/migrations/<id>.ts` by its place in the project.
+fn staged_migration(path: &str) -> String {
+    match path.strip_prefix(".chunk/compile-").and_then(|rest| rest.split_once("/migrations/")) {
+        Some((_, file)) => format!("server/migrations/{file}"),
+        None => path.to_owned(),
+    }
 }
 
 fn entry_source(
@@ -235,6 +274,32 @@ fn entry_source(
     let domain_metadata = domains.metadata()?;
     let [functions, methods, destinations, configurations] = descriptors.metadata();
     writeln!(source, "const destinationEntries = [{destinations}];").map_err(error)?;
-    write!(source, "export function __chunk_contract() {{ const methods = [{methods}]; const configurations = [{configurations}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{functions}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}}),...(configurations.length ? {{session_configurations:{{version:1,configurations}}}} : {{}})}}; }}").map_err(error)?;
+    write!(source, "export function __chunk_contract() {{ const methods = [{methods}]; const configurations = [{configurations}]; return {{contract_version:{},runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{functions}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}}),...(configurations.length ? {{session_configurations:{{version:1,configurations}}}} : {{}})}}; }}", chunk_contract::CONTRACT_VERSION).map_err(error)?;
     Ok(source)
+}
+
+/// Registers each migration by ID behind `__chunk_migrate`, and reports which tables have `back` through
+/// `__chunk_migrations`.
+fn migration_source(sdk: &Path, migrations: &[MigrationSource], source: &mut String) -> io::Result<()> {
+    use std::fmt::Write;
+    writeln!(
+        source,
+        "import {{ isMigration, migrate, migrationBacks }} from {};\nconst migrations = {{}};",
+        quote(sdk.join("migrations.ts").to_string_lossy())
+    )
+    .map_err(error)?;
+    for (index, MigrationSource { id, path, .. }) in migrations.iter().enumerate() {
+        let message = format!("server/migrations/{id}.ts must default-export defineMigration({})", quote(id));
+        writeln!(
+            source,
+            "import mg{index} from {};\nif (!isMigration(mg{index}) || mg{index}.id !== {}) throw new Error({});\nmigrations[{}] = mg{index};",
+            quote(path.to_string_lossy()),
+            quote(id),
+            quote(message),
+            quote(id)
+        )
+        .map_err(error)?;
+    }
+    source.push_str("export const __chunk_migrate = (_, args) => migrate(migrations, args);\nexport const __chunk_migrations = () => migrationBacks(migrations);\n");
+    Ok(())
 }

@@ -15,6 +15,10 @@ fn command_structure_is_valid() {
     assert!(Cli::try_parse_from(["chunk", "gen", "--target", "typescript"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "gen", "--target", "kotlin"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "build", "example", "--output", "dist"]).is_ok());
+    assert!(
+        Cli::try_parse_from(["chunk", "migrate", "new", "rename", "--rename", "fighters.name=displayName"]).is_ok()
+    );
+    assert!(Cli::try_parse_from(["chunk", "migrate", "finish", "0002", "example"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "dev", "example"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "local", "example", "--java", "/jdk/bin/java"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "dev", "--project", "project.json"]).is_err());
@@ -40,4 +44,33 @@ async fn codegen_sets_up_editors_without_a_distribution_or_services() {
     assert!(project.path().join(".chunk/generated/index.ts").is_file());
     assert!(!project.path().join(".chunk/build").exists());
     assert!(!project.path().join(".chunk/local").exists());
+}
+
+#[tokio::test]
+async fn frozen_gen_refuses_to_write_an_additive_entry() {
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(project.path().join("chunk.toml"), "").unwrap();
+    let schema = |fields: &str| {
+        std::fs::create_dir_all(project.path().join("server/schema")).unwrap();
+        std::fs::write(
+            project.path().join("server/schema/index.ts"),
+            format!("import {{defineSchema,defineTable,v}} from '#chunk/schema'; export default defineSchema({{fighters: defineTable({{{fields}}})}});"),
+        )
+        .unwrap();
+    };
+    schema("name: v.string()");
+    let root = project.path().to_owned();
+    tokio::task::spawn_blocking(move || {
+        let pending = chunk_build::migrations::pending(&root)?;
+        chunk_build::migrations::create(pending, "init", &std::collections::BTreeMap::default())
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    schema("name: v.string(), nickname: v.optional(v.string())");
+    let path = project.path().to_str().unwrap();
+    let cli = Cli::try_parse_from(["chunk", "gen", path, "--target", "java", "--frozen"]).unwrap();
+    let error = run(cli).await.unwrap_err();
+    assert!(error.to_string().contains("Additive"), "{error}");
+    assert!(!project.path().join("server/migrations/meta/0002.snapshot.json").exists());
 }

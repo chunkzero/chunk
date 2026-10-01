@@ -14,6 +14,7 @@ pub(super) struct Source<'a> {
 pub(super) fn discover<'a>(root: &Path, inventory: &'a Inventory) -> io::Result<Vec<Source<'a>>> {
     let mut files = Vec::new();
     collect(&root.join("server"), "shared", &mut files, 0)?;
+    files.retain(|source| !source.path.starts_with(root.join("server/migrations")));
     for app in &inventory.apps {
         collect(&root.join(&app.directory).join("server"), &format!("apps/{}", app.id), &mut files, 0)?;
     }

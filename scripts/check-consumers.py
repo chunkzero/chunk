@@ -129,7 +129,7 @@ def main():
         ):
             project = checkout / "examples" / name
             require(not (project / ".chunk").exists() and not (project / "dist").exists(), "Consumer outputs were copied")
-            subprocess.run([str(executable), "build", str(project)], cwd=checkout, check=True)
+            subprocess.run([str(executable), "build", "--frozen", str(project)], cwd=checkout, check=True)
             verify_release(project, package, apps, kotlin)
 
 

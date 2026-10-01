@@ -144,12 +144,21 @@ fn clean_typescript_compilation_produces_deterministic_executable_contracts() {
     fs::create_dir_all(project.path().join("apps/duels/server")).unwrap();
     fs::write(project.path().join("apps/duels/app.toml"), "").unwrap();
     fs::write(project.path().join("apps/duels/build.gradle.kts"), "").unwrap();
-    fs::write(project.path().join("server/schema/index.ts"), "import {defineSchema,defineTable,v} from '#chunk/schema'; export default defineSchema({profiles:defineTable({player:v.player()}).index('by_player',['player'])});").unwrap();
+    fs::write(project.path().join("server/schema/index.ts"), "import {defineSchema,defineTable,v} from '#chunk/schema'; export default defineSchema({profiles:defineTable({player:v.player(),nick:v.string()}).index('by_player',['player'])});").unwrap();
     fs::write(project.path().join("apps/duels/server/match.ts"), "import {query,internalMutation,v} from '#chunk'; export function helper(n:number){return n+1} export const score=query({args:{value:v.integer()},returns:v.integer(),handler:(_,a)=>helper(a.value)}); export const hidden=internalMutation({args:{},returns:v.null(),handler:()=>null});").unwrap();
     for directory in [".chunk/generated", "server/.chunk/build", "apps/duels/server/.chunk/sdk", "server/_generated"] {
         fs::create_dir_all(project.path().join(directory)).unwrap();
         fs::write(project.path().join(directory).join("ignored.ts"), "invalid TypeScript").unwrap();
     }
+    crate::migrations::create(
+        crate::migrations::pending(project.path()).unwrap(),
+        "init",
+        &crate::migrations::Renames::new(),
+    )
+    .unwrap();
+    fs::write(project.path().join("server/schema/index.ts"), "import {defineSchema,defineTable,v} from '#chunk/schema'; export default defineSchema({profiles:defineTable({player:v.player(),name:v.string()}).index('by_player',['player'])});").unwrap();
+    let renames = [("profiles".into(), [("nick".into(), "name".into())].into())].into();
+    crate::migrations::create(crate::migrations::pending(project.path()).unwrap(), "rename_nick", &renames).unwrap();
     compile(project.path(), output.path()).unwrap();
     assert_eq!(fs::read_dir(output.path()).unwrap().count(), 3);
     check_editor(project.path());
@@ -181,6 +190,7 @@ fn clean_typescript_compilation_produces_deterministic_executable_contracts() {
     assert_eq!(result.value, "3");
     drop(engine);
     let source_map = fs::read(output.path().join("source.mjs.map")).unwrap();
+    assert!(String::from_utf8_lossy(&source_map).contains("\"server/migrations/0002_rename_nick.ts\""));
     fs::remove_file(project.path().join(".chunk/generated/index.ts")).unwrap();
     fs::write(project.path().join(".chunk/sdk/functions.ts"), "stale SDK").unwrap();
     compile(project.path(), output.path()).unwrap();
@@ -188,9 +198,16 @@ fn clean_typescript_compilation_produces_deterministic_executable_contracts() {
     assert_eq!(source, fs::read_to_string(output.path().join("source.mjs")).unwrap());
     assert_eq!(source_map, fs::read(output.path().join("source.mjs.map")).unwrap());
     let checkout = tempfile::tempdir().unwrap();
-    for file in
-        ["server/schema/index.ts", "apps/duels/server/match.ts", "apps/duels/app.toml", "apps/duels/build.gradle.kts"]
-    {
+    for file in [
+        "server/schema/index.ts",
+        "apps/duels/server/match.ts",
+        "apps/duels/app.toml",
+        "apps/duels/build.gradle.kts",
+        "server/migrations/0002_rename_nick.ts",
+        "server/migrations/meta/journal.json",
+        "server/migrations/meta/0001.snapshot.json",
+        "server/migrations/meta/0002.snapshot.json",
+    ] {
         let destination = checkout.path().join(file);
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::copy(project.path().join(file), destination).unwrap();
@@ -241,15 +258,16 @@ fn generated_helpers_infer_the_live_schema_and_resolve_package_imports() {
     .unwrap();
     let inventory = crate::project::load(project.path()).unwrap();
     let files = sources::discover(project.path(), &inventory).unwrap();
+    let files: Vec<_> = files.iter().map(|file| file.path.as_path()).collect();
     // No generation between schema edits: TypeScript follows typeof schema.tables.
-    let error = typecheck::check(&files, output.path()).unwrap_err().to_string();
+    let error = typecheck::check(&files, &generated, output.path()).unwrap_err().to_string();
     assert!(error.contains("added") && error.contains("missing"), "{error}");
     fs::write(
         project.path().join("server/helpers.ts"),
         include_str!("helper-types.ts").replace("{ wins: 1 }", "{ wins: 1, added: 'new' }"),
     )
     .unwrap();
-    typecheck::check(&files, output.path()).unwrap();
+    typecheck::check(&files, &generated, output.path()).unwrap();
     assert_eq!(fs::metadata(generated).unwrap().modified().unwrap(), timestamp);
 }
 

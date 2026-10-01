@@ -25,6 +25,7 @@ pub(super) async fn run(
     project: &Path,
     executable: &Path,
     mode: BuildMode,
+    frozen: bool,
     stop: &CancellationToken,
     progress: &Progress,
 ) -> io::Result<()> {
@@ -40,6 +41,9 @@ pub(super) async fn run(
     property.push(executable);
     let mut command = CommandWrap::with_new(&wrapper, |command| {
         chunk_service::withhold_platform_env(command.as_std_mut());
+        if frozen {
+            command.env("CHUNK_FROZEN", "true");
+        }
         command
             .current_dir(project)
             .arg("chunkArtifacts")

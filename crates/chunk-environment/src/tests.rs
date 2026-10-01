@@ -17,7 +17,7 @@ fn bundle(id: &str, motd: &str) -> chunk_contract::Deployment {
     let string = serde_json::json!({"schema": {"type": "string"}});
     let integer = serde_json::json!({"schema": {"type": "integer"}});
     serde_json::from_value(serde_json::json!({
-        "contract_version": 2, "runtime_profile": "transactional_v1", "id": id, "tables": {},
+        "contract_version": 3, "runtime_profile": "transactional_v1", "id": id, "tables": {},
         "source": format!("export function status() {{ return {{motd: {motd:?}, online: 0, max: 8}}; }}"),
         "functions": {"shared/proxy/status": {
             "kind": "query", "visibility": "public", "export": "status",

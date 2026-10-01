@@ -1,0 +1,27 @@
+{
+  "profiles": {
+    "fields": {
+      "player": {
+        "schema": {
+          "type": "player"
+        },
+        "optional": false
+      },
+      "playtime": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      },
+      "saves": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      }
+    },
+    "indexes": {
+      "by_player": ["player"]
+    }
+  }
+}

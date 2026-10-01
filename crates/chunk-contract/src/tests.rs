@@ -206,3 +206,81 @@ fn vars_resolve_by_environment_name() {
     };
     assert!(spread.validate().unwrap_err().contains("more than 256 variables in all"));
 }
+
+#[test]
+fn migration_snapshots_must_follow_their_declared_changes() {
+    use crate::{Migration, MigrationKind, MigrationTable, validate_migrations};
+    let schema = |fields: &[(&str, Schema)]| -> DatabaseSchema {
+        let fields = fields.iter().map(|(name, schema)| ((*name).to_owned(), field(schema.clone()))).collect();
+        [("fighters".to_owned(), TableSchema { fields, indexes: BTreeMap::new() })].into()
+    };
+    let table = |added: &[&str], removed: &[&str], back| MigrationTable {
+        added: added.iter().map(ToString::to_string).collect(),
+        removed: removed.iter().map(ToString::to_string).collect(),
+        back,
+    };
+    let entry = |id: &str, kind, finishes: Option<&str>, tables: &[(&str, MigrationTable)], schema| Migration {
+        id: id.into(),
+        hash: "0".repeat(64),
+        kind,
+        finishes: finishes.map(Into::into),
+        tables: tables.iter().map(|(name, table)| ((*name).to_owned(), table.clone())).collect(),
+        schema,
+    };
+    let old = schema(&[("name", Schema::String)]);
+    let new = schema(&[("displayName", Schema::String)]);
+    let baseline = entry("0001_init", MigrationKind::Baseline, None, &[], old.clone());
+    let expand =
+        |schema, tables: &[(&str, MigrationTable)]| entry("0002_a", MigrationKind::Expand, None, tables, schema);
+    let finish = |schema, tables: &[(&str, MigrationTable)]| {
+        entry("0003_finish_a", MigrationKind::Finish, Some("0002_a"), tables, schema)
+    };
+    let rename = [("fighters", table(&["displayName"], &["name"], true))];
+    let good = [
+        baseline.clone(),
+        expand(new.clone(), &rename),
+        finish(new.clone(), &[("fighters", table(&[], &["name"], false))]),
+    ];
+    validate_migrations(&good).unwrap();
+
+    let additive = |schema| entry("0002_additive", MigrationKind::Additive, None, &[], schema);
+    let mut grown = old.clone();
+    grown
+        .get_mut("fighters")
+        .unwrap()
+        .fields
+        .insert("nickname".into(), Field { schema: Schema::String, optional: true });
+    validate_migrations(&[baseline.clone(), additive(grown.clone())]).unwrap();
+    let mut required = grown.clone();
+    required.get_mut("fighters").unwrap().fields.get_mut("nickname").unwrap().optional = false;
+    for schema in [required, new.clone()] {
+        assert!(validate_migrations(&[baseline.clone(), additive(schema)]).is_err());
+    }
+
+    let undeclared = schema(&[("name", Schema::Number)]);
+    let wrong_table = [("players", table(&["displayName"], &["name"], true))];
+    let rejected = [
+        vec![baseline.clone(), expand(undeclared, &rename)],
+        vec![baseline.clone(), expand(new.clone(), &[("fighters", table(&["displayName"], &[], true))])],
+        vec![baseline.clone(), expand(new.clone(), &wrong_table)],
+        vec![
+            baseline.clone(),
+            expand(new.clone(), &rename),
+            finish(old.clone(), &[("fighters", table(&[], &["name"], false))]),
+        ],
+        vec![
+            baseline.clone(),
+            expand(new.clone(), &rename),
+            finish(new.clone(), &[("fighters", table(&[], &["rank"], false))]),
+        ],
+        vec![
+            baseline.clone(),
+            expand(new.clone(), &rename),
+            finish(new.clone(), &[("fighters", table(&["x"], &["name"], false))]),
+        ],
+        vec![baseline, expand(new.clone(), &rename), finish(new, &[("fighters", table(&[], &["name"], true))])],
+    ];
+    for migrations in rejected {
+        assert!(validate_migrations(&migrations).is_err(), "{migrations:?}");
+    }
+}

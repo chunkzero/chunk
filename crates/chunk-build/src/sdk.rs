@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{project::Inventory, quote};
+use crate::{migrations::Journal, project::Inventory, quote};
 
 const SOURCES: &[(&str, &str)] = &[
     ("apps.ts", include_str!("../sdk/src/apps.ts")),
@@ -22,6 +22,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("validators.ts", include_str!("../sdk/src/validators.ts")),
     ("documents.ts", include_str!("../sdk/src/documents.ts")),
     ("schema.ts", include_str!("../sdk/src/schema.ts")),
+    ("migrations.ts", include_str!("../sdk/src/migrations.ts")),
     ("web.d.ts", include_str!("../sdk/src/web.d.ts")),
 ];
 
@@ -31,10 +32,11 @@ const SOURCES: &[(&str, &str)] = &[
 /// Reports a missing schema, invalid package configuration, or filesystem errors.
 pub fn generate_sdk(project: &Path) -> io::Result<()> {
     let project = project.canonicalize()?;
-    generate(&project, &crate::project::load(&project)?)
+    generate(&project, &crate::project::load(&project)?, &Journal::read(&project)?)
 }
 
-pub(crate) fn generate(project: &Path, inventory: &Inventory) -> io::Result<()> {
+/// Writes the SDK and generated declarations, typing migrations from `journal`.
+pub(crate) fn generate(project: &Path, inventory: &Inventory, journal: &Journal) -> io::Result<()> {
     if !project.join("server/schema/index.ts").is_file() {
         return Err(io::Error::other("missing explicitly composed server/schema/index.ts"));
     }
@@ -56,9 +58,9 @@ pub(crate) fn generate(project: &Path, inventory: &Inventory) -> io::Result<()> 
     for (name, source) in SOURCES {
         write_changed(&project.join(".chunk/sdk").join(name), source.as_bytes())?;
     }
-    write_changed(&project.join(".chunk/generated/index.ts"), include_bytes!("sdk/index.ts"))?;
-    write_changed(&project.join(".chunk/generated/apps.ts"), app_references(inventory)?.as_bytes())?;
-    write_changed(&project.join(".chunk/generated/env.ts"), env_types(&inventory.env).as_bytes())?;
+    for (name, content) in generated(inventory, journal)? {
+        write_changed(&project.join(".chunk/generated").join(name), &content)?;
+    }
     if original != package {
         let mut bytes = serde_json::to_vec_pretty(&package).map_err(io::Error::other)?;
         bytes.push(b'\n');
@@ -69,6 +71,17 @@ pub(crate) fn generate(project: &Path, inventory: &Inventory) -> io::Result<()> 
         write_changed(&config, include_bytes!("sdk/tsconfig.json"))?;
     }
     Ok(())
+}
+
+/// The files of `.chunk/generated`, by name. They import `../sdk` and `../../server`, so they work from any directory
+/// directly under `.chunk`.
+pub(crate) fn generated(inventory: &Inventory, journal: &Journal) -> io::Result<[(&'static str, Vec<u8>); 4]> {
+    Ok([
+        ("index.ts", include_bytes!("sdk/index.ts").to_vec()),
+        ("apps.ts", app_references(inventory)?.into_bytes()),
+        ("env.ts", env_types(&inventory.env).into_bytes()),
+        ("migrations.ts", crate::migrations::declarations(journal).into_bytes()),
+    ])
 }
 
 fn app_references(inventory: &Inventory) -> io::Result<String> {

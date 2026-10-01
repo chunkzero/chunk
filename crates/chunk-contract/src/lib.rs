@@ -22,6 +22,8 @@ pub use domains::{DOMAIN_MANIFEST_VERSION, DomainManifest, DomainScope, Hook, Ho
 pub use effects::{Effect, EffectDestination, EffectMethod, MoveRefusal};
 pub use env::{EnvManifest, MAX_ENV_ENTRIES, MAX_ENV_VALUE_BYTES, valid_env_name, valid_env_value};
 mod index;
+mod migrations;
+pub use migrations::{Migration, MigrationKind, MigrationTable, migration_number, validate_migrations};
 mod schema;
 mod session_configurations;
 mod session_methods;

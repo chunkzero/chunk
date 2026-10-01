@@ -480,7 +480,7 @@ async fn scheduling_backend(directory: &Path) -> chunk_backend::Backend {
     );
     let deployment = chunk_contract::Deployment {
         contracts: chunk_contract::Contracts::default(),
-        contract_version: 2,
+        contract_version: chunk_contract::CONTRACT_VERSION,
         runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
         id: "dep_jobs".into(),
         source: "export function schedule(ctx, at) { return ctx.scheduler.runAt(at, 'job', null); }\n\

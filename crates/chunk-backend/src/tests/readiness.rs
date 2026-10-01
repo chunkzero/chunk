@@ -28,7 +28,7 @@ fn deployment(id: &str, field: &str) -> Deployment {
     let functions = [("ranked", FunctionKind::Query), ("seed", FunctionKind::Mutation)];
     Deployment {
         contracts: Contracts::default(),
-        contract_version: 2,
+        contract_version: chunk_contract::CONTRACT_VERSION,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: id.into(),
         source: SOURCE.into(),
