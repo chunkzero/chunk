@@ -86,6 +86,18 @@ pub(super) fn install(
         new.iter()
             .map(|migration| Applied { migration: migration.clone(), active: migration.kind == MigrationKind::Expand }),
     );
+    for (index, entry) in next.iter().enumerate().skip(applied.len()) {
+        let tables = &entry.migration.tables;
+        let busy = next[..index]
+            .iter()
+            .find(|earlier| earlier.active && earlier.migration.tables.keys().any(|table| tables.contains_key(table)));
+        if let Some(earlier) = busy.filter(|_| entry.migration.kind == MigrationKind::Expand) {
+            return Err(Error::Migration(format!(
+                "migration {} changes a table that {} still migrates; wait for {} to complete before installing it",
+                entry.migration.id, earlier.migration.id, earlier.migration.id
+            )));
+        }
+    }
     let migration = plan(current, &stored(&next), false)?;
     let migrating = migrating(&next);
     for (name, table) in &deployment.tables {
@@ -151,6 +163,13 @@ fn verify<'a>(applied: &[Applied], journal: &'a [Migration]) -> Result<&'a [Migr
                     entry.id
                 )));
             }
+            if applied[position..position + covered].iter().any(|applied| applied.active) {
+                return Err(Error::Migration(format!(
+                    "baseline {} replaces migrations this environment hasn't completed; wait until their old \
+                     shapes are dropped",
+                    entry.id
+                )));
+            }
             if last.is_some_and(|last| last.schema != entry.schema) {
                 return Err(Error::Migration(format!(
                     "baseline {} doesn't match the schema of the migrations it replaces",
@@ -187,9 +206,7 @@ pub(super) fn stored(applied: &[Applied]) -> DatabaseSchema {
             }
             for field in &change.removed {
                 let old = previous.and_then(|schema| schema.get(name)).and_then(|table| table.fields.get(field));
-                if let Some(old) = old
-                    && !table.fields.contains_key(field)
-                {
+                if let Some(old) = old {
                     table.fields.insert(field.clone(), Field { optional: true, ..old.clone() });
                 }
             }
@@ -264,17 +281,27 @@ pub(super) fn plan(current: &DatabaseSchema, target: &DatabaseSchema, drop: bool
     Ok(schema::Migration { schema: merged, statements, indexes: Vec::new() })
 }
 
-/// Whether `expand`'s old shape can be dropped: no deployment declares a removed field the last snapshot lacks.
-fn droppable(applied: &[Applied], expand: &Migration, deployments: &[Deployment]) -> bool {
-    let last = applied.last().map(|last| &last.migration.schema);
+/// Whether `expand`'s old shape can be dropped: no deployment declares a removed field.
+fn droppable(expand: &Migration, deployments: &[Deployment]) -> bool {
     expand.tables.iter().all(|(name, change)| {
         change.removed.iter().all(|field| {
-            last.and_then(|schema| schema.get(name)).is_some_and(|table| table.fields.contains_key(field))
-                || !deployments
-                    .iter()
-                    .any(|deployment| deployment.tables.get(name).is_some_and(|table| table.fields.contains_key(field)))
+            !deployments
+                .iter()
+                .any(|deployment| deployment.tables.get(name).is_some_and(|table| table.fields.contains_key(field)))
         })
     })
+}
+
+/// The migrations with a backfill pending.
+fn backfilling(connection: &Connection) -> Result<BTreeSet<String>> {
+    let pending = work::load(connection)?;
+    Ok(pending
+        .into_iter()
+        .filter_map(|pending| match pending.work {
+            Work::Backfill { migration, .. } => Some(migration),
+            _ => None,
+        })
+        .collect())
 }
 
 fn finished(applied: &[Applied], expand: &str) -> bool {
@@ -285,40 +312,38 @@ fn finished(applied: &[Applied], expand: &str) -> bool {
 pub(super) fn schedule_drops(connection: &Connection) -> Result<()> {
     let applied = load(connection)?;
     let deployments = deployments::load(connection)?;
-    let pending = work::load(connection)?;
-    let backfilling: BTreeSet<_> = pending
-        .iter()
-        .filter_map(|pending| match &pending.work {
-            Work::Backfill { migration, .. } => Some(migration),
-            _ => None,
-        })
-        .collect();
+    let backfilling = backfilling(connection)?;
     let drops = applied.iter().filter(|entry| {
         let expand = &entry.migration;
         entry.active
             && finished(&applied, &expand.id)
             && !backfilling.contains(&expand.id)
-            && droppable(&applied, expand, &deployments)
+            && droppable(expand, &deployments)
     });
     work::record(connection, drops.map(|entry| Work::Drop { migration: entry.migration.id.clone() }))
 }
 
-/// Plans dropping `expand`'s old shape from `current`, unless that can't happen yet.
+/// Plans dropping `expand`'s old shape from `current`, and lists the tables it changes, unless that can't happen
+/// yet: a backfill is pending, or a deployment declares the old shape.
 pub(super) fn drop_plan(
     connection: &Connection,
     current: &DatabaseSchema,
     expand: &str,
-) -> Result<Option<schema::Migration>> {
+) -> Result<Option<(schema::Migration, Vec<String>)>> {
     let mut applied = load(connection)?;
     let deployments = deployments::load(connection)?;
     let Some(index) = applied.iter().position(|entry| entry.active && entry.migration.id == expand) else {
         return Ok(None);
     };
-    if !finished(&applied, expand) || !droppable(&applied, &applied[index].migration, &deployments) {
+    if !finished(&applied, expand)
+        || !droppable(&applied[index].migration, &deployments)
+        || backfilling(connection)?.contains(expand)
+    {
         return Ok(None);
     }
     applied[index].active = false;
-    plan(current, &stored(&applied), true).map(Some)
+    let tables = applied[index].migration.tables.keys().cloned().collect();
+    Ok(Some((plan(current, &stored(&applied), true)?, tables)))
 }
 
 pub(super) fn deactivate(connection: &Connection, expand: &str) -> Result<()> {

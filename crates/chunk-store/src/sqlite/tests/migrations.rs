@@ -2,6 +2,7 @@ use chunk_contract::{DatabaseSchema, Deployment, Migration, MigrationKind, Migra
 use serde_json::{Value, json};
 
 use super::*;
+use crate::TransformError;
 
 fn schema(field: &str) -> DatabaseSchema {
     serde_json::from_value(json!({"fighters": {"fields": {field: {"schema": {"type": "string"}}}}})).unwrap()
@@ -28,14 +29,29 @@ fn journal(length: usize) -> Vec<Migration> {
         entry("0002_rename", MigrationKind::Expand, None, &["name"], schema("displayName")),
         entry("0003_finish_rename", MigrationKind::Finish, Some("0002_rename"), &["name"], schema("displayName")),
     ];
+    journal.push(Migration {
+        id: "0004_title".into(),
+        hash: "0".repeat(64),
+        kind: MigrationKind::Expand,
+        finishes: None,
+        tables: [(
+            "fighters".into(),
+            MigrationTable { added: vec!["title".into()], removed: vec!["displayName".into()], back: true },
+        )]
+        .into(),
+        schema: schema("title"),
+    });
     journal.truncate(length);
     journal
 }
 
 fn deployment(id: &str, length: usize) -> Deployment {
-    let migrations = journal(length);
+    deployed(id, &journal(length))
+}
+
+fn deployed(id: &str, migrations: &[Migration]) -> Deployment {
     Deployment {
-        contracts: chunk_contract::Contracts { migrations: migrations.clone(), ..Default::default() },
+        contracts: chunk_contract::Contracts { migrations: migrations.to_owned(), ..Default::default() },
         contract_version: chunk_contract::CONTRACT_VERSION,
         runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
         id: id.into(),
@@ -113,6 +129,13 @@ fn installs_need_the_applied_journal_and_roll_back_only_until_the_old_shape_is_d
 
     store.install_deployment(&deployment("finished", 3)).unwrap();
     assert!(store.pending_work().unwrap().is_empty(), "resident deployments still declare fighters.name");
+    let chained = migration_error(store.install_deployment(&deployment("chained", 4)));
+    assert!(chained.contains("0004_title") && chained.contains("wait for 0002_rename"), "{chained}");
+    let mut baseline = journal(3)[..1].to_vec();
+    baseline[0].id = "0003_base".into();
+    baseline[0].schema = schema("displayName");
+    let early = migration_error(store.install_deployment(&deployed("baseline", &baseline)));
+    assert!(early.contains("0003_base") && early.contains("hasn't completed"), "{early}");
     store.release_deployment("old").unwrap();
     store.release_deployment("rollback").unwrap();
     let pending = store.pending_work().unwrap();
@@ -121,4 +144,56 @@ fn installs_need_the_applied_journal_and_roll_back_only_until_the_old_shape_is_d
     assert!(store.migrations().unwrap().is_empty());
     assert_eq!(fighter(&mut store, "007"), json!({"displayName": "N7"}));
     assert!(migration_error(store.install_deployment(&deployment("late", 1))).contains("fighters.name"));
+    store.install_deployment(&deployed("baseline", &baseline)).unwrap();
+}
+
+#[test]
+fn a_backfill_halves_its_batch_on_limits_and_fails_on_a_single_row_that_exceeds_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = renamed(&directory.path().join("data.db"));
+    let id = store.pending_work().unwrap()[0].id;
+    let mut sizes = Vec::new();
+    let mut limited = |_: &str, _: &str, rows: Vec<Value>| {
+        sizes.push(rows.len());
+        if rows.len() > 100 { Err(TransformError::Limit) } else { Ok(upper(&rows)) }
+    };
+    store.run_work(id, &mut limited).unwrap();
+    store.run_work(id, &mut limited).unwrap();
+    assert_eq!(sizes, [256, 128, 64, 64]);
+    assert_eq!(store.pending_work().unwrap()[0].done, 128);
+
+    let result = store.run_work(id, &mut |_, _, _| Err(TransformError::Limit));
+    assert!(matches!(&result, Err(Error::Migration(m)) if m.contains("0002_rename") && m.contains("row 128")));
+}
+
+#[test]
+fn a_drop_waits_for_a_pending_backfill_and_recounts_the_remaining_documents() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("data.db");
+    let mut store = renamed(&path);
+    let settle = |store: &mut SqliteStore| {
+        while let Some(pending) = store.pending_work().unwrap().first().cloned() {
+            store.run_work(pending.id, &mut |_, _, rows| Ok(upper(&rows))).unwrap();
+        }
+    };
+    settle(&mut store);
+    store.install_deployment(&deployment("finished", 3)).unwrap();
+    for id in ["old", "new"] {
+        store.release_deployment(id).unwrap();
+    }
+    assert_eq!(store.pending_work().unwrap()[0].work, Work::Drop { migration: "0002_rename".into() });
+    store.release_deployment("finished").unwrap();
+    store.install_deployment(&deployment("again", 2)).unwrap();
+    let pending = store.pending_work().unwrap();
+    assert!(matches!(pending[1].work, Work::Backfill { .. }));
+    store.run_work(pending[0].id, &mut |_, _, rows| Ok(upper(&rows))).unwrap();
+    assert_eq!(store.migrations().unwrap().len(), 1, "the drop waits for the backfill");
+
+    settle(&mut store);
+    assert!(store.migrations().unwrap().is_empty());
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let bytes = |sql: &str| connection.query_row(sql, [], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(bytes("SELECT _bytes FROM fighters WHERE _id = '007'"), 20);
+    let expected: usize = (0..300).map(|i| json!({"displayName": format!("N{i}")}).to_string().len()).sum();
+    assert_eq!(bytes("SELECT document_bytes FROM _chunk_metadata"), i64::try_from(expected).unwrap());
 }

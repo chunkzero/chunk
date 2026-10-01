@@ -43,9 +43,25 @@ pub struct PendingWork {
     pub total: u64,
 }
 
-/// Maps a batch of rows, each with its `_id`, through migration `migration`'s `to` for `table`, returning one
-/// object of the added fields per row, in order.
-pub type Transform<'a> = dyn FnMut(&str, &str, Vec<Value>) -> Result<Vec<Value>, String> + 'a;
+/// Why a transform call failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TransformError {
+    /// The rows or their results exceeded an engine size limit; fewer rows per call may fit.
+    #[error("the rows exceed an engine size limit")]
+    Limit,
+    #[error("{0}")]
+    Failed(String),
+}
+
+impl From<String> for TransformError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+/// Maps a batch of rows, each with its `_id` and the fields of the migration's previous snapshot, through
+/// migration `migration`'s `to` for `table`, returning one object of the added fields per row, in order.
+pub type Transform<'a> = dyn FnMut(&str, &str, Vec<Value>) -> Result<Vec<Value>, TransformError> + 'a;
 
 /// Whether a stored field serves a deployment that declares it as `declared`. A field an active expand migration
 /// adds or removes (`migrating`) is stored as optional.

@@ -242,6 +242,21 @@ fn migration_snapshots_must_follow_their_declared_changes() {
         finish(new.clone(), &[("fighters", table(&[], &["name"], false))]),
     ];
     validate_migrations(&good).unwrap();
+    let title = schema(&[("title", Schema::String)]);
+    let again = |id: &str| {
+        entry(
+            id,
+            MigrationKind::Expand,
+            None,
+            &[("fighters", table(&["title"], &["displayName"], true))],
+            title.clone(),
+        )
+    };
+    validate_migrations(&[good.as_slice(), &[again("0004_b")]].concat()).unwrap();
+    let mut chained = good.to_vec();
+    chained.remove(2);
+    chained.push(again("0003_b"));
+    assert!(validate_migrations(&chained).is_err(), "a table's second expand waits for the first one's finish");
 
     let additive = |schema| entry("0002_additive", MigrationKind::Additive, None, &[], schema);
     let mut grown = old.clone();
@@ -260,7 +275,10 @@ fn migration_snapshots_must_follow_their_declared_changes() {
     let undeclared = schema(&[("name", Schema::Number)]);
     let wrong_table = [("players", table(&["displayName"], &["name"], true))];
     let retyped = [("fighters", table(&["name"], &["name"], true))];
+    let mut optional = old.clone();
+    optional.get_mut("fighters").unwrap().fields.get_mut("name").unwrap().optional = true;
     let rejected = [
+        vec![baseline.clone(), expand(optional, &retyped)],
         vec![baseline.clone(), expand(undeclared.clone(), &rename)],
         vec![baseline.clone(), expand(undeclared, &retyped)],
         vec![baseline.clone(), expand(new.clone(), &[("fighters", table(&["displayName"], &[], true))])],

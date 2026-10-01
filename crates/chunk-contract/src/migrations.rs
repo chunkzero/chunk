@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +13,8 @@ const MAX_MIGRATIONS: usize = 256;
 /// entry's kind, snapshot and source.
 ///
 /// - `Expand` changes the schema to `schema`. For each table in `tables`, `added` fields are new and `removed`
-///   fields lose their old shape; a field in both changed its definition. The backend bundle exports
+///   fields lose their old shape. A table has at most one unfinished expand, and a field keeps its definition
+///   or is renamed. The backend bundle exports
 ///   `__chunk_migrate(_, { migration, table, direction, rows })`, which maps each row through the migration's
 ///   `to` (`direction: "to"`, a row of the previous snapshot, returning exactly the `added` fields) or `back`
 ///   (`"back"`, a row of `schema`, returning exactly the `removed` fields) and returns the results in order. `back`
@@ -55,6 +56,20 @@ pub struct MigrationTable {
     pub removed: Vec<String>,
     #[serde(default)]
     pub back: bool,
+}
+
+impl Migration {
+    /// The fields of `table` a transform reads: for `to`, the previous snapshot's; for `back`, this one's.
+    #[must_use]
+    pub fn input_fields(&self, table: &str, back: bool) -> BTreeSet<&str> {
+        let Some(change) = self.tables.get(table) else { return BTreeSet::new() };
+        let current = self.schema.get(table).into_iter().flat_map(|table| table.fields.keys());
+        if back {
+            return current.map(String::as_str).collect();
+        }
+        let kept = current.filter(|field| !change.added.contains(field));
+        kept.chain(&change.removed).map(String::as_str).collect()
+    }
 }
 
 /// Splits a migration ID into its namespace (empty without a prefix) and number.
@@ -106,6 +121,10 @@ pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str>
                     return Err("an expand migration changes tables and finishes nothing");
                 }
                 require_declared_changes(before, migration)?;
+                if open.values().any(|earlier| earlier.tables.keys().any(|table| migration.tables.contains_key(table)))
+                {
+                    return Err("finish the earlier migration of a table before changing it again");
+                }
                 open.insert(migration.id.as_str(), migration);
             }
             MigrationKind::Finish => {
@@ -168,8 +187,8 @@ fn require_declared_changes(before: &DatabaseSchema, expand: &Migration) -> Resu
                 .collect()
         };
         let (added, removed) = (differing(&table.fields, &old.fields), differing(&old.fields, &table.fields));
-        if added.iter().any(|field| old.fields.get(field).is_some_and(|old| old.schema != table.fields[field].schema)) {
-            return Err("changing a field's type in place isn't supported; rename the field instead");
+        if added.iter().any(|field| old.fields.contains_key(field)) {
+            return Err("changing a field in place isn't supported; rename the field instead");
         }
         match expand.tables.get(name) {
             Some(declared) => {

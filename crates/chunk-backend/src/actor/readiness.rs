@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chunk_js::DeploymentId;
 use chunk_store::{PendingWork, Snapshot};
@@ -51,21 +51,47 @@ impl Actor {
         Ok(Readiness { ready: !self.unready.contains(id), pending })
     }
 
-    /// Runs the next pending item that has not failed and can run, unless one runs. A backfill runs once a
-    /// resident deployment carries its migration. Work holds the commit thread but not `outstanding`, so installs
+    /// The tables `work` changes. Work on a table runs in order: a failed or waiting item holds back the rest.
+    fn tables(&self, work: &chunk_store::Work) -> Vec<String> {
+        match work {
+            chunk_store::Work::Index(_) => Vec::new(),
+            chunk_store::Work::Backfill { table, .. } => vec![table.clone()],
+            chunk_store::Work::Drop { migration } => {
+                let active = self.work.migrations.iter().find(|active| &active.id == migration);
+                active.map_or_else(Vec::new, |active| active.tables.keys().cloned().collect())
+            }
+        }
+    }
+
+    /// Runs the next pending item that can run, unless one runs. A backfill runs once a resident deployment
+    /// carries its migration. Work holds the commit thread but not `outstanding`, so installs
     /// and releases queue behind it rather than being refused.
     pub(super) fn dispatch_work(&mut self) {
         self.work.finish(|_, reply| reply.cancellation.is_cancelled().then_some(Err(Error::Cancelled)));
         if self.work.running.is_some() || self.failure.is_some() {
             return;
         }
-        let mut runnable = self.work.pending.iter().filter(|pending| !self.work.failed.contains_key(&pending.id));
-        let next = runnable.find_map(|pending| match &pending.work {
-            chunk_store::Work::Backfill { migration, .. } => {
-                self.carrier(migration).map(|deployment| (pending.id, Some(deployment)))
+        let mut blocked = BTreeSet::new();
+        let mut next = None;
+        for pending in &self.work.pending {
+            let tables = self.tables(&pending.work);
+            let runnable = match &pending.work {
+                _ if self.work.failed.contains_key(&pending.id)
+                    || tables.iter().any(|table| blocked.contains(table)) =>
+                {
+                    None
+                }
+                chunk_store::Work::Backfill { migration, .. } => {
+                    self.carrier(migration).map(|deployment| (pending.id, Some(deployment)))
+                }
+                _ => Some((pending.id, None)),
+            };
+            if runnable.is_some() {
+                next = runnable;
+                break;
             }
-            _ => Some((pending.id, None)),
-        });
+            blocked.extend(tables);
+        }
         if let Some((id, deployment)) = next
             && self.committer.send(Job::Work { id, deployment }).is_ok()
         {

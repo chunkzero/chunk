@@ -66,7 +66,7 @@ pub use model::{
 pub use replication::{Listed, ObjectStorage, Replication, ReplicationProgress, Replicator, S3Bucket, S3Credentials};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
-pub use work::{PendingWork, Transform, Work, compatible_field};
+pub use work::{PendingWork, Transform, TransformError, Work, compatible_field};
 
 /// Tables whose names start with this prefix, in any letter case, belong to the
 /// environment itself. App deployments may not declare them.

@@ -219,7 +219,9 @@ fn run(
                 Err(Error::CommitFailed)
             } else {
                 let mut transform = |migration: &str, table: &str, rows: Vec<_>| {
-                    let deployment = deployment.as_ref().ok_or("no resident deployment carries the migration")?;
+                    let deployment = deployment.as_ref().ok_or_else(|| {
+                        chunk_store::TransformError::Failed("no resident deployment carries the migration".into())
+                    })?;
                     migrator.to(deployment, migration, table, &rows)
                 };
                 store.run_work(id, &mut transform).map_err(Error::from).and_then(|()| current(store))

@@ -1,4 +1,10 @@
-use std::{sync::mpsc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use chunk_contract::{
     Contracts, DatabaseSchema, Deployment, Function, FunctionKind, Migration, MigrationKind, MigrationTable,
@@ -15,9 +21,14 @@ use crate::{Backend, Call, Error};
 /// Both shapes share one bundle; the rename's transforms change the case of the name.
 const SOURCE: &str = r"
 export function __chunk_migrate(_, {direction, rows}) {
-  return rows.map((row) => direction === 'to'
-    ? {displayName: row.name.toUpperCase() + (Date.now() === 0 ? '' : '!')}
-    : {name: row.displayName.toLowerCase()});
+  return rows.map((row) => {
+    const shape = direction === 'to' ? ['_id', 'name'] : ['_id', 'displayName'];
+    if (Object.keys(row).some((key) => !shape.includes(key))) throw new Error('unprojected ' + JSON.stringify(row));
+    if (row.name?.startsWith('bad')) throw new Error('bad row');
+    return direction === 'to'
+      ? {displayName: row.name.toUpperCase() + (Date.now() === 0 ? '' : '!')}
+      : {name: row.displayName.toLowerCase()};
+  });
 }
 export function read(ctx, id) { return JSON.stringify(ctx.db.get('fighters', id)); }
 export function writeOld(ctx, id) { ctx.db.put('fighters', id, {name: id + '-old'}); return ''; }
@@ -131,12 +142,31 @@ async fn a_rename_backfills_syncs_both_ways_and_drops_the_old_field_once_finishe
 }
 
 #[tokio::test]
-async fn a_write_racing_the_backfill_keeps_its_value() {
+async fn a_failed_backfill_holds_back_the_drop_and_retries_without_panicking() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("failed.db");
+    let backend = Backend::new("local".into(), Box::new(SqliteStore::open(&path, "local").unwrap())).unwrap();
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    write(&backend, "old", "writeOld", "bad").await;
+    let error = backend.deploy(deployment("new", 2)).await.unwrap_err();
+    assert!(matches!(&error, Error::Migration(message) if message.contains("bad row")), "{error}");
+    backend.install(deployment("finished", 3)).await.unwrap();
+    assert!(backend.release(DeploymentId::new("old").unwrap()).await.unwrap());
+    let error = backend.ready(DeploymentId::new("finished").unwrap()).await.unwrap_err();
+    assert!(matches!(&error, Error::Migration(message) if message.contains("bad row")), "{error}");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let mut statement = connection.prepare("SELECT name FROM pragma_table_info('fighters')").unwrap();
+    let columns: Vec<String> = statement.query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+    assert!(columns.contains(&"name".to_owned()), "{columns:?}");
+}
+
+#[tokio::test]
+async fn a_write_racing_the_backfill_commits_before_the_backfill_reaches_its_row() {
     let directory = tempfile::tempdir().unwrap();
     let (notices, _notices) = signals::unbounded_channel();
-    let (gate, held) = mpsc::channel();
+    let open = Arc::new(AtomicBool::new(false));
     let store = ControlledStore {
-        work: Some(held),
+        pause: Some((open.clone(), 0)),
         ..ControlledStore::new(SqliteStore::open(directory.path().join("race.db"), "local").unwrap(), notices)
     };
     let backend = Backend::new("local".into(), Box::new(store)).unwrap();
@@ -144,16 +174,16 @@ async fn a_write_racing_the_backfill_keeps_its_value() {
     for part in ["0", "1", "2"] {
         write(&backend, "old", "seed", part).await;
     }
-    // The backfill's first batch waits on the gate, so this write commits while the backfill is underway.
+    let new = DeploymentId::new("new").unwrap();
     backend.install(deployment("new", 2)).await.unwrap();
-    let racing = tokio::spawn({
-        let backend = backend.clone();
-        async move { write(&backend, "old", "writeOld", "299").await }
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    gate.send(()).unwrap();
-    racing.await.unwrap();
-    backend.ready(DeploymentId::new("new").unwrap()).await.unwrap();
+    let done = || async { backend.readiness(new.clone()).await.unwrap().pending[0].done };
+    while done().await < 256 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    write(&backend, "old", "writeOld", "299").await;
+    assert_eq!(done().await, 256, "the write committed while the backfill had not reached its row");
+    open.store(true, Ordering::SeqCst);
+    backend.ready(new).await.unwrap();
     assert_eq!(read(&backend, "new", "299").await, json!({"displayName": "299-OLD"}));
     assert_eq!(read(&backend, "new", "000").await, json!({"displayName": "N0"}));
 }

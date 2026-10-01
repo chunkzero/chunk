@@ -22,6 +22,7 @@ mod journal;
 pub(crate) mod log;
 mod operations;
 mod read;
+mod recount;
 pub(crate) mod retention;
 mod revision;
 mod schema;
@@ -42,6 +43,8 @@ pub struct SqliteStore {
     log: Option<log::Log>,
     retention: retention::Retention,
     job_limits: jobs::JobLimits,
+    /// The backfill work ID and the batch size it has shrunk to, for this process only.
+    batch: (u64, usize),
     pruned_at: Option<Instant>,
     readers: Arc<read::Pool>,
     _writer_lock: bootstrap::WriterLock,
@@ -161,6 +164,7 @@ impl SqliteStore {
             log,
             retention: retention::Retention::default(),
             job_limits: jobs::JobLimits::default(),
+            batch: (0, backfill::BATCH),
             pruned_at: None,
             _writer_lock: writer_lock,
         };
@@ -188,18 +192,21 @@ impl SqliteStore {
     /// Drops expand migration `expand`'s old shape, unless a resident deployment declares it again.
     fn drop_old_shape(&mut self, id: u64, expand: &str) -> Result<()> {
         let plan = journal::drop_plan(&self.connection, &self.schema, expand)?;
-        let statements = plan.as_ref().map_or_else(Vec::new, |plan| plan.statements.clone());
+        let statements = plan.as_ref().map_or_else(Vec::new, |(plan, _)| plan.statements.clone());
         log::write_or_roll_back(&self.connection, self.log.as_mut(), &statements, |transaction| {
-            if let Some(plan) = &plan {
+            if let Some((plan, tables)) = &plan {
                 for statement in &statements {
                     transaction.execute_batch(statement)?;
+                }
+                for table in tables {
+                    recount::run(transaction, table, &plan.schema[table])?;
                 }
                 journal::deactivate(transaction, expand)?;
                 schema::replace(transaction, &plan.schema)?;
             }
             work::finish(transaction, id)
         })?;
-        if let Some(plan) = plan {
+        if let Some((plan, _)) = plan {
             self.schema = Arc::new(plan.schema);
         }
         Ok(())
@@ -269,10 +276,13 @@ impl Storage for SqliteStore {
             Some((Work::Index(index), ..)) => index,
             Some((Work::Backfill { migration, table }, done, cursor)) => {
                 let schema = &self.schema;
-                return log::write_or_roll_back(&self.connection, self.log.as_mut(), &[], |transaction| {
+                let mut batch = if self.batch.0 == id { self.batch.1 } else { backfill::BATCH };
+                let result = log::write_or_roll_back(&self.connection, self.log.as_mut(), &[], |transaction| {
                     let work = (migration.as_str(), table.as_str());
-                    backfill::run(transaction, schema, id, work, (done, cursor.as_deref()), transform)
+                    backfill::run(transaction, schema, id, work, (done, cursor.as_deref()), &mut batch, transform)
                 });
+                self.batch = (id, batch);
+                return result;
             }
             Some((Work::Drop { migration }, ..)) => return self.drop_old_shape(id, &migration),
         };

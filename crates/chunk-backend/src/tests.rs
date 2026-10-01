@@ -104,6 +104,8 @@ struct ControlledStore {
     batch: Option<mpsc::Receiver<()>>,
     /// Holds the first item of pending work; it fails once the sender drops.
     work: Option<mpsc::Receiver<()>>,
+    /// Until set, pending work after its first run does nothing, leaving the commit thread free for writes.
+    pause: Option<(std::sync::Arc<std::sync::atomic::AtomicBool>, usize)>,
     /// The most successful commits one underlying write has persisted.
     largest_write: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -125,6 +127,7 @@ impl ControlledStore {
             batched: false,
             batch: None,
             work: None,
+            pause: None,
             largest_write: std::sync::Arc::default(),
         }
     }
@@ -204,6 +207,13 @@ impl Storage for ControlledStore {
         self.inner.pending_work()
     }
     fn run_work(&mut self, id: u64, transform: &mut chunk_store::Transform<'_>) -> chunk_store::Result<()> {
+        if let Some((open, runs)) = &mut self.pause {
+            if *runs > 0 && !open.load(std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                return Ok(());
+            }
+            *runs += 1;
+        }
         if let Some(gate) = self.work.take()
             && gate.recv().is_err()
         {

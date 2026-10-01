@@ -5,7 +5,7 @@
 use rusqlite::{Connection, params, params_from_iter, types::Value as SqlValue};
 use serde_json::{Map, Value};
 
-use crate::{DatabaseSchema, Error, Result, Transform};
+use crate::{DatabaseSchema, Error, Result, Transform, TransformError};
 
 use super::{
     codec::{self, quote},
@@ -13,31 +13,27 @@ use super::{
     write::{MAX_DOCUMENT_BYTES, MAX_DOCUMENT_TOTAL_BYTES},
 };
 
-const BATCH: usize = 256;
+pub(super) const BATCH: usize = 256;
 /// Bounds the rows passed to one transform call, below the engine's argument limit.
 const BATCH_BYTES: usize = 512 * 1024;
 
-/// Applies the next batch of backfill `id`, finishing it once no rows remain.
-pub(super) fn run(
+type Row = (String, usize, Map<String, Value>);
+
+/// Reads up to `limit` rows of `table` after `cursor`, and how many it read: it stops early at the batch's byte
+/// bound, so a count equal to the rows returned means no row was left behind.
+fn read(
     connection: &Connection,
-    schema: &DatabaseSchema,
-    id: u64,
-    (migration, table): (&str, &str),
-    (done, cursor): (u64, Option<&str>),
-    transform: &mut Transform<'_>,
-) -> Result<()> {
-    let applied = journal::load(connection)?;
-    let expand = applied.iter().find(|entry| entry.migration.id == migration).ok_or(Error::Corrupt("backfill"))?;
-    let added = &expand.migration.tables.get(table).ok_or(Error::Corrupt("backfill"))?.added;
-    let declared = expand.migration.schema.get(table).ok_or(Error::Corrupt("backfill"))?;
-    let stored = schema.get(table).ok_or(Error::Corrupt("backfill"))?;
+    table: &str,
+    stored: &chunk_contract::TableSchema,
+    (cursor, limit): (Option<&str>, usize),
+) -> Result<(Vec<Row>, usize)> {
     let mut columns = vec!["_id".to_owned(), "_bytes".to_owned()];
     columns.extend(stored.fields.keys().map(|field| quote(field)));
     let sql = format!("SELECT {} FROM {} WHERE _id > ?1 ORDER BY _id LIMIT ?2", columns.join(", "), quote(table));
     let mut rows = Vec::new();
     let mut bytes = 0;
     let mut statement = connection.prepare(&sql)?;
-    let mut query = statement.query(params![cursor.unwrap_or(""), BATCH])?;
+    let mut query = statement.query(params![cursor.unwrap_or(""), limit])?;
     let mut read = 0;
     while let Some(row) = query.next()? {
         read += 1;
@@ -55,25 +51,62 @@ pub(super) fn run(
         rows.push((row_id, old_bytes, fields));
     }
     drop(query);
-    let Some((last, _, _)) = rows.last() else {
+    Ok((rows, read))
+}
+
+/// Applies the next batch of backfill `id` of at most `batch` rows, finishing it once no rows remain. When the
+/// transform exceeds an engine limit, the batch halves, down to one row, and `batch` keeps the smaller size.
+pub(super) fn run(
+    connection: &Connection,
+    schema: &DatabaseSchema,
+    id: u64,
+    (migration, table): (&str, &str),
+    (done, cursor): (u64, Option<&str>),
+    batch: &mut usize,
+    transform: &mut Transform<'_>,
+) -> Result<()> {
+    let applied = journal::load(connection)?;
+    let expand = applied.iter().find(|entry| entry.migration.id == migration).ok_or(Error::Corrupt("backfill"))?;
+    let added = &expand.migration.tables.get(table).ok_or(Error::Corrupt("backfill"))?.added;
+    let declared = expand.migration.schema.get(table).ok_or(Error::Corrupt("backfill"))?;
+    let stored = schema.get(table).ok_or(Error::Corrupt("backfill"))?;
+    let (mut rows, read) = read(connection, table, stored, (cursor, *batch))?;
+    let limit = *batch;
+    if rows.is_empty() {
         work::finish(connection, id)?;
         return journal::schedule_drops(connection);
-    };
-    let (finished, last, count) = (read < BATCH && rows.len() == read, last.clone(), rows.len() as u64);
+    }
     let failed =
         |reason: String| Error::Migration(format!("migration {migration} failed to backfill {table}: {reason}"));
-    let inputs = rows
-        .iter()
-        .map(|(row_id, _, fields)| {
-            let mut input = fields.clone();
-            input.insert("_id".into(), Value::String(row_id.clone()));
-            Value::Object(input)
-        })
-        .collect();
-    let outputs = transform(migration, table, inputs).map_err(failed)?;
+    let readable = expand.migration.input_fields(table, false);
+    let outputs = loop {
+        let inputs = rows
+            .iter()
+            .map(|(row_id, _, fields)| {
+                let mut input: Map<_, _> = fields
+                    .iter()
+                    .filter(|(name, _)| readable.contains(name.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                input.insert("_id".into(), Value::String(row_id.clone()));
+                Value::Object(input)
+            })
+            .collect();
+        match transform(migration, table, inputs) {
+            Ok(outputs) => break outputs,
+            Err(TransformError::Limit) if rows.len() > 1 => {
+                *batch = (rows.len() / 2).max(1);
+                rows.truncate(*batch);
+            }
+            Err(TransformError::Limit) => return Err(failed(format!("row {} exceeds an engine limit", rows[0].0))),
+            Err(TransformError::Failed(reason)) => return Err(failed(reason)),
+        }
+    };
     if outputs.len() != rows.len() {
         return Err(failed("the transform returned the wrong number of rows".into()));
     }
+    let (finished, last, count) =
+        (read < limit && rows.len() == read, rows[rows.len() - 1].0.clone(), rows.len() as u64);
     let assignments: Vec<_> = added.iter().map(|field| format!("{} = ?", quote(field))).collect();
     let update = format!("UPDATE {} SET _bytes = ?, {} WHERE _id = ?", quote(table), assignments.join(", "));
     let mut total: i64 =
@@ -99,7 +132,8 @@ pub(super) fn run(
         }
         let mut values = vec![SqlValue::Integer(i64::try_from(document).map_err(|_| Error::Capacity)?)];
         for field in added {
-            values.push(codec::encode(&stored.fields[field], fields.get(field))?);
+            let definition = stored.fields.get(field).ok_or(Error::Corrupt("backfill"))?;
+            values.push(codec::encode(definition, fields.get(field))?);
         }
         values.push(SqlValue::Text(row_id));
         connection.prepare_cached(&update)?.execute(params_from_iter(values))?;

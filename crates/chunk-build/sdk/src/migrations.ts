@@ -77,7 +77,19 @@ export function migrate(migrations: Record<string, MigrationDefinition>, args: u
   const transform = direction === "to" ? transforms?.to : direction === "back" ? transforms?.back : undefined;
   if (!transform || !Array.isArray(rows))
     throw new Error(`Migration ${String(migration)} has no ${String(direction)} transform for ${String(table)}`);
-  return rows.map((row) => transform(freeze(row)));
+  const native = globalThis.Math;
+  globalThis.Math = Object.create(native, {
+    random: {
+      value: () => {
+        throw new Error("migrations must be deterministic");
+      },
+    },
+  });
+  try {
+    return rows.map((row) => transform(freeze(row)));
+  } finally {
+    globalThis.Math = native;
+  }
 }
 
 /** Whether each migration's tables have a `back` transform. */
