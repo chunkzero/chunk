@@ -1,4 +1,5 @@
 .chunk/
+.dev.vars
 .gradle/
 .kotlin/
 **/build/

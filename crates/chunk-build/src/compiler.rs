@@ -43,8 +43,9 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
     drop(executor);
     let source = String::from_utf8(super::read_limited(&staging.path().join("source.mjs"), 4 * 1024 * 1024)?)
         .map_err(io::Error::other)?;
-    let contract = extract(&source)
+    let mut contract = extract(&source)
         .map_err(|error| io::Error::other(format!("Backend deployment at {}: {error}", project.display())))?;
+    contract.contracts.env = inventory.env.clone();
     let apps = &inventory.apps;
     if let Some(methods) = &contract.contracts.session_methods {
         for method in &methods.methods {

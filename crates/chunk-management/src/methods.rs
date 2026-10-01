@@ -64,6 +64,12 @@ unary! {
     list_deployments: "DeploymentService" / "ListDeployments" (ListDeploymentsRequest) -> ListDeploymentsResponse;
     list_apps: "DeploymentService" / "ListApps" (ListAppsRequest) -> ListAppsResponse;
 
+    /// Creates or replaces a secret as a new version, which attached environments receive without a redeploy.
+    set_secret: "SecretService" / "SetSecret" (SetSecretRequest) -> SetSecretResponse;
+    /// Lists secret names and versions; values are write-only.
+    list_secrets: "SecretService" / "ListSecrets" (ListSecretsRequest) -> ListSecretsResponse;
+    delete_secret: "SecretService" / "DeleteSecret" (DeleteSecretRequest) -> DeleteSecretResponse;
+
     /// Core's status report, also its heartbeat; fenced by the lease from `attach`.
     report_status: "EnvironmentService" / "ReportStatus" (ReportStatusRequest) -> ReportStatusResponse;
     set_wake_alarm: "EnvironmentService" / "SetWakeAlarm" (SetWakeAlarmRequest) -> SetWakeAlarmResponse;

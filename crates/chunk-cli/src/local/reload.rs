@@ -118,9 +118,13 @@ pub(super) fn watch(root: &Path, ignored: &[PathBuf]) -> notify::Result<(Watcher
     Ok((watcher, receiver))
 }
 
-/// Source paths only: build outputs, tool state, hidden files and editor temporaries never trigger a rebuild.
+/// Source paths and `.dev.vars` only: build outputs, tool state, other hidden files and editor temporaries never
+/// trigger a rebuild.
 pub(super) fn relevant(root: &Path, ignored: &[PathBuf], path: &Path) -> bool {
     let Ok(relative) = path.strip_prefix(root) else { return false };
+    if relative == Path::new(super::dev_vars::FILE) {
+        return true;
+    }
     if relative.as_os_str().is_empty() || ignored.iter().any(|ignored| path.starts_with(ignored)) {
         return false;
     }

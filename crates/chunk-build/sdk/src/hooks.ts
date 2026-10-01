@@ -1,4 +1,4 @@
-import type { FunctionReference } from "./functions.ts";
+import type { FunctionReference, Vars } from "./functions.ts";
 import { freeze, v } from "./validators.ts";
 import type { AdmissionResult, Destination, PlayerId, PlayerIdentity, ServerStatus } from "./validators.ts";
 
@@ -9,6 +9,7 @@ export interface HookCaller {
 }
 interface ReadHookContext {
   readonly caller: HookCaller;
+  readonly env: Readonly<Vars>;
   readonly eventId: string;
   readonly domain: string;
   runQuery<A, R>(reference: FunctionReference<"query", A, R>, args: A): Promise<R>;
@@ -105,6 +106,7 @@ export function isHook(value: unknown): value is HookDefinition {
 
 interface RawHookContext {
   readonly caller: HookCaller;
+  readonly env: Readonly<Vars>;
   runQuery(path: string, args: unknown): Promise<unknown>;
   runMutation(path: string, args: unknown): Promise<unknown>;
 }
@@ -114,6 +116,7 @@ export async function invokeHook(hook: HookDefinition, raw: RawHookContext, payl
   const context = Object.freeze({
     ...freeze(payload),
     caller: freeze(raw.caller),
+    env: raw.env,
     runQuery: <A, R>(reference: FunctionReference<"query", A, R>, args: A) =>
       raw.runQuery(reference.path, args) as Promise<R>,
     ...(hook.contract.event === "server.ping"

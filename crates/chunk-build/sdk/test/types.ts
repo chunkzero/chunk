@@ -295,29 +295,43 @@ action({
   },
 });
 
+declare module "../src/functions.ts" {
+  interface Vars {
+    readonly GREETING: string;
+    readonly REGION?: string;
+  }
+  interface Secrets {
+    readonly TOKEN: string;
+  }
+}
+
 action({
   args: {},
   returns: v.string(),
   handler: async (ctx) => {
-    const secret: string = await ctx.secret("api-token");
-    const result = await ctx.http("api", { path: "status", headers: { authorization: secret } });
-    if (result.state === "completed") return result.body;
-    // @ts-expect-error rejected and uncertain effects have no completed response body
-    void result.body;
+    const response = await ctx.fetch("https://example.com/status", {
+      method: "POST",
+      headers: { authorization: ctx.env.TOKEN },
+      body: ctx.env.GREETING,
+    });
     // @ts-expect-error HTTP methods are a finite supported set
-    await ctx.http("api", { path: "status", method: "CONNECT" });
-    return result.reason;
+    await ctx.fetch(new URL("https://example.com/"), { method: "CONNECT" });
+    // @ts-expect-error variables only some environments set may be missing
+    const region: string = ctx.env.REGION;
+    // @ts-expect-error undeclared names are not typed
+    void ctx.env.MISSING;
+    return response.ok ? `${region}${await response.text()}` : String(response.status);
   },
 });
 query({
   args: {},
-  returns: v.null(),
+  returns: v.string(),
   handler: (ctx) => {
     // @ts-expect-error transactions cannot access HTTP
-    void ctx.http;
+    void ctx.fetch;
     // @ts-expect-error transactions cannot read secrets
-    void ctx.secret;
-    return null;
+    void ctx.env.TOKEN;
+    return ctx.env.GREETING;
   },
 });
 

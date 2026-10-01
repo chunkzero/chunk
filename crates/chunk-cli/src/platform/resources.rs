@@ -273,16 +273,16 @@ pub(super) fn label(name: &str, prefix: &str) -> String {
     name.strip_prefix(prefix).unwrap_or(name).to_ascii_lowercase().replace('_', " ")
 }
 
-fn time(time: Option<prost_types::Timestamp>) -> String {
+pub(super) fn time(time: Option<prost_types::Timestamp>) -> String {
     time.map(|time| prost_types::Timestamp { nanos: 0, ..time }.to_string()).unwrap_or_default()
 }
 
-fn request_id() -> String {
+pub(super) fn request_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
 /// Prints rows under a header, in columns as wide as their widest cell.
-fn table<const N: usize>(header: [&str; N], rows: impl IntoIterator<Item = [String; N]>) -> io::Result<()> {
+pub(super) fn table<const N: usize>(header: [&str; N], rows: impl IntoIterator<Item = [String; N]>) -> io::Result<()> {
     let rows: Vec<[String; N]> = std::iter::once(header.map(String::from)).chain(rows).collect();
     let widths: [usize; N] =
         std::array::from_fn(|column| rows.iter().map(|row| row[column].chars().count()).max().unwrap_or(0));

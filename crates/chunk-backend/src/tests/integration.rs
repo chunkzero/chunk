@@ -143,6 +143,8 @@ async fn stop_closes_subscriptions_joins_the_backend_and_releases_its_database()
         let config = crate::server::Config {
             bundle: Some(bundle.clone()),
             environment: "local".into(),
+            vars: None,
+            secrets: crate::Secrets::default(),
             state: directory.path().join("state"),
             replication: None,
         };

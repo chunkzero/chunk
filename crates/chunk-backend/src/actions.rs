@@ -106,6 +106,8 @@ pub(crate) struct Host {
     pub effects: Arc<crate::effects::ScopedEffects>,
     /// Set for an action, whose platform effects are moves; a command's go to its runner, and a hook has none.
     pub moves: Option<crate::moves::Slot>,
+    /// The secrets the invocation reads through `ctx.env`, fixed when it started; none for a hook.
+    pub secrets: Arc<crate::Secrets>,
 }
 
 struct CancelEffect(Cancellation);
@@ -116,6 +118,14 @@ impl Drop for CancelEffect {
 }
 
 impl chunk_js::ActionHost for Host {
+    fn secret_names(&self) -> Vec<String> {
+        self.secrets.names().map(str::to_owned).collect()
+    }
+
+    fn secret(&self, name: &str) -> Option<String> {
+        self.secrets.get(name).map(str::to_owned)
+    }
+
     fn platform(
         &self,
         sequence: u32,
@@ -154,20 +164,13 @@ impl chunk_js::ActionHost for Host {
         })
     }
 
-    fn http(
+    fn fetch(
         &self,
         sequence: u32,
         request: chunk_js::HttpRequest,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<chunk_js::HttpOutcome, String>>>> {
         let effects = self.effects.clone();
-        Box::pin(async move { Ok(effects.http(sequence, request).await) })
-    }
-
-    fn secret(&self, name: &str) -> std::result::Result<String, String> {
-        if self.cancellation.is_cancelled() || std::time::Instant::now() >= self.effects.deadline {
-            return Err("Secret capability expired".into());
-        }
-        self.effects.grants.secret(name)
+        Box::pin(async move { Ok(effects.fetch(sequence, request).await) })
     }
 
     fn call(

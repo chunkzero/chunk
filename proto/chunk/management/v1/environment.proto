@@ -107,6 +107,8 @@ message AttachResponse {
   Restore restore = 8;
   // Set for core: the lease this attach was granted. Constant for the stream.
   uint64 lease = 9;
+  // The environment's name, which selects the release's `[env.<name>.vars]`.
+  string environment_name = 10;
 }
 
 // A release archive (`dist/<id>.tar.gz` from `chunk build`) to download.

@@ -44,8 +44,9 @@ export async function desiredState(
   environmentId: string,
 ): Promise<{ message: AttachResponse; lease: bigint }> {
   const { snapshot } = await sql.begin("isolation level repeatable read read only", async (tx) => {
-    const [environment] = await tx<{ project_id: string; revision: bigint; lease: bigint; state: EnvironmentState }[]>`
-      select project_id, revision, lease, state from environments where id = ${environmentId}`;
+    const [environment] = await tx<
+      { project_id: string; name: string; revision: bigint; lease: bigint; state: EnvironmentState }[]
+    >`select project_id, name, revision, lease, state from environments where id = ${environmentId}`;
     if (!environment || environment.state === EnvironmentState.DELETING) throw notFound("environment");
     const deployment = await desiredDeployment(tx, environmentId);
     const secrets = await tx<{ name: string; version: bigint; ciphertext: Uint8Array }[]>`
@@ -59,6 +60,7 @@ export async function desiredState(
   const message = create(AttachResponseSchema, {
     revision: environment.revision,
     environmentId,
+    environmentName: environment.name,
     projectId: environment.project_id,
     secrets: await Promise.all(
       secrets.map(async ({ name, version, ciphertext }) => ({

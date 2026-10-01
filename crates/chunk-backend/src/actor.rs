@@ -106,8 +106,10 @@ impl Actor {
             deployment.validate().map_err(Error::Invalid)?;
             Self::schema_ready(&deployment, snapshot.schema())?;
             let id = DeploymentId::new(&deployment.id)?;
-            js.register(id.clone(), deployment.source.clone(), Limits::default())?;
-            let source = readers::Source { code: deployment.source.clone(), limits: Limits::default() };
+            let env = effects.env(&deployment);
+            js.register_with_env(id.clone(), deployment.source.clone(), Limits::default(), env.clone())?;
+            let secrets = effects.secrets.clone();
+            let source = readers::Source { code: deployment.source.clone(), limits: Limits::default(), env, secrets };
             sources.insert(id.clone(), Arc::new(source));
             versions.insert(id, Some(Arc::new(deployment)));
         }
@@ -291,7 +293,16 @@ impl Actor {
                     Err(Error::Busy)
                 } else {
                     self.js.register(id.clone(), source.clone(), limits).map_err(Error::from).map(|()| {
-                        self.sources.insert(id.clone(), Arc::new(readers::Source { code: source, limits }));
+                        let env = chunk_js::Json::empty();
+                        self.sources.insert(
+                            id.clone(),
+                            Arc::new(readers::Source {
+                                code: source,
+                                limits,
+                                env,
+                                secrets: self.actions.effects.secrets.clone(),
+                            }),
+                        );
                         self.versions.insert(id, None);
                     })
                 };
@@ -391,7 +402,7 @@ impl Actor {
             Err(error) => return (Err(error), Dependencies::default()),
         };
         let contract = self.versions.get(&call.deployment).cloned().flatten();
-        let target = Target { call, function: function.as_ref(), contract };
+        let target = Target { call, function: function.as_ref(), contract, secrets: &self.actions.effects.secrets };
         evaluate(&mut self.js, target, mode, view, cancellation, context)
     }
 

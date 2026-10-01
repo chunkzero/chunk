@@ -79,23 +79,32 @@ limit.
 ## Actions
 
 Actions (`action` / `internalAction`) run outside transactions, each on a fresh isolate in a bounded worker. Their
-context has `caller`, `invocationId`, `runQuery`, `runMutation`, `sleep`, and, where granted, `http` and `secret`; it
-has no `db`. Each nested query or mutation runs through the engine against a fresh snapshot, as the original caller and
-deployment, and a mutation gets the operation ID `action/<invocationId>/<effect sequence>`.
+context has `caller`, `invocationId`, `env`, `fetch`, `runQuery`, `runMutation` and `sleep`; it has no `db`. Each nested
+query or mutation runs through the engine against a fresh snapshot, as the original caller and deployment, and a
+mutation gets the operation ID `action/<invocationId>/<effect sequence>`.
 
 Call `allocate_action_id` and then `start_action(id, call)`, keeping the ID when acceptance is uncertain: one ID starts
 at most one invocation, and repeating the same request attaches to it. An action gets 30 seconds, 32 MiB of heap, 256
 effects with at most eight pending, and 1 MiB inputs. Cancellation, failure or a lost backend can follow a committed
 mutation; earlier effects are never rolled back, and actions are never retried automatically.
 
-**HTTP and secrets.** `Backend::new` grants actions nothing. `Backend::with_action_effects` takes `ActionEffects` with
-`ActionGrants` per deployment: named HTTP bindings (`HttpBinding::new(base URL, methods)`) and named secrets, held in
-memory only and supplied again after a restart. Actions call `ctx.http("name", {path, method, body})` with a relative
-path under the binding's base, and `await ctx.secret("name")`. Redirects, proxies, retries, decompression and cookies
-are off; bodies are UTF-8 text up to 64 KiB out and 128 KiB back; the timeout is ten seconds unless lowered. An outcome
-is `completed`, `rejected` (never sent) or `unknown` (sent, result lost), with a stable `effectId`. Error messages never
-include URLs or bodies, and messages containing a secret's value are redacted. Up to 16 deployments can have grants,
-each with 16 bindings and 16 secrets of up to 8 KiB.
+**Variables and secrets.** `ctx.env` holds the deployment's `chunk.toml` variables: its `[vars]`, with the
+`[env.<name>.vars]` that `ActionEffects::with_vars` selects applied over them. Queries, mutations and hooks see those
+alone. Actions and commands also see the environment's secrets, which `Backend::set_secrets` replaces at runtime: each
+invocation keeps the secrets it started with, and later ones read the new set. A secret's value enters the action's
+isolate only when the action reads that name. Secrets live in memory only, and `server::Config` installs them before the
+backend starts, so a restored job reads them too. Action errors, and the logs of actions and of every query and
+mutation, are redacted when they contain a value of a secret any invocation still holds, raw or JSON-escaped once or
+twice.
+
+**HTTP.** `ctx.fetch({url, method, headers, body})` reaches any public HTTP(S) URL through one client shared by the
+environment. It refuses loopback, private, CGNAT, link-local, cloud metadata (Azure's WireServer included),
+unique-local, multicast and reserved addresses, and IPv6 addresses embedding any of those IPv4 ones, after DNS
+resolution, and follows up to ten redirects itself, checking each; a redirect to another origin drops `Authorization`
+and `Cookie`. Proxies, retries, decompression and cookies are off; bodies are UTF-8 text up to 64 KiB out and 128 KiB
+back, with 32 request headers of up to 8 KiB in total and 64 response headers of up to 32 KiB, and a fetch has ten
+seconds. Each action has one fetch in flight. An outcome is `completed`, `rejected` (never sent) or `unknown` (sent,
+result lost), with a stable `effectId`. Error messages never include URLs or bodies.
 
 ## Scheduled jobs
 

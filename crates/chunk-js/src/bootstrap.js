@@ -3,6 +3,9 @@
   const schedule = Deno.core.ops.op_chunk_schedule;
   const action = Deno.core.ops.op_chunk_action;
   const actionId = Deno.core.ops.op_chunk_action_id;
+  const readEnv = Deno.core.ops.op_chunk_env;
+  const secretNames = Deno.core.ops.op_chunk_secret_names;
+  const readSecret = Deno.core.ops.op_chunk_secret;
   const read = Deno.core.ops.op_chunk_read;
   const readCaller = Deno.core.ops.op_chunk_caller;
   const write = Deno.core.ops.op_chunk_write;
@@ -73,6 +76,24 @@
         Object.defineProperty(prototype, name, { value: unavailable, writable: false, configurable: false });
     }
   }
+  // One deployment's runtime serves its transactions with one env, and each action runs in a fresh runtime.
+  let env;
+  const environment = () => (env ??= freeze(parse(readEnv())));
+  // An action's secrets are getters, so only the values it reads enter the isolate.
+  let actionEnv;
+  const actionEnvironment = () => {
+    if (actionEnv) return actionEnv;
+    const values = parse(readEnv());
+    for (const name of parse(secretNames())) {
+      let value;
+      Object.defineProperty(values, name, {
+        get: () => (value ??= readSecret(name) ?? undefined),
+        enumerable: true,
+        configurable: false,
+      });
+    }
+    return (actionEnv = freeze(values));
+  };
   return async (handler, callerJson, generation, argsJson) => {
     const invocationId = actionId();
     let caller;
@@ -82,9 +103,10 @@
         ? freeze({
             caller: parse(callerJson),
             invocationId,
-            http: async (binding, request) =>
-              parse(await action(stringify({ kind: "http", request: { ...request, binding } }))),
-            secret: async (name) => parse(await action(stringify({ kind: "secret", name }))),
+            get env() {
+              return actionEnvironment();
+            },
+            fetch: async (request) => parse(await action(stringify({ kind: "fetch", request }))),
             platform: async (request) => parse(await action(stringify({ kind: "platform", request }))),
             runQuery: async (functionPath, argumentsValue) =>
               parse(await action(stringify({ kind: "query", function: functionPath, arguments: argumentsValue }))),
@@ -103,6 +125,9 @@
                 caller = parse(callerJson);
               }
               return caller;
+            },
+            get env() {
+              return environment();
             },
             scheduler: freeze({
               runAt: (at, functionPath, argumentsValue) =>

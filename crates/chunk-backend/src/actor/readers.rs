@@ -20,6 +20,10 @@ use crate::{
 pub(crate) struct Source {
     pub code: String,
     pub limits: Limits,
+    /// What `ctx.env` reads.
+    pub env: chunk_js::Json,
+    /// Redacts what queries log.
+    pub secrets: crate::effects::SecretSlot,
 }
 
 pub(crate) enum Ticket {
@@ -177,13 +181,21 @@ fn work(index: usize, incoming: &mpsc::Receiver<Work>, events: &tokio::sync::mps
 fn run(engine: &mut Engine, loaded: &mut BTreeSet<DeploymentId>, read: &Read) -> (Result<String>, Dependencies) {
     let deployment = &read.call.deployment;
     if !loaded.contains(deployment) {
-        if let Err(error) = engine.register(deployment.clone(), read.source.code.clone(), read.source.limits) {
+        let source = &read.source;
+        if let Err(error) =
+            engine.register_with_env(deployment.clone(), source.code.clone(), source.limits, source.env.clone())
+        {
             return (Err(error.into()), Dependencies::default());
         }
         loaded.insert(deployment.clone());
     }
     let timer = Timer::start();
-    let target = Target { call: &read.call, function: read.function.as_ref(), contract: read.contract.clone() };
+    let target = Target {
+        call: &read.call,
+        function: read.function.as_ref(),
+        contract: read.contract.clone(),
+        secrets: &read.source.secrets,
+    };
     let (result, reads) = evaluate(engine, target, Mode::Query, read.view.clone(), &read.cancellation, None);
     timer.stop(match read.ticket {
         Ticket::Query { .. } => Phase::Query,

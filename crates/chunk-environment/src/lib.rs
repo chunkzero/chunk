@@ -93,6 +93,9 @@ impl Config {
         let core = CoreConfig {
             bundle: if management.is_some() { None } else { Some(required("CHUNK_BUNDLE")?) },
             environment,
+            // Under management, the first desired state names the environment and grants its secrets.
+            environment_name: None,
+            secrets: chunk_backend::Secrets::default(),
             control_record: state.join("control.json"),
             state,
             control_bind: optional("CHUNK_CONTROL_BIND")?.unwrap_or(([127, 0, 0, 1], 25567).into()),

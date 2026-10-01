@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    Cancellation, Error, Execution, Invocation, Limits, ReadHost,
+    Cancellation, Error, Execution, Invocation, Json, Limits, ReadHost,
     capabilities::Capabilities,
     deadline::Deadline,
     isolate::Runtime,
@@ -33,6 +33,7 @@ impl DeploymentId {
 struct Resident {
     source: String,
     limits: Limits,
+    env: Json,
     runtime: Option<Runtime>,
 }
 
@@ -69,10 +70,24 @@ impl Engine {
         })
     }
 
-    /// Loads an immutable bundled module without invocation capabilities.
+    /// Loads an immutable bundled module without invocation capabilities, whose `ctx.env` is empty.
     /// # Errors
     /// Rejects duplicate identities, source/limit violations and failed initialization.
     pub fn register(&mut self, id: DeploymentId, source: String, limits: Limits) -> Result<(), Error> {
+        self.register_with_env(id, source, limits, Json::empty())
+    }
+
+    /// Loads an immutable bundled module whose queries and mutations read `env`, a JSON object of strings, as
+    /// `ctx.env`. Actions read the env of their invocation instead.
+    /// # Errors
+    /// As [`Self::register`].
+    pub fn register_with_env(
+        &mut self,
+        id: DeploymentId,
+        source: String,
+        limits: Limits,
+        env: Json,
+    ) -> Result<(), Error> {
         if self.deployments.contains_key(&id) {
             return Err(Error::Invalid("deployment already registered"));
         }
@@ -93,7 +108,7 @@ impl Engine {
             limits,
             &Cancellation::default(),
         )?;
-        self.deployments.insert(id, Resident { source, limits, runtime: Some(runtime) });
+        self.deployments.insert(id, Resident { source, limits, env, runtime: Some(runtime) });
         Ok(())
     }
 
@@ -141,6 +156,7 @@ impl Engine {
             arguments,
             timestamp: invocation.timestamp,
             seed: invocation.seed,
+            env: resident.env.clone(),
             runner: Runner::Transaction(Capabilities {
                 generation: runtime.calls() + 1,
                 host,
@@ -201,6 +217,7 @@ impl Engine {
             arguments: invocation.arguments,
             timestamp: invocation.timestamp,
             seed: invocation.seed,
+            env: invocation.env,
             runner: Runner::Action(crate::actions::ActionCapabilities::new(
                 invocation.id,
                 host,

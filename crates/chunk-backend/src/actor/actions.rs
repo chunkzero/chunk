@@ -69,7 +69,7 @@ pub(super) struct Actions {
     events: mpsc::Sender<Event>,
     slots: Arc<Semaphore>,
     external_slots: Arc<Semaphore>,
-    effects: crate::ActionEffects,
+    pub effects: crate::ActionEffects,
     /// Every live action is in flight here, from launch until its worker ends.
     pub activity: chunk_service::Activity,
 }
@@ -126,6 +126,34 @@ impl Actions {
             waiting.reply.finish(Err(Limit::ActionMemory.exceeded()));
         } else {
             self.waiting.push_back(waiting);
+        }
+    }
+
+    /// The effects an invocation started now reaches, with the secrets it keeps until it ends. Hooks read variables
+    /// only, and can't fetch.
+    fn host(
+        &self,
+        id: &ActionId,
+        invocation: &str,
+        cancellation: &Cancellation,
+        deadline: std::time::Instant,
+        purpose: &crate::commands::Purpose,
+        hook: bool,
+    ) -> Host {
+        Host {
+            effects: Arc::new(crate::effects::ScopedEffects {
+                invocation: invocation.to_owned(),
+                fetcher: (!hook).then(|| self.effects.fetcher.clone()),
+                slots: self.external_slots.clone(),
+                cancellation: cancellation.clone(),
+                deadline,
+            }),
+            id: id.clone(),
+            events: self.events.clone(),
+            slots: self.slots.clone(),
+            cancellation: cancellation.clone(),
+            moves: matches!(purpose, crate::commands::Purpose::Function).then(|| self.effects.moves.clone()),
+            secrets: if hook { Arc::default() } else { self.effects.secrets() },
         }
     }
 
@@ -270,11 +298,11 @@ impl Drop for Actions {
 }
 
 /// Runs an action of `deployment` on an engine of its own and checks its result against `result`. What its JavaScript
-/// wrote to `console`, and the message of an error it threw, have `grants` redacted.
+/// wrote to `console`, and the message of an error it threw, have `secrets` redacted.
 fn run_action(
     deployment: &Deployment,
     result: &chunk_contract::Schema,
-    grants: &crate::effects::ActionGrants,
+    secrets: &crate::Secrets,
     invocation: ActionInvocation,
     host: Host,
     id: &ActionId,
@@ -286,7 +314,7 @@ fn run_action(
         engine.register(deployment_id.clone(), deployment.source.clone(), Limits::default())?;
         let execution = engine.execute_action(&deployment_id, invocation, Rc::new(host), cancellation)?;
         for log in execution.logs {
-            console!(log.level.as_str(), invocation = %id, message = grants.redact(log.message));
+            console!(log.level.as_str(), invocation = %id, message = secrets.redact(log.message));
         }
         let mut value = serde_json::from_str(&execution.value)?;
         result.normalize_api(&mut value);
@@ -299,7 +327,7 @@ fn run_action(
     run().map_err(|error| match error {
         Error::JavaScript(ref inner) => match inner.as_ref() {
             chunk_js::Error::JavaScript(message) => {
-                Error::from(chunk_js::Error::JavaScript(grants.redact(message.clone())))
+                Error::from(chunk_js::Error::JavaScript(secrets.redact(message.clone())))
             }
             _ => error,
         },
@@ -395,21 +423,7 @@ impl Actor {
         let events = self.actions.events.clone();
         let deadline =
             std::time::Instant::now() + if hook { crate::hooks::HOOK_TIMEOUT } else { Duration::from_secs(30) };
-        let grants = if hook { Arc::default() } else { self.actions.effects.grants(&call.deployment) };
-        let host = Host {
-            effects: Arc::new(crate::effects::ScopedEffects {
-                invocation: invocation_identity.clone(),
-                grants: grants.clone(),
-                slots: self.actions.external_slots.clone(),
-                cancellation: cancellation.clone(),
-                deadline,
-            }),
-            id: id.clone(),
-            events: events.clone(),
-            slots: self.actions.slots.clone(),
-            cancellation: cancellation.clone(),
-            moves: matches!(purpose, crate::commands::Purpose::Function).then(|| self.actions.effects.moves.clone()),
-        };
+        let host = self.actions.host(&id, &invocation_identity, &cancellation, deadline, &purpose, hook);
         let invocation = ActionInvocation {
             id: invocation_identity,
             export: function.export,
@@ -418,7 +432,9 @@ impl Actor {
             timestamp: self.view.base.timestamp,
             seed,
             deadline,
+            env: self.actions.effects.env(&deployment),
         };
+        let secrets = host.secrets.clone();
         let worker_id = id.clone();
         let worker_cancellation = cancellation.clone();
         let busy = self.actions.activity.begin();
@@ -429,7 +445,7 @@ impl Actor {
                     run_action(
                         &deployment,
                         &function.result,
-                        &grants,
+                        &secrets,
                         invocation,
                         host,
                         &worker_id,

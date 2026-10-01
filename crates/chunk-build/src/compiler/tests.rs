@@ -45,6 +45,7 @@ fn action_declarations_compile_and_execute_in_the_isolated_runner() {
                 timestamp: 0,
                 seed: 0,
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(1),
+                env: chunk_js::Json::empty(),
             },
             std::rc::Rc::new(Host),
             &Cancellation::default(),

@@ -31,8 +31,10 @@ export {
 export type {
   AsyncContext,
   ActionContext,
-  HttpRequest,
-  HttpOutcome,
+  FetchInit,
+  FetchResponse,
+  Vars,
+  Secrets,
   FunctionDefinition,
   FunctionBuilder,
   QueryContext,

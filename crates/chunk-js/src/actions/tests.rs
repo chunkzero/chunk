@@ -29,6 +29,7 @@ fn action_deadline_expires_a_sleep_without_retaining_its_runtime() {
             timestamp: 0,
             seed: 0,
             deadline: Instant::now() + Duration::from_millis(50),
+            env: Json::empty(),
         },
         Rc::new(Host),
         &Cancellation::default(),

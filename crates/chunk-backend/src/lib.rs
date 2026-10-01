@@ -31,12 +31,12 @@ mod system;
 mod timing;
 
 pub use actions::{ActionHandle, ActionId, ActionIdentity, ActionStatus};
-pub use chunk_js::{DeploymentId, HttpMethod};
+pub use chunk_js::DeploymentId;
 pub use commands::{
     CommandCatalog, CommandEffect, CommandEffects, CommandIdentity, CommandRequest, CommandScope,
     CommandSuggestionRequest,
 };
-pub use effects::{ActionEffects, ActionGrants, HttpBinding};
+pub use effects::{ActionEffects, Secrets};
 pub use limits::Limit;
 pub use moves::PlayerMoves;
 pub use send::{SendBudget, SendCharge};

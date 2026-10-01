@@ -78,7 +78,8 @@ chunk deploy examples/local --env prod
 `chunk auth login` prints a link to the dashboard; open it, signed in with the operator token, and approve the login.
 `chunk deploy` builds a release, uploads it unless management already holds it, deploys it and waits until it is active,
 then prints the address players join at. Run it again to deploy a new release; the dashboard can roll back to an earlier
-one.
+one. Set the secrets the project's `chunk.toml` requires with `chunk secrets put NAME --env prod`; deploy warns about
+any without a value.
 
 Players join at that address: the environment's hostname, followed by `:port` when `CHUNK_PLAYER_PORT` is not 25565, for
 example `env-<id>.localhost` from this host with the defaults. The edge routes by hostname, so a bare IP address or

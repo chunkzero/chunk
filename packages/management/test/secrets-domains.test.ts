@@ -51,6 +51,29 @@ describe.skipIf(!databaseUrl)("SecretService and DomainService", () => {
     );
   });
 
+  test("SetSecret takes valid names, non-empty UTF-8 values up to 64 KiB and 256 secrets an environment", async () => {
+    const secrets = h.client(SecretService);
+    const environmentId = environments[1] ?? "";
+    const set = (name: string, value: Uint8Array) =>
+      secrets.setSecret({ requestId: crypto.randomUUID(), environmentId, name, value });
+    const text = new TextEncoder().encode("value");
+    for (const [name, value] of [
+      ["bad-name", text],
+      [`A${"a".repeat(128)}`, text],
+      ["EMPTY", new Uint8Array()],
+      ["LARGE", new Uint8Array(64 * 1024 + 1).fill(97)],
+      ["BINARY", new Uint8Array([0xff, 0xfe])],
+    ] as const) {
+      expect(await codeOf(set(name, value))).toBe(Code.InvalidArgument);
+    }
+    expect((await set(`_${"a".repeat(127)}`, new Uint8Array(64 * 1024).fill(97))).secret?.version).toBe(1n);
+    await h.sql`
+      insert into secrets (environment_id, name, version, ciphertext)
+      select ${environmentId}, 'S' || i, 1, '\\x00'::bytea from generate_series(1, 255) i`;
+    expect(await codeOf(set("ONE_MORE", text))).toBe(Code.InvalidArgument);
+    expect((await set("S1", text)).secret?.version).toBe(2n);
+  });
+
   test("domains verify through a DNS TXT record", async () => {
     const domains = h.client(DomainService);
     const [first = "", second = ""] = environments;

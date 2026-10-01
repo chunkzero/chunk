@@ -28,6 +28,10 @@ impl Shared {
     }
 
     /// Makes `bundle` resident beside earlier versions, retrying while the backend is busy.
+    pub fn set_secrets(&self, secrets: chunk_backend::Secrets) {
+        self.core.set_secrets(secrets);
+    }
+
     pub async fn deploy(&self, bundle: chunk_contract::Deployment) -> io::Result<()> {
         self.core.deploy(bundle).await
     }
@@ -114,6 +118,8 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
     let config = CoreConfig {
         bundle: Some(bundle),
         environment: staged.control.deployment.environment.clone(),
+        environment_name: settings.environment_name.clone(),
+        secrets: staged.secrets.clone(),
         state: settings.state.clone(),
         control_record: settings.state.join("control").join("connection.json"),
         control_bind: settings.control_bind,

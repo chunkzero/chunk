@@ -1,6 +1,12 @@
 //! `chunk deploy`: build the release, upload it unless the project holds it, deploy it and follow the deployment.
 
-use std::{fmt::Write as _, io, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeSet,
+    fmt::Write as _,
+    io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use chunk_management::{
     Client, Code,
@@ -11,7 +17,7 @@ use chunk_management::{
 };
 use sha2::{Digest, Sha256};
 
-use super::{EnvironmentArgs, Session, api_error};
+use super::{EnvironmentArgs, Session, api_error, secrets};
 use crate::building::{self, BuildMode, progress::Progress};
 
 #[derive(clap::Args)]
@@ -33,9 +39,10 @@ pub(super) async fn run(options: Options) -> io::Result<()> {
         let local = building::prepare(&building::Options { project: options.path, output: None })?;
         cliclack::log::info("Building application release…")?;
         let built = building::execute(&local, BuildMode::Release, stop.clone(), Progress::default()).await?;
+        let client = &session.client;
+        warn_missing_secrets(client, &environment, &built.release.directory).await?;
         let release = built.release.id;
         let archive = built.release.archive.expect("release builds write an archive");
-        let client = &session.client;
         let deployment = tokio::select! {
             deployment = async {
                 upload(client, &project.id, &release, archive).await?;
@@ -86,6 +93,27 @@ async fn upload(client: &Client, project_id: &str, release_id: &str, archive: Pa
     let complete = CompleteReleaseUploadRequest { project_id: project_id.into(), release_id: release_id.into() };
     client.complete_release_upload(&complete).await.map_err(api_error)?;
     Ok(())
+}
+
+/// Warns about the secrets the release requires that the environment has no value for; actions that read them fail.
+async fn warn_missing_secrets(client: &Client, environment: &Environment, release: &Path) -> io::Result<()> {
+    let backend: chunk_contract::Deployment = chunk_service::read(&release.join("backend.json"))?;
+    let required = backend.contracts.env.secrets;
+    if required.is_empty() {
+        return Ok(());
+    }
+    let set: BTreeSet<String> =
+        secrets::list(client, &environment.id).await?.into_iter().map(|secret| secret.name).collect();
+    let missing: Vec<_> = required.difference(&set).map(String::as_str).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    cliclack::log::warning(format!(
+        "{} has no value for required secrets {}; set them with `chunk secrets put NAME --env {}`",
+        environment.name,
+        missing.join(", "),
+        environment.name
+    ))
 }
 
 /// Deploys once however often an unreachable platform makes it retry, by reusing one request ID.

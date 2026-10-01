@@ -10,6 +10,7 @@ mod log_store;
 mod metrics;
 mod release;
 mod retire;
+mod secrets;
 mod status;
 mod telemetry;
 mod usage;
@@ -93,6 +94,8 @@ pub(crate) struct Managed<'a> {
     renewal: Mutex<Option<Renewal>>,
     /// Ships core's log lines and usage, and outlives this attachment for a last shipment.
     telemetry: Arc<Telemetry>,
+    /// The secrets the backend holds.
+    secrets: Mutex<secrets::Versions>,
     /// Cancelled once core shuts down. From then on no deployment activates, no gateway starts and no status is
     /// reported periodically, while attaches still publish their leases.
     stopping: CancellationToken,
@@ -186,6 +189,7 @@ impl<'a> Managed<'a> {
             log_store: registration.log_store,
             renewal: Mutex::new(registration.renewal),
             telemetry: Arc::new(telemetry),
+            secrets: Mutex::new(registration.secrets),
             environment: registration.environment,
             releases: release::Store::new(state, core.archives().clone()),
             activation: state.join("managed.json"),
@@ -350,6 +354,7 @@ impl<'a> Managed<'a> {
                     check(&desired, &self.environment)?;
                     self.take_over_renewal().await;
                     self.log_store.renew(desired.log_store.as_ref());
+                    self.install_secrets(&desired);
                     self.lease.send_replace(Lease::Held(desired.lease));
                     self.attaching.store(false, Ordering::SeqCst);
                     {
@@ -367,6 +372,18 @@ impl<'a> Managed<'a> {
                     applied = work.take().map(|work| work.revision);
                 }
             }
+        }
+    }
+
+    /// Installs `desired`'s secrets once their names or versions differ from those the backend holds. Actions that
+    /// start afterwards read them.
+    fn install_secrets(&self, desired: &v1::AttachResponse) {
+        let versions = secrets::versions(desired);
+        let mut installed = self.secrets.lock().unwrap_or_else(PoisonError::into_inner);
+        if *installed != versions {
+            self.core.set_secrets(secrets::decode(desired));
+            tracing::info!(secrets = versions.len(), "secrets updated");
+            *installed = versions;
         }
     }
 
@@ -646,13 +663,16 @@ pub(crate) struct Registration {
     log_store: Arc<LogStore>,
     /// Renews `log_store`'s credentials from the attach that took no lease, until the core attach takes over.
     renewal: Option<Renewal>,
+    /// The secrets core starts with.
+    secrets: secrets::Versions,
 }
 
 impl Registration {
     /// Reads the first desired state from an attach that claims no lease, since core must know where its log replicates
     /// before it opens the log, and only then knows the epoch a core attach carries. Attaches again until management
     /// answers, or returns `None` once `stop` is cancelled. Object storage management grants replaces `core`'s
-    /// replication, and that attach keeps renewing its credentials while core restores and starts.
+    /// replication, and that attach keeps renewing its credentials while core restores and starts. It also names the
+    /// environment, whose variables deployments read, and grants the secrets core starts with.
     /// # Errors
     /// Reports a desired state for another environment or an invalid log store.
     pub(crate) async fn attach(
@@ -690,6 +710,9 @@ impl Registration {
         if replication.is_some() {
             core.replication = replication;
         }
+        core.environment_name = Some(desired.environment_name.clone()).filter(|name| !name.is_empty());
+        core.secrets = secrets::decode(&desired);
+        let secrets = secrets::versions(&desired);
         let log_store = Arc::new(log_store);
         let renewer = Renewer {
             client,
@@ -698,7 +721,7 @@ impl Registration {
             log_store: log_store.clone(),
         };
         let renewal = renewer.start(Some(stream));
-        Ok(Some(Self { instance_id, environment, log_store, renewal }))
+        Ok(Some(Self { instance_id, environment, log_store, renewal, secrets }))
     }
 
     /// A run that replicates nothing management grants.
@@ -710,6 +733,7 @@ impl Registration {
             environment: environment.into(),
             log_store: Arc::new(log_store),
             renewal: None,
+            secrets: Vec::new(),
         }
     }
 }

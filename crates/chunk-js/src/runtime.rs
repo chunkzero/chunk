@@ -23,6 +23,7 @@ pub(crate) struct Prepared {
     pub arguments: Json,
     pub timestamp: i64,
     pub seed: u64,
+    pub env: Json,
     pub runner: Runner,
 }
 
@@ -45,7 +46,7 @@ impl State {
         cancellation: &Cancellation,
     ) -> Result<Execution, Error> {
         self.calls += 1;
-        let Prepared { export, caller, arguments, runner, timestamp, seed } = prepared;
+        let Prepared { export, caller, arguments, runner, timestamp, seed, env } = prepared;
         let (capabilities, action) = match runner {
             Runner::Transaction(capabilities) => (Some(capabilities), None),
             Runner::Action(action) => (None, Some(action)),
@@ -54,6 +55,7 @@ impl State {
         crate::profile::begin(&mut self.runtime, timestamp, seed)?;
         self.runtime.op_state().borrow_mut().put(capabilities);
         self.runtime.op_state().borrow_mut().put(action);
+        self.runtime.op_state().borrow_mut().put(crate::actions::Env(env));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
             let result = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str()));
             if !is_action {
@@ -97,6 +99,7 @@ impl State {
         });
         runtime.op_state().borrow_mut().put(None::<Capabilities>);
         runtime.op_state().borrow_mut().put(None::<crate::actions::ActionCapabilities>);
+        runtime.op_state().borrow_mut().put(crate::actions::Env(Json::empty()));
         crate::profile::initialize(&mut runtime);
         let heap_signal = termination.clone();
         let handle = runtime.v8_isolate().thread_safe_handle();

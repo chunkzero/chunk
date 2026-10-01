@@ -33,8 +33,7 @@ impl HttpMethod {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HttpRequest {
-    pub binding: String,
-    pub path: String,
+    pub url: String,
     #[serde(default)]
     pub method: HttpMethod,
     #[serde(default)]
@@ -47,7 +46,20 @@ pub struct HttpRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum HttpOutcome {
-    Completed { effect_id: String, status: u16, headers: BTreeMap<String, String>, body: String },
-    Rejected { effect_id: String, reason: String },
-    Unknown { effect_id: String, reason: String },
+    /// `url` is where the response came from, after any redirects.
+    Completed {
+        effect_id: String,
+        url: String,
+        status: u16,
+        headers: BTreeMap<String, String>,
+        body: String,
+    },
+    Rejected {
+        effect_id: String,
+        reason: String,
+    },
+    Unknown {
+        effect_id: String,
+        reason: String,
+    },
 }

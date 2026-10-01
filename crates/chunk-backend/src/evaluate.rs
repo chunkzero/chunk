@@ -15,6 +15,8 @@ pub(crate) struct Target<'a> {
     pub call: &'a Call,
     pub function: Option<&'a Function>,
     pub contract: Option<Arc<Deployment>>,
+    /// Redacts what it logs, since an action may pass it a secret.
+    pub secrets: &'a crate::effects::SecretSlot,
 }
 
 /// Runs one transaction against `view`, returning what it read even when it fails.
@@ -27,7 +29,7 @@ pub(crate) fn evaluate(
     cancellation: &Cancellation,
     context: Option<(i64, u64, String)>,
 ) -> (Result<Execution>, Dependencies) {
-    let Target { call, function, contract } = target;
+    let Target { call, function, contract, secrets } = target;
     let trace = Rc::new(RefCell::new(Dependencies::default()));
     let operation = context.as_ref().map(|(_, _, operation)| operation.clone());
     let (timestamp, seed) = context.map_or_else(
@@ -60,7 +62,7 @@ pub(crate) fn evaluate(
                     log.level.as_str(),
                     deployment = call.deployment.as_str(),
                     function = call.function,
-                    message = log.message
+                    message = secrets.redact(log.message.clone())
                 );
             }
             let mut value = serde_json::from_str(&execution.value)?;
