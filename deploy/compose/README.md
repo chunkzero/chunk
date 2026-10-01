@@ -100,28 +100,24 @@ with offline test players, and removes everything it created. It refuses to run 
 ## Stopping
 
 Environments' machines are not part of the Compose project: they keep running without management, and they keep the
-`chunk` network in use. To take the install down, delete every environment first. Neither the CLI nor the dashboard
-deletes environments yet, so call the API, from `deploy/compose` again:
+`chunk` network in use. To take the install down, delete every environment first. Note each environment's ID before you
+do, since the cleanup below finds leftovers by it. Delete them with the CLI you logged in with, naming the project with
+`--project` if you have several:
 
 ```sh
-cd deploy/compose  # from the repository root
-url=http://localhost:8080  # CHUNK_PUBLIC_URL
-token=$(sed -n 's/^CHUNK_OPERATOR_TOKEN=//p' .env)
-environments="ENVIRONMENT_ID ..."  # every ID `chunk environments` lists
-call() {
-  curl -sS -o /dev/null -w '%{http_code}\n' "$url/chunk.management.v1.ProjectService/$1" \
-    -H "authorization: Bearer $token" -H 'content-type: application/json' -d "{\"environmentId\":\"$2\"}"
-}
-for environment in $environments; do
-  call DeleteEnvironment "$environment"
-  until [ "$(call GetEnvironment "$environment")" = 404 ]; do sleep 2; done
-done
+chunk environments  # note every ID
+chunk environments delete prod --wait --yes  # for each environment
 ```
+
+Deleting destroys an environment's machines and data, so without `--yes` the CLI asks first, and refuses to run without
+a terminal. `--wait` returns once management reports the environment gone.
 
 Once management reports them gone, stop it so it starts nothing new, remove anything a provider call still in flight
 left behind, and take the stack down:
 
 ```sh
+cd deploy/compose  # from the repository root
+environments="ENVIRONMENT_ID ..."  # the IDs you noted
 docker compose stop
 for environment in $environments; do
   for container in $(docker ps -aq --filter "label=chunk.environment=$environment"); do docker rm -fv "$container"; done

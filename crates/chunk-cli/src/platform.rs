@@ -100,6 +100,11 @@ impl Session {
 
     async fn environment(&self, selector: &EnvironmentArgs) -> io::Result<(Project, Environment)> {
         let project = self.project(&selector.project).await?;
+        let environment = self.environment_in(&project, &selector.environment).await?;
+        Ok((project, environment))
+    }
+
+    async fn environment_in(&self, project: &Project, selector: &str) -> io::Result<Environment> {
         let client = &self.client;
         let project_id = &project.id;
         let environments = all(|page_token| async move {
@@ -107,10 +112,7 @@ impl Session {
             client.list_environments(&request).await.map(|page| (page.environments, page.next_page_token))
         })
         .await?;
-        let environment = choose(environments, Some(&selector.environment), "environment", |environment| {
-            [&environment.id, &environment.name]
-        })?;
-        Ok((project, environment))
+        choose(environments, Some(selector), "environment", |environment| [&environment.id, &environment.name])
     }
 }
 

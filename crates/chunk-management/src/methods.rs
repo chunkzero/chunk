@@ -48,7 +48,11 @@ unary! {
     list_projects: "ProjectService" / "ListProjects" (ListProjectsRequest) -> ListProjectsResponse;
     create_environment:
         "ProjectService" / "CreateEnvironment" (CreateEnvironmentRequest) -> CreateEnvironmentResponse;
+    get_environment: "ProjectService" / "GetEnvironment" (GetEnvironmentRequest) -> GetEnvironmentResponse;
     list_environments: "ProjectService" / "ListEnvironments" (ListEnvironmentsRequest) -> ListEnvironmentsResponse;
+    /// Starts deleting an environment, which finishes in the background; `get_environment` is not found once it has.
+    delete_environment:
+        "ProjectService" / "DeleteEnvironment" (DeleteEnvironmentRequest) -> DeleteEnvironmentResponse;
 
     upload_release: "DeploymentService" / "UploadRelease" (UploadReleaseRequest) -> UploadReleaseResponse;
     complete_release_upload:
