@@ -23,7 +23,8 @@ memory_mib = 512 # 128 to 8192
 max_sessions = 2 # sessions per JVM, 1 to 16
 ```
 
-It also declares the variables backend functions read as `ctx.env`, and the secrets they need:
+It also declares the variables backend functions read as `ctx.env` and gameplay code as the generated `Vars`, and the
+secrets backend functions need:
 
 ```toml
 [vars]

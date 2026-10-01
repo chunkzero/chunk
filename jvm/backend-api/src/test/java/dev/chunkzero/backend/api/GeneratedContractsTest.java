@@ -6,6 +6,7 @@ import dev.chunkzero.generated.BackendTypes;
 import dev.chunkzero.generated.BackendTypes.Shared.Profile.RecordArgs.State;
 import dev.chunkzero.generated.SessionConfigs;
 import dev.chunkzero.generated.SessionMethods;
+import dev.chunkzero.generated.Vars;
 
 import org.junit.jupiter.api.Test;
 
@@ -18,6 +19,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 class GeneratedContractsTest {
     @Test
@@ -210,6 +212,19 @@ class GeneratedContractsTest {
         assertThrows(RuntimeException.class, () -> type.read("{}"));
         assertThrows(RuntimeException.class, () -> type.read("null"));
         assertEquals(json(type.write(config)), json(type.write(type.read(type.write(config)))));
+    }
+
+    @Test
+    void varsApplyTheEnvironmentsOverridesKeyByKey() {
+        // The test task sets CHUNK_ENVIRONMENT_NAME=prod.
+        String motd = Vars.MOTD;
+        String region = Vars.REGION;
+        Optional<String> store = Vars.STORE_URL;
+        assertEquals("Welcome to the live server", motd);
+        assertEquals("eu", region);
+        assertEquals(Optional.of("https://store.example.com"), store);
+        assertEquals(Optional.empty(), Vars.DEBUG_SEED);
+        assertThrows(NoSuchFieldException.class, () -> Vars.class.getField("STORE_API_KEY"));
     }
 
     private JsonNode fixtures() throws IOException {

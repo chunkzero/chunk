@@ -93,9 +93,9 @@ never builds Rust tools or installs Node packages.
    `.chunk/gradle/`.
 2. `generateChunkBackend`, on the root, runs `chunk gen` before any JVM compilation. The compiled backend goes to
    `.chunk/build/backend` and JVM sources to `.chunk/generated/jvm`: `java/` (models, references, `SessionMethods`,
-   `SessionConfigs`, `Destinations`), `java-client/` (`BackendClient`), `java-session/<app>/` (configured provider
-   interfaces) and, for Kotlin, `kotlin/` (`CoroutineBackendClient`). The task always runs, since the compiler resolves
-   TypeScript dependencies itself; unchanged output keeps JVM compilation incremental.
+   `SessionConfigs`, `Destinations`, `Vars`), `java-client/` (`BackendClient`), `java-session/<app>/` (configured
+   provider interfaces) and, for Kotlin, `kotlin/` (`CoroutineBackendClient`). The task always runs, since the compiler
+   resolves TypeScript dependencies itself; unchanged output keeps JVM compilation incremental.
 3. The root compiles `java/` and `java-client/` once into the shared `chunk-backend` JAR. With the Kotlin plugin,
    `:chunk:backend-kotlin` compiles the coroutine facade into `chunk-backend-kotlin`. Apps depend on these JARs, so a
    Java app has no Kotlin dependency.

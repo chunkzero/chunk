@@ -35,3 +35,6 @@ sourceSets.test {
 tasks.compileTestJava {
     dependsOn(generateTestContracts)
 }
+tasks.test {
+    environment("CHUNK_ENVIRONMENT_NAME", "prod")
+}

@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, io};
 
 use chunk_contract::{Field, FunctionKind, Schema, Visibility};
 
-use super::{BackendMetadata, quote, validate_literals};
+use super::{BackendMetadata, java_constant, quote, validate_literals};
 
 mod client;
 mod configurations;
@@ -11,6 +11,7 @@ mod names;
 mod schema;
 mod sessions;
 mod support;
+mod vars;
 
 pub(super) struct Type {
     pub ty: String,
@@ -62,6 +63,7 @@ pub(super) struct Bindings {
     sessions: Option<chunk_contract::SessionMethods>,
     configurations: Option<chunk_contract::SessionConfigurations>,
     destinations: Option<chunk_contract::DestinationManifest>,
+    env: chunk_contract::EnvManifest,
 }
 
 impl Bindings {
@@ -77,7 +79,7 @@ impl Bindings {
         ]);
         files.extend(sessions::sources(self.sessions.as_ref(), package)?);
         files.extend(configurations::sources(self.configurations.as_ref(), package)?);
-        files.extend([destinations::sources(self.destinations.as_ref(), package)?]);
+        files.extend([destinations::sources(self.destinations.as_ref(), package)?, vars::source(&self.env, package)?]);
         Ok(files)
     }
 }
@@ -132,6 +134,7 @@ pub(super) fn bindings(contract: &BackendMetadata) -> io::Result<Bindings> {
         sessions: contract.contracts.session_methods.clone(),
         configurations: contract.contracts.session_configurations.clone(),
         destinations: contract.contracts.destinations.clone(),
+        env: contract.contracts.env.clone(),
     })
 }
 
