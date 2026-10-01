@@ -1,3 +1,4 @@
+import * as stylex from "@stylexjs/stylex";
 import { useMutation } from "@tanstack/react-query";
 import { useSearch } from "@tanstack/react-router";
 import { useState } from "react";
@@ -9,13 +10,39 @@ import { Input } from "../components/ui/input.tsx";
 import { Label } from "../components/ui/label.tsx";
 import { api, errorMessage } from "../lib/client.ts";
 import { usePrincipal } from "../lib/queries.ts";
+import { colors, fonts, fontSizes, lineHeights, radii, space } from "../tokens.stylex.ts";
+
+const styles = stylex.create({
+  panel: { width: "100%", maxWidth: "28rem", marginInline: "auto" },
+  approved: { paddingInline: space.s5, paddingBlock: space.s6, fontSize: fontSizes.sm, lineHeight: lineHeights.sm },
+  mono: { fontFamily: fonts.mono },
+  form: { display: "flex", flexDirection: "column", gap: space.s5, paddingInline: space.s5, paddingBlock: space.s6 },
+  field: { display: "flex", flexDirection: "column", gap: space.s2 },
+  typed: { fontFamily: fonts.mono, letterSpacing: "0.1em", textTransform: "uppercase" },
+  hint: { fontSize: fontSizes.sm, lineHeight: lineHeights.sm, color: colors.mutedForeground },
+  code: {
+    paddingBlock: space.s4,
+    borderWidth: "1px",
+    borderStyle: "solid",
+    borderColor: colors.border,
+    borderRadius: radii.md,
+    backgroundColor: colors.background,
+    textAlign: "center",
+    fontFamily: fonts.mono,
+    fontSize: fontSizes.xxl,
+    lineHeight: lineHeights.xxl,
+    letterSpacing: "0.2em",
+  },
+  note: { fontSize: fontSizes.xs, lineHeight: lineHeights.xs, color: colors.mutedForeground },
+  submit: { width: "100%" },
+});
 
 /** Approves a `chunk login` device code; the CLI links here with `?code=`. */
 export function Login() {
   const { code } = useSearch({ from: "/login" });
   return (
     <Page>
-      <Panel title="Approve a CLI login" className="mx-auto max-w-md">
+      <Panel title="Approve a CLI login" style={styles.panel}>
         <Approval key={code ?? ""} code={code} />
       </Panel>
     </Page>
@@ -31,46 +58,44 @@ function Approval({ code }: { code: string | undefined }) {
 
   if (approve.isSuccess) {
     return (
-      <p className="px-5 py-6 text-sm">
-        Approved <span className="font-mono">{userCode}</span>. The CLI finishes signing in on its own; you can close
-        this tab.
+      <p {...stylex.props(styles.approved)}>
+        Approved <span {...stylex.props(styles.mono)}>{userCode}</span>. The CLI finishes signing in on its own; you can
+        close this tab.
       </p>
     );
   }
   return (
     <form
-      className="space-y-5 px-5 py-6"
+      {...stylex.props(styles.form)}
       onSubmit={(event) => {
         event.preventDefault();
         approve.mutate();
       }}
     >
       {code === undefined ? (
-        <div className="space-y-2">
+        <div {...stylex.props(styles.field)}>
           <Label htmlFor="code">Code from your terminal</Label>
           <Input
             id="code"
             required
             autoFocus
             autoComplete="off"
-            className="font-mono tracking-widest uppercase"
+            style={styles.typed}
             value={typed}
-            onChange={(event) => setTyped(event.target.value)}
+            onValueChange={setTyped}
           />
         </div>
       ) : (
-        <div className="space-y-2">
-          <p className="text-sm text-muted-foreground">Check that your terminal shows this code.</p>
-          <p className="rounded-md border bg-background py-4 text-center font-mono text-2xl tracking-[0.2em]">
-            {userCode}
-          </p>
+        <div {...stylex.props(styles.field)}>
+          <p {...stylex.props(styles.hint)}>Check that your terminal shows this code.</p>
+          <p {...stylex.props(styles.code)}>{userCode}</p>
         </div>
       )}
-      <p className="text-xs text-muted-foreground">
+      <p {...stylex.props(styles.note)}>
         The CLI gets its own token acting as {principal.data?.principal?.displayName ?? "you"}.
       </p>
       <ErrorText error={approve.error ? errorMessage(approve.error) : undefined} />
-      <Button type="submit" className="w-full" disabled={!userCode || approve.isPending}>
+      <Button type="submit" style={styles.submit} disabled={!userCode || approve.isPending}>
         {approve.isPending ? "Approving…" : "Approve"}
       </Button>
     </form>

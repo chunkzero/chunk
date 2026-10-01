@@ -13,16 +13,15 @@ import { allowedLicenses, satisfies } from "./spdx.mjs";
 // Projects credited in shipped comments that leave out their license text, by a marker in the comment: the text
 // vendored at licenses/npm/credited/<name>.txt, or null where the credited source publishes no license.
 const credited = {
-  "ariakit/ariakit": "ariakit",
   "stackblitz/alien-signals": "alien-signals",
-  "lukeed/clsx": "clsx",
   "`fast-deep-equal`": "fast-deep-equal",
   "zertosh/htmlescape": "htmlescape",
   "jonschlinkert/is-plain-object": "is-plain-object",
-  "reach/observe-rect": "observe-rect",
-  "substack/point-in-polygon": "point-in-polygon",
   "`qss`": "qss",
+  regenerator: "regenerator",
   "developerway.com": null,
+  "effectivetypescript.com": null,
+  "Blink forked from WebKit": null, // Browser history in a comment, not a credit.
 };
 // Code in a workspace package itself that is adapted from other projects, with the credited text that covers it.
 const adapted = {
@@ -33,6 +32,10 @@ const adapted = {
 // Packages whose code the build adds to a workspace package's output besides its production dependencies.
 const injected = {
   "@chunkzero/dashboard": ["rolldown"], // Rolldown's runtime helpers in the bundle.
+};
+// Packages whose manifest names no SPDX license, with the one their license file carries.
+const licenseOf = {
+  "css-mediaquery@0.1.2": "BSD-3-Clause", // "BSD" in its manifest.
 };
 
 const licenseFile = /^((third[-_]party[-_])?(licen[cs]es?|notices?)|copying|unlicense)([.-][\w-]+)?$/i;
@@ -231,7 +234,8 @@ for (const name of names) {
 }
 for (const pkg of packages) {
   const id = `${pkg.name}@${pkg.version}`;
-  if (!satisfies(pkg.license, allowed)) throw new Error(`${id} has a license deny.toml does not allow: ${pkg.license}`);
+  const license = licenseOf[id] ?? pkg.license;
+  if (!satisfies(license, allowed)) throw new Error(`${id} has a license deny.toml does not allow: ${license}`);
   const texts = [...files(pkg.path)]
     .filter((file) => licenseFile.test(path.basename(file)) && !/\.([cm]?[jt]sx?|json|map|css)$/.test(file))
     .sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b))
@@ -246,7 +250,7 @@ for (const pkg of packages) {
   const own = new Set([...texts, `Copyright ${authorName(manifest.author)}`].flatMap((text) => [...holders(text)]));
   // Only the runtime code of build tools reaches the output, so their own files are not scanned.
   const notices = pkg.injected ? [] : fileNotices(pkg, own);
-  const title = pkg.injected ? `${id}: ${pkg.license}, for the runtime code the build adds` : `${id}: ${pkg.license}`;
+  const title = pkg.injected ? `${id}: ${license}, for the runtime code the build adds` : `${id}: ${license}`;
   let section = `${rule}\n${title}\n${rule}\n\n${texts.join("\n\n")}`;
   if (notices.length > 0) {
     const parts = notices.map(

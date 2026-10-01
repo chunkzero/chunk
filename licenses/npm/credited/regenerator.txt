@@ -1,8 +1,8 @@
-Source: https://github.com/theKashey/react-remove-scroll-bar at 8ca9ba5ea52de03308fe8ced94f7b159a44d28ff, LICENSE (added upstream after 2.3.8, which shipped without one)
+Source: https://github.com/facebook/regenerator at cb755fd82c648cbc5307a5a2d61cdd598e698fc4, LICENSE
 
 MIT License
 
-Copyright (c) 2025 Anton Korzunov <thekashey@gmail.com>
+Copyright (c) 2014-present, Facebook, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

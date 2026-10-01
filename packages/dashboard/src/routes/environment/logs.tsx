@@ -1,6 +1,6 @@
 import { timestampDate } from "@bufbuild/protobuf/wkt";
 import { ArrowDownToLineIcon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+import * as stylex from "@stylexjs/stylex";
 import { useParams } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
@@ -9,13 +9,101 @@ import { Input } from "../../components/ui/input.tsx";
 import { LogSeverity } from "../../gen/chunk/management/v1/common_pb.ts";
 import { clock, severityLabels, sourceLabels } from "../../lib/format.ts";
 import { type LogStream, useLogStream } from "../../lib/logs.ts";
+import { colors, fonts, fontSizes, lineHeights, radii, space } from "../../tokens.stylex.ts";
 
-const severityTone: Record<LogSeverity, string> = {
-  [LogSeverity.UNSPECIFIED]: "bg-muted-foreground/30",
-  [LogSeverity.DEBUG]: "bg-muted-foreground/60",
-  [LogSeverity.INFO]: "bg-link",
-  [LogSeverity.WARN]: "bg-warning",
-  [LogSeverity.ERROR]: "bg-destructive",
+const md = "@media (min-width: 48rem)";
+
+const styles = stylex.create({
+  logs: {
+    overflow: "hidden",
+    borderWidth: "1px",
+    borderStyle: "solid",
+    borderColor: colors.border,
+    borderRadius: radii.lg,
+    backgroundColor: colors.card,
+  },
+  toolbar: {
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: space.s2,
+    paddingInline: space.s3,
+    paddingBlock: space.s2,
+    borderBottomWidth: "1px",
+    borderBottomStyle: "solid",
+    borderBottomColor: colors.border,
+  },
+  filter: {
+    maxWidth: "20rem",
+    fontFamily: fonts.mono,
+    fontSize: { default: fontSizes.xs, [md]: fontSizes.sm },
+    lineHeight: { default: lineHeights.xs, [md]: lineHeights.sm },
+  },
+  count: {
+    marginLeft: "auto",
+    fontSize: fontSizes.xs,
+    lineHeight: lineHeights.xs,
+    color: colors.mutedForeground,
+    fontVariantNumeric: "tabular-nums",
+  },
+  paused: { color: { default: colors.mutedForeground, ":hover": colors.accentForeground } },
+  error: {
+    display: "flex",
+    alignItems: "center",
+    gap: space.s3,
+    paddingInline: space.s4,
+    paddingBlock: space.s2,
+    borderBottomWidth: "1px",
+    borderBottomStyle: "solid",
+    borderBottomColor: colors.border,
+    fontSize: fontSizes.sm,
+    lineHeight: lineHeights.sm,
+    color: colors.destructive,
+  },
+  list: {
+    height: "60vh",
+    overflowY: "auto",
+    paddingBlock: space.s1,
+    backgroundColor: colors.background,
+    fontFamily: fonts.mono,
+    fontSize: fontSizes.xs,
+    lineHeight: "1.65rem",
+  },
+  placeholder: { paddingInline: space.s4, paddingBlock: space.s6, color: colors.mutedForeground },
+  entry: {
+    display: "flex",
+    gap: space.s3,
+    paddingInline: space.s4,
+    backgroundColor: { default: null, ":hover": `color-mix(in oklab, ${colors.accent} 60%, transparent)` },
+  },
+  time: { flexShrink: 0, color: colors.mutedForeground, fontVariantNumeric: "tabular-nums" },
+  severity: {
+    display: "flex",
+    flexShrink: 0,
+    alignItems: "center",
+    gap: space.s1_5,
+    width: "3.85rem",
+    color: colors.mutedForeground,
+  },
+  dot: { flexShrink: 0, width: space.s1_5, height: space.s1_5, borderRadius: "9999px" },
+  source: { flexShrink: 0, width: "3.85rem", color: colors.mutedForeground },
+  message: { minWidth: 0, overflowWrap: "break-word", whiteSpace: "pre-wrap" },
+});
+
+const tones = stylex.create({
+  unspecified: { backgroundColor: `color-mix(in oklab, ${colors.mutedForeground} 30%, transparent)` },
+  debug: { backgroundColor: `color-mix(in oklab, ${colors.mutedForeground} 60%, transparent)` },
+  info: { backgroundColor: colors.link },
+  warn: { backgroundColor: colors.warning },
+  error: { backgroundColor: colors.destructive },
+});
+
+const severityTone: Record<LogSeverity, stylex.StyleXStyles> = {
+  [LogSeverity.UNSPECIFIED]: tones.unspecified,
+  [LogSeverity.DEBUG]: tones.debug,
+  [LogSeverity.INFO]: tones.info,
+  [LogSeverity.WARN]: tones.warn,
+  [LogSeverity.ERROR]: tones.error,
 };
 
 export function Logs() {
@@ -35,15 +123,10 @@ export function Logs() {
   }, [entries]);
 
   return (
-    <div className="overflow-hidden rounded-lg border bg-card">
-      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
-        <Input
-          value={filter}
-          onChange={(event) => setFilter(event.target.value)}
-          placeholder="Filter messages"
-          className="h-8 max-w-xs font-mono text-xs"
-        />
-        <span className="ml-auto text-xs text-muted-foreground tabular-nums">
+    <div {...stylex.props(styles.logs)}>
+      <div {...stylex.props(styles.toolbar)}>
+        <Input value={filter} onValueChange={setFilter} placeholder="Filter messages" style={styles.filter} />
+        <span {...stylex.props(styles.count)}>
           {entries.length} of {stream.entries.length}
         </span>
         <Button
@@ -51,14 +134,14 @@ export function Logs() {
           size="xs"
           onClick={() => setFollow((value) => !value)}
           aria-pressed={follow}
-          className={follow ? "" : "text-muted-foreground"}
+          icon={ArrowDownToLineIcon}
+          style={!follow && styles.paused}
         >
-          <HugeiconsIcon icon={ArrowDownToLineIcon} />
           Follow
         </Button>
       </div>
       {stream.error && (
-        <p role="alert" className="flex items-center gap-3 border-b px-4 py-2 text-sm text-destructive">
+        <p role="alert" {...stylex.props(styles.error)}>
           {stream.error}
           <Button size="xs" variant="outline" onClick={stream.retry}>
             Retry
@@ -71,20 +154,18 @@ export function Logs() {
           const element = event.currentTarget;
           pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 8;
         }}
-        className="h-[60vh] overflow-y-auto bg-background py-1 font-mono text-xs leading-6"
+        {...stylex.props(styles.list)}
       >
-        {entries.length === 0 && <li className="px-4 py-6 text-muted-foreground">{placeholder(stream, follow)}</li>}
+        {entries.length === 0 && <li {...stylex.props(styles.placeholder)}>{placeholder(stream, follow)}</li>}
         {entries.map((entry) => (
-          <li key={`${entry.instanceId}:${entry.sequence}`} className="flex gap-3 px-4 hover:bg-accent/60">
-            <time className="shrink-0 text-muted-foreground tabular-nums">
-              {entry.time ? clock.format(timestampDate(entry.time)) : ""}
-            </time>
-            <span className="flex w-14 shrink-0 items-center gap-1.5 text-muted-foreground">
-              <span className={`size-1.5 shrink-0 rounded-full ${severityTone[entry.severity]}`} />
+          <li key={`${entry.instanceId}:${entry.sequence}`} {...stylex.props(styles.entry)}>
+            <time {...stylex.props(styles.time)}>{entry.time ? clock.format(timestampDate(entry.time)) : ""}</time>
+            <span {...stylex.props(styles.severity)}>
+              <span {...stylex.props(styles.dot, severityTone[entry.severity])} />
               {severityLabels[entry.severity]}
             </span>
-            <span className="w-14 shrink-0 text-muted-foreground">{sourceLabels[entry.source]}</span>
-            <span className="min-w-0 break-words whitespace-pre-wrap">{entry.message}</span>
+            <span {...stylex.props(styles.source)}>{sourceLabels[entry.source]}</span>
+            <span {...stylex.props(styles.message)}>{entry.message}</span>
           </li>
         ))}
       </ol>

@@ -8,9 +8,8 @@ test("dashboard notices carry credits for code copied into its dependencies and 
     encoding: "utf8",
   });
   for (const attribution of [
-    // @radix-ui/primitive's getActiveElement comes from AriaKit.
-    "MIT License, Copyright (c) AriaKit.",
-    "Copyright (c) Diego Haz",
+    // @babel/runtime's regenerator helpers come from facebook/regenerator.
+    "Copyright (c) 2014-present, Facebook, Inc.",
     // Rolldown's runtime helpers, credited to esbuild.
     "Copyright (c) 2020 Evan Wallace",
     // The dashboard's own components adapted from shadcn/ui.

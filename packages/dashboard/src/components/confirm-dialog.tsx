@@ -1,10 +1,16 @@
+import * as stylex from "@stylexjs/stylex";
 import { useMutation } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { errorMessage } from "../lib/client.ts";
+import { space } from "../tokens.stylex.ts";
 import { ErrorText } from "./page.tsx";
 import { Button } from "./ui/button.tsx";
 import { Dialog, DialogFooter } from "./ui/dialog.tsx";
+
+const styles = stylex.create({
+  form: { display: "flex", flexDirection: "column", gap: space.s6 },
+});
 
 /** Runs `action` on confirm, then closes. Render it only while open, so state from a previous opening never lingers. */
 export function ConfirmDialog({
@@ -30,7 +36,7 @@ export function ConfirmDialog({
   return (
     <Dialog title={title} description={description} onClose={onClose}>
       <form
-        className="space-y-6"
+        {...stylex.props(styles.form)}
         onSubmit={(event) => {
           event.preventDefault();
           // Passed to mutate, onClose only runs while this dialog is mounted, never for a dialog opened after it.

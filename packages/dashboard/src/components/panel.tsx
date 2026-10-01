@@ -1,21 +1,63 @@
+import * as stylex from "@stylexjs/stylex";
 import type { ReactNode } from "react";
+
+import { colors, fontSizes, lineHeights, radii, space } from "../tokens.stylex.ts";
+
+const styles = stylex.create({
+  panel: {
+    borderWidth: "1px",
+    borderStyle: "solid",
+    borderColor: colors.border,
+    borderRadius: radii.lg,
+    backgroundColor: colors.card,
+  },
+  header: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: space.s4,
+    minHeight: "3.3rem",
+    paddingInline: space.s5,
+    paddingBlock: space.s2,
+    borderBottomWidth: "1px",
+    borderBottomStyle: "solid",
+    borderBottomColor: colors.border,
+  },
+  title: { fontSize: fontSizes.sm, lineHeight: lineHeights.sm, fontWeight: 500 },
+  note: {
+    paddingInline: space.s5,
+    paddingBlock: space.s8,
+    fontSize: fontSizes.sm,
+    lineHeight: lineHeights.sm,
+    color: colors.mutedForeground,
+  },
+});
+
+/** Rows of a divided list: a line between each row and the next. */
+export const listStyles = stylex.create({
+  row: {
+    borderBottomWidth: { default: "1px", ":last-child": 0 },
+    borderBottomStyle: "solid",
+    borderBottomColor: colors.border,
+  },
+});
 
 export function Panel({
   title,
   action,
   children,
-  className = "",
+  style,
 }: {
   title?: string;
   action?: ReactNode;
   children: ReactNode;
-  className?: string;
+  style?: stylex.StyleXStyles;
 }) {
   return (
-    <section className={`rounded-lg border bg-card ${className}`}>
+    <section {...stylex.props(styles.panel, style)}>
       {title && (
-        <div className="flex min-h-12 items-center justify-between gap-4 border-b px-5 py-2">
-          <h2 className="text-sm font-medium">{title}</h2>
+        <div {...stylex.props(styles.header)}>
+          <h2 {...stylex.props(styles.title)}>{title}</h2>
           {action}
         </div>
       )}
@@ -26,5 +68,5 @@ export function Panel({
 
 /** A panel's placeholder line, for empty and loading lists. */
 export function PanelNote({ children }: { children: ReactNode }) {
-  return <p className="px-5 py-8 text-sm text-muted-foreground">{children}</p>;
+  return <p {...stylex.props(styles.note)}>{children}</p>;
 }

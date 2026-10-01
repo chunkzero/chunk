@@ -1,8 +1,8 @@
-Source: https://github.com/ariakit/ariakit at 6b4fa3284eb213e3b1bb9e87a540ef0fb5c284f2 (@ariakit/core@0.4.15), packages/ariakit-core/license
+Source: https://github.com/facebook/stylex at 1fcb9a51cbecad2c82255e0f4b45cc072fa1a95a (0.19.1), LICENSE
 
 MIT License
 
-Copyright (c) Diego Haz
+Copyright (c) Meta Platforms, Inc. and affiliates.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
