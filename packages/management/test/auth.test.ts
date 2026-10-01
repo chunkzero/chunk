@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
-import { timestampFromDate } from "@bufbuild/protobuf/wkt";
+import { timestampDate, timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { Code } from "@connectrpc/connect";
 
 import { AuthService, LoginState } from "../src/gen/chunk/management/v1/auth_pb.ts";
@@ -94,6 +94,38 @@ describe.skipIf(!databaseUrl)("AuthService", () => {
     expect(current.token?.name).toBe("chunk CLI on laptop");
     const [stored] = await h.sql`select secret_hash from api_tokens where id = ${current.token?.id ?? ""}`;
     expect(Buffer.from(stored?.secret_hash).toString()).not.toContain(approved.secret);
+  });
+
+  test("a device login token expires after 30 days unused and renews on use", async () => {
+    const anonymous = h.client(AuthService, null);
+    const login = await anonymous.startLogin({ clientName: "chunk CLI on desktop" });
+    await h.client(AuthService).approveLogin({ userCode: login.userCode });
+    const { secret } = await anonymous.pollLogin({ loginId: login.loginId });
+    const client = h.client(AuthService, secret);
+    const day = 24 * 60 * 60 * 1000;
+    const tokenOf = async () => (await client.getCurrentPrincipal({})).token;
+    const expiresInDays = async () => {
+      const expireTime = (await tokenOf())?.expireTime;
+      return ((expireTime ? timestampDate(expireTime).getTime() : 0) - Date.now()) / day;
+    };
+    expect(await expiresInDays()).toBeCloseTo(30, 0);
+    const id = (await tokenOf())?.id ?? "";
+
+    await h.sql`update api_tokens set expire_time = now() + interval '5 days' where id = ${id}`;
+    await client.getCurrentPrincipal({});
+    expect(await expiresInDays()).toBeCloseTo(30, 0);
+
+    await h.sql`update api_tokens set expire_time = now() - interval '1 second' where id = ${id}`;
+    expect(await codeOf(client.getCurrentPrincipal({}))).toBe(Code.Unauthenticated);
+  });
+
+  test("a token with a fixed expiry does not renew on use", async () => {
+    const expireTime = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+    const created = await h
+      .client(AuthService)
+      .createToken({ requestId: crypto.randomUUID(), name: "fixed", expireTime: timestampFromDate(expireTime) });
+    const { token } = await h.client(AuthService, created.secret).getCurrentPrincipal({});
+    expect(token?.expireTime && timestampDate(token.expireTime)).toEqual(expireTime);
   });
 
   test("tokens are idempotent by request_id and can be scoped and revoked", async () => {

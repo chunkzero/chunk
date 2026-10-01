@@ -20,6 +20,10 @@ export interface TokenRow {
 
 const secretPrefix = "chunk_";
 
+/** How long a renewing token stays valid after its last use. */
+export const renewingLifetimeMs = 30 * 24 * 60 * 60 * 1000;
+const renewalGraceMs = 24 * 60 * 60 * 1000;
+
 export function toToken(row: TokenRow): Token {
   return create(TokenSchema, {
     id: row.id,
@@ -32,13 +36,19 @@ export function toToken(row: TokenRow): Token {
 
 export async function issueToken(
   db: Db,
-  token: { principalId: string; name: string; projectId: string | undefined; expireTime: Date | undefined },
+  token: {
+    principalId: string;
+    name: string;
+    projectId: string | undefined;
+    expireTime: Date | undefined;
+    renews?: boolean;
+  },
 ): Promise<{ row: TokenRow; secret: string }> {
   const secret = `${secretPrefix}${randomToken()}`;
   const [row] = await db<TokenRow[]>`
-    insert into api_tokens (id, principal_id, name, project_id, secret_hash, expire_time)
+    insert into api_tokens (id, principal_id, name, project_id, secret_hash, expire_time, renews)
     values (${newId("tok")}, ${token.principalId}, ${token.name}, ${token.projectId ?? null}, ${sha256(secret)},
-      ${token.expireTime ?? null})
+      ${token.expireTime ?? null}, ${token.renews ?? false})
     returning id, principal_id, name, project_id, create_time, expire_time`;
   if (!row) throw new Error("token insert returned no row");
   return { row, secret };
@@ -81,11 +91,20 @@ export async function ensureEdgeToken(db: Db, secret: string): Promise<void> {
 export function tokenAuthenticator(db: Db): Authenticator {
   return {
     async authenticate(bearer) {
+      // A renewing token is written at most about once per `renewalGraceMs`.
       const [row] = await db<
         { id: string; kind: string; principal_id: string; project_id: string | null; environment_id: string | null }[]
       >`
-        select id, kind, principal_id, project_id, environment_id from api_tokens
-        where secret_hash = ${sha256(bearer)} and revoke_time is null and (expire_time is null or expire_time > now())`;
+        with found as (
+          select id, kind, principal_id, project_id, environment_id from api_tokens
+          where secret_hash = ${sha256(bearer)} and revoke_time is null and (expire_time is null or expire_time > now())
+        ), renewed as (
+          update api_tokens
+          set expire_time = now() + ${renewingLifetimeMs} * interval '1 millisecond'
+          where id in (select id from found) and renews
+            and expire_time < now() + ${renewingLifetimeMs - renewalGraceMs} * interval '1 millisecond'
+        )
+        select id, kind, principal_id, project_id, environment_id from found`;
       if (!row) return undefined;
       if (row.kind === "environment" && row.environment_id) {
         return { kind: "environment", environmentId: row.environment_id, tokenId: row.id };
