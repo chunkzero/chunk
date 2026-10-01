@@ -29,14 +29,26 @@ impl ReadHost for Declarations {
 /// # Errors
 /// Reports compiler diagnostics, unsupported imports, impure declarations or invalid contracts.
 pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
+    compile_with(project, output, false)
+}
+
+/// Like [`compile`]; when `frozen`, fails instead of writing an `Additive` journal entry.
+/// # Errors
+/// As [`compile`], and when `frozen`, for schema changes not yet recorded in the journal.
+pub fn compile_with(project: &Path, output: &Path, frozen: bool) -> io::Result<()> {
     let project = project.canonicalize()?;
     let journal = crate::migrations::verified(&project, false)?;
-    compile_journal(&project, output, &journal)
+    compile_journal(&project, output, &journal, frozen)
 }
 
 /// Compiles from `journal`, which was verified when it was read: migrations are type-checked and bundled from
 /// copies of its sources in a private directory under `.chunk/`, never from `server/migrations/`.
-pub(crate) fn compile_journal(project: &Path, output: &Path, journal: &crate::migrations::Journal) -> io::Result<()> {
+pub(crate) fn compile_journal(
+    project: &Path,
+    output: &Path,
+    journal: &crate::migrations::Journal,
+    frozen: bool,
+) -> io::Result<()> {
     let inventory = crate::project::load(project)?;
     crate::sdk::generate(project, &inventory, journal)?;
     fs::create_dir_all(output)?;
@@ -52,7 +64,7 @@ pub(crate) fn compile_journal(project: &Path, output: &Path, journal: &crate::mi
         .collect();
     typecheck::check(&paths, &stage.chunk, staging.path())?;
     let (mut contract, backs) = bundle_and_extract(project, staging.path(), &files, migrations, &inventory)?;
-    let recorded = crate::migrations::record_additive(project, journal, &contract.tables)?;
+    let recorded = crate::migrations::record_additive(project, journal, &contract.tables, frozen)?;
     let journal = recorded.as_ref().unwrap_or(journal);
     contract.contracts.migrations = journal.contract(&backs);
     for migration in contract.contracts.migrations.iter().filter(|migration| migration.kind == MigrationKind::Expand) {

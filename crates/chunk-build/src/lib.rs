@@ -5,7 +5,7 @@ pub use codegen::{GenerationTarget, generate};
 #[cfg(feature = "compiler")]
 mod compiler;
 #[cfg(feature = "compiler")]
-pub use compiler::compile;
+pub use compiler::{compile, compile_with};
 #[cfg(feature = "compiler")]
 pub mod migrations;
 #[cfg(feature = "compiler")]

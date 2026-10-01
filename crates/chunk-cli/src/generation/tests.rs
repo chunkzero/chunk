@@ -1,7 +1,14 @@
 use super::*;
 
 fn options(project: &Path) -> Options {
-    Options { project: project.into(), target: Target::Java, output: None, backend_output: None, java_package: None }
+    Options {
+        project: project.into(),
+        target: Target::Java,
+        output: None,
+        backend_output: None,
+        java_package: None,
+        frozen: false,
+    }
 }
 
 #[test]

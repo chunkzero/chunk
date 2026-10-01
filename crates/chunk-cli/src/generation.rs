@@ -22,6 +22,9 @@ pub(crate) struct Options {
     /// Shared JVM package (defaults to dev.chunkzero.generated for Java/Kotlin targets).
     #[arg(long)]
     java_package: Option<String>,
+    /// Fail instead of recording additive schema changes in server/migrations/.
+    #[arg(long, env = "CHUNK_FROZEN")]
+    frozen: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -57,7 +60,7 @@ pub(crate) fn run(options: Options) -> io::Result<()> {
         return Err(io::Error::other("client and compiler output directories must be separate"));
     }
     cliclack::log::info("Generating backend clients…")?;
-    chunk_build::compile(&options.project, &backend)?;
+    chunk_build::compile_with(&options.project, &backend, options.frozen)?;
     chunk_build::generate(&backend.join("contract.json"), &output, target)?;
     cliclack::log::success(format!("Generated → {}", output.display()))
 }

@@ -231,16 +231,24 @@ fn snapshot_of(journal: &Journal, mut schema: DatabaseSchema) -> DatabaseSchema 
 }
 
 /// Appends an `Additive` entry when `schema` differs from the last snapshot only by changes that need no
-/// migration, and returns the journal with it. Fails on a change that needs one.
+/// migration, and returns the journal with it. Fails on a change that needs one, and when `frozen`, on one that
+/// would need an entry written.
 pub(crate) fn record_additive(
     project: &Path,
     journal: &Journal,
     schema: &DatabaseSchema,
+    frozen: bool,
 ) -> io::Result<Option<Journal>> {
     require_replayed(journal, schema)?;
     let snapshot = snapshot_of(journal, schema.clone());
     if snapshot == journal.schema() {
         return Ok(None);
+    }
+    if frozen {
+        return Err(io::Error::other(
+            "server/schema/ has additive changes the migration journal doesn't record, and a frozen build won't \
+             write an Additive entry. Run `chunk build` or `chunk dev` and commit server/migrations/",
+        ));
     }
     let _lock = Lock::acquire(project)?;
     journal.require_unchanged(project)?;
@@ -259,21 +267,6 @@ pub(crate) fn record_additive(
     journal.remove_leftovers()?;
     eprintln!("Recorded additive schema changes as migration {id} in server/migrations/meta/; commit it");
     Ok(Some(journal))
-}
-
-/// Fails unless the journal records every change to `server/schema/`, as `chunk build --frozen` requires.
-/// # Errors
-/// Reports an invalid journal, a change that needs a migration, or additive changes not yet recorded.
-pub fn require_recorded(project: &Path) -> io::Result<()> {
-    let Pending { journal, schema, .. } = pending(project)?;
-    require_replayed(&journal, &schema)?;
-    if snapshot_of(&journal, schema) == journal.schema() {
-        return Ok(());
-    }
-    Err(io::Error::other(
-        "server/schema/ has additive changes the migration journal doesn't record. Run `chunk build` or `chunk dev` \
-         and commit server/migrations/",
-    ))
 }
 
 /// Fails unless the last snapshot reaches `schema` through changes that need no migration.

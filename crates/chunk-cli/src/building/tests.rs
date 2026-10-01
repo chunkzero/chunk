@@ -162,8 +162,15 @@ async fn build_output_streams_before_exit_and_drains_the_final_line() {
     });
     let root = fixture.root.clone();
     let running = tokio::spawn(async move {
-        gradle::run(&root, &std::env::current_exe().unwrap(), BuildMode::Dev, &CancellationToken::new(), &progress)
-            .await
+        gradle::run(
+            &root,
+            &std::env::current_exe().unwrap(),
+            BuildMode::Dev,
+            false,
+            &CancellationToken::new(),
+            &progress,
+        )
+        .await
     });
     let mut lines = Vec::new();
     for _ in 0..2 {
@@ -188,7 +195,7 @@ async fn cancellation_and_dropped_builds_stop_wrapper_descendants() {
         let stop = CancellationToken::new();
         let executable = std::env::current_exe().unwrap();
         let progress = Progress::default();
-        let mut running = Box::pin(gradle::run(&fixture.root, &executable, BuildMode::Dev, &stop, &progress));
+        let mut running = Box::pin(gradle::run(&fixture.root, &executable, BuildMode::Dev, false, &stop, &progress));
         tokio::select! {
             result = &mut running => panic!("wrapper exited before cancellation: {result:?}"),
             () = async {

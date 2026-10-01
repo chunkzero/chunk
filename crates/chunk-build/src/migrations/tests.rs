@@ -199,7 +199,7 @@ fn compilation_uses_the_captured_migrations_and_ignores_package_imports() {
     let captured = verified(&root, false).unwrap();
     let path = root.join("server/migrations/0002_display_name.ts");
     fs::write(&path, fs::read_to_string(&path).unwrap().replace("old.name", "old.displayName")).unwrap();
-    crate::compiler::compile_journal(&root, output.path(), &captured).unwrap();
+    crate::compiler::compile_journal(&root, output.path(), &captured, false).unwrap();
     assert_eq!(migrate_to(output.path(), "Ann"), r#"[{"displayName":"Ann"}]"#);
 
     // Another compilation rewriting the shared declarations can't loosen what this one is checked against.
@@ -214,7 +214,7 @@ fn compilation_uses_the_captured_migrations_and_ignores_package_imports() {
                 let _ = fs::write(&shared, "export {};\n");
             }
         });
-        let result = crate::compiler::compile_journal(&root, output.path(), &incomplete);
+        let result = crate::compiler::compile_journal(&root, output.path(), &incomplete, false);
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         result.unwrap_err()
     });
@@ -320,12 +320,12 @@ fn additive_changes_enter_history_before_later_breaking_ones() {
     create(pending(project.path()).unwrap(), "init", &Renames::new()).unwrap();
 
     write_schema(project.path(), "name: v.string(), nickname: v.optional(v.string())");
-    let error = require_recorded(project.path()).unwrap_err();
-    assert!(error.to_string().contains("additive"), "{error}");
+    let error = crate::compile_with(project.path(), output.path(), true).unwrap_err();
+    assert!(error.to_string().contains("Additive"), "{error}");
     assert!(!directory_has(project.path(), "0002"));
     crate::compile(project.path(), output.path()).unwrap();
     assert!(directory_has(project.path(), "0002"));
-    require_recorded(project.path()).unwrap();
+    crate::compile_with(project.path(), output.path(), true).unwrap();
     check(project.path()).unwrap();
 
     write_schema(project.path(), "name: v.string(), displayName: v.optional(v.string())");

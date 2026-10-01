@@ -24,6 +24,7 @@ pub(crate) struct Options {
 
 pub(crate) struct Project {
     pub root: PathBuf,
+    pub frozen: bool,
     pub metadata: ProjectMetadata,
     pub output: PathBuf,
 }
@@ -51,21 +52,18 @@ pub(crate) fn prepare(options: &Options) -> io::Result<Project> {
             return Err(io::Error::other("release output must be separate from project sources and build outputs"));
         }
     }
-    inspect(root, output)
+    Ok(Project { frozen: options.frozen, ..inspect(root, output)? })
 }
 
 /// Inspects the project at canonical `root`, whose releases publish into `output`.
 pub(crate) fn inspect(root: PathBuf, output: PathBuf) -> io::Result<Project> {
     let metadata = chunk_build::project::inspect(&root)?;
-    Ok(Project { root, metadata, output })
+    Ok(Project { root, frozen: false, metadata, output })
 }
 
 pub(crate) async fn run(options: Options) -> io::Result<()> {
     chunk_service::run(|stop| async move {
         let project = prepare(&options)?;
-        if options.frozen {
-            chunk_build::migrations::require_recorded(&project.root)?;
-        }
         cliclack::log::info("Building application release…")?;
         let built = execute(&project, BuildMode::Release, stop, Progress::default()).await?;
         warn_irreversible(&project.root.join(".chunk/build/backend/contract.json"))?;
@@ -84,7 +82,7 @@ pub(crate) async fn execute(
     cancelled(&stop)?;
     let started = Instant::now();
     progress.emit(Event::Started(Phase::Compile));
-    gradle::run(&project.root, &std::env::current_exe()?, mode, &stop, &progress).await?;
+    gradle::run(&project.root, &std::env::current_exe()?, mode, project.frozen, &stop, &progress).await?;
     progress.emit(Event::Finished(Phase::Compile, started.elapsed()));
     cancelled(&stop)?;
     let started = Instant::now();
