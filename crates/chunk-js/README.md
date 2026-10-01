@@ -30,11 +30,16 @@ mutable module state. Each invocation gets its time and seed from the backend: `
 Module initialization gets no time, randomness or capabilities.
 
 Available: the language's objects, collections and promises; `URL`, `URLSearchParams`, `TextEncoder`/`TextDecoder`,
-`atob`/`btoa`; `structuredClone` without transfer lists; `crypto.subtle.digest` with SHA-1/256/384/512 on up to 1 MiB;
-ordinary `ArrayBuffer`s and typed arrays; and `console` methods, whose output (at most 32 messages and 16 KiB per call)
-the backend logs. Not available: filesystem, network, process, timers, Node or Deno globals, runtime imports, `Intl` and
-locale methods, `performance`, weak references, WebAssembly, `SharedArrayBuffer` and resizable `ArrayBuffer`s. A promise
-that can never settle fails the call, and so does an unhandled rejection.
+`atob`/`btoa`; `structuredClone` without transfer lists, of primitives other than symbols, plain objects (prototype
+`Object.prototype` or `null`), arrays (prototype `Array.prototype` or `null`), `Map`, `Set`, `Date`, `RegExp`, boxed
+numbers, strings, booleans and bigints, `ArrayBuffer`s, typed arrays and `DataView`s; anything else, including errors
+and class instances, throws `DataCloneError`, unlike in browsers (an object whose internal state can't be read from
+JavaScript, such as an iterator or a `URL`, clones as a plain object if its prototype was replaced to look like one);
+`crypto.subtle.digest` with SHA-1/256/384/512 on up to 1 MiB; ordinary `ArrayBuffer`s and typed arrays; and `console`
+methods, whose output (at most 32 messages and 16 KiB per call) the backend logs. Not available: filesystem, network,
+process, timers, Node or Deno globals, runtime imports, `Intl` and locale methods, `performance`, weak references,
+WebAssembly, `SharedArrayBuffer` and resizable `ArrayBuffer`s. A promise that can never settle fails the call, and so
+does an unhandled rejection.
 
 ## Limits
 

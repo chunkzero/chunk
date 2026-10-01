@@ -480,3 +480,56 @@ fn text_encoding_and_cloning_share_the_aggregate_buffer_budget() {
         assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     }
 }
+
+#[test]
+fn structured_clone_ignores_host_object_brands_without_aborting() {
+    let execution =
+        run(r#"return structuredClone({ [Symbol.for("Deno.core.hostObject")]() { return { type: "missing" }; } });"#)
+            .unwrap();
+    assert_eq!(value(&execution), json!({}));
+}
+
+#[test]
+fn structured_clone_reads_built_ins_by_brand_despite_modified_prototypes() {
+    let execution = run(r#"
+        Object.defineProperty(Array.prototype, "0", { get: () => "changed", set() {} });
+        const map = Object.setPrototypeOf(new Map([["k", 42]]), null);
+        const bytes = new Uint8Array([1, 2, 3, 4]);
+        const copy = structuredClone({ map, view: new DataView(bytes.buffer, 1, 2), [Symbol("meta")]: 1 });
+        const detached = new Uint8Array(4);
+        detached.buffer.transfer();
+        const detachedLater = (View) => {
+          const buffer = new ArrayBuffer(8);
+          const view = new View(buffer, 4, 1);
+          return { buffer, get view() { buffer.transfer(); return view; } };
+        };
+        const errors = [detached, [1].values(), new Error("x"), detachedLater(Int32Array), detachedLater(DataView)]
+          .map((value) => {
+            try { structuredClone(value); } catch (e) { return e.name; }
+          });
+        const array = structuredClone(Object.setPrototypeOf([1, , 3], null));
+        const views = structuredClone([new Uint8Array(bytes.buffer, 0, 2), new Uint16Array(bytes.buffer, 2, 1)]);
+        const keyed = Object.defineProperty({
+          get a() {
+            Object.defineProperty(this, "b", { enumerable: false });
+            Object.defineProperty(this, "c", { enumerable: true });
+            return 1;
+          },
+          b: 2,
+        }, "c", { value: 3, enumerable: false, configurable: true });
+        return {
+          map: Map.prototype.get.call(copy.map, "k"),
+          view: copy.view.getUint16(0),
+          symbols: Object.getOwnPropertySymbols(copy).length,
+          errors,
+          shared: views[0].buffer === views[1].buffer && views[0].buffer !== bytes.buffer,
+          array: [Object.getPrototypeOf(array) === Array.prototype, array.length, Object.keys(array)],
+          keys: Object.keys(structuredClone(keyed)),
+        };
+    "#)
+    .unwrap();
+    assert_eq!(
+        value(&execution),
+        json!({"map": 42, "view": 0x0203, "symbols": 0, "errors": vec!["DataCloneError"; 5], "shared": true, "array": [true, 3, ["0", "2"]], "keys": ["a", "b"]})
+    );
+}
