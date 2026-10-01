@@ -1,9 +1,8 @@
 # Kotlin example
 
 A playable project: a grass lobby and sandstone arenas written in Kotlin, with a TypeScript backend that keeps each
-player's coins and visits. It is what `just local` runs, and it exercises most of the platform: routing and admission
-hooks, backend commands, a session method, typed destination config, reactive watches and moving players between
-sessions.
+player's coins and visits. It is what `just local` runs, and it exercises most of the platform: ping and routing hooks,
+backend commands, a session method, typed destination config, reactive watches and moving players between sessions.
 
 ## Run it
 
@@ -23,7 +22,7 @@ In game:
 - `/coin` is a Minestom command in the JVM. It runs the `coin` mutation, and the chat and action bar update from a watch
   on `stats`. Joining a session also increments your visits.
 - `/hello <message>` is a backend command available everywhere.
-- `/travel lobby|arena|large` is a Minestom command in the JVM. It asks core to move you through the same admission and
+- `/travel lobby|arena|large` is a Minestom command in the JVM. It asks core to move you through the same
   capacity checks as any other move, and tells you in chat when the move is refused, such as while you are still
   arriving.
 - `/population`, in the lobby only, is a backend command that calls the lobby session's `population` session method.
@@ -35,12 +34,12 @@ Worlds live only in the JVMs; coins and visits persist in the backend across run
 | Path                                                     | Contents                                                                                                                                             |
 | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`chunk.toml`](chunk.toml)                               | Local environment: 16 players per session, up to four JVMs, and machine profiles `local` (512 MiB) and `large` (1024 MiB), each hosting two sessions |
-| [`apps/scope.ts`](apps/scope.ts)                         | Root hooks (admission, server ping, routing to the lobby) and `/hello`                                                                               |
+| [`apps/scope.ts`](apps/scope.ts)                         | Root hooks (server ping, routing to the lobby) and `/hello`                                                                                          |
 | [`apps/lobby/app.ts`](apps/lobby/app.ts)                 | The `lobby` app, its `main` destination and `/population`                                                                                            |
 | [`apps/games/arena/app.ts`](apps/games/arena/app.ts)     | The `arena` app, with a `label` config and `standard` and `large` destinations                                                                       |
 | [`server/schema/index.ts`](server/schema/index.ts)       | The `profiles` table                                                                                                                                 |
 | [`server/players.ts`](server/players.ts)                 | `stats`, `join` and `coin`, keyed by the calling player                                                                                              |
-| [`server/proxy.ts`](server/proxy.ts)                     | The status and admission queries the root hooks call, with fixed values                                                                              |
+| [`server/proxy.ts`](server/proxy.ts)                     | The status query the ping hook calls, with fixed values                                                                                              |
 | [`server/session-methods.ts`](server/session-methods.ts) | The `population` session method                                                                                                                      |
 | [`shared/`](shared)                                      | Gameplay shared by both apps, in a plain Gradle project                                                                                              |
 | `apps/*/src/`                                            | Each app's `main` and `@SessionType("default")` provider                                                                                             |

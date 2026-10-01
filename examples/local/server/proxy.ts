@@ -5,9 +5,3 @@ export const status = query({
   returns: v.serverStatus(),
   handler: () => ({ motd: "chunk typed backend | Lobby + Arena", online: 0, max: 32 }),
 });
-
-export const admit = query({
-  args: v.playerIdentity(),
-  returns: v.admissionResult(),
-  handler: () => ({ allow: true }),
-});
