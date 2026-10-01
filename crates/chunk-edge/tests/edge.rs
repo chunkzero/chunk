@@ -175,6 +175,7 @@ struct Harness {
     management: Arc<Management>,
     streams: mpsc::UnboundedReceiver<RouteStream>,
     stop: CancellationToken,
+    task: tokio::task::JoinHandle<io::Result<()>>,
 }
 
 impl Harness {
@@ -199,10 +200,10 @@ impl Harness {
         let address = edge.local_addr().unwrap();
         let health = edge.health_addr().unwrap().unwrap();
         let stop = CancellationToken::new();
-        tokio::spawn(edge.run(stop.clone()));
+        let task = tokio::spawn(edge.run(stop.clone()));
         let gateways =
             [TcpListener::bind("127.0.0.1:0").await.unwrap(), TcpListener::bind("127.0.0.1:0").await.unwrap()];
-        Self { edge: address, health, gateways, management, streams: stream_receiver, stop }
+        Self { edge: address, health, gateways, management, streams: stream_receiver, stop, task }
     }
 
     async fn next_stream(&mut self) -> RouteStream {
@@ -324,12 +325,35 @@ async fn reports_ready_once_routes_have_loaded() {
             drop(routes);
             tokio::time::sleep(Duration::from_millis(100)).await;
             assert_eq!(harness.health("/ready").await, "HTTP/1.1 200 OK");
+
             harness.stop.cancel();
+            timeout(Duration::from_secs(2), harness.task).await.expect("the edge stopped").unwrap().unwrap();
+            assert!(TcpStream::connect(harness.health).await.is_err(), "the health listener closed");
+            drop(TcpListener::bind(harness.health).await.expect("the health port can be bound again"));
             return;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("the edge never became ready");
+}
+
+#[tokio::test]
+async fn drops_health_connections_beyond_its_limit_and_keeps_serving_players() {
+    let mut harness = Harness::start().await;
+    let routes = harness.next_stream().await;
+    routes.send(true, vec![route("play.example.com", &[&harness.gateways[0]])]).await;
+    harness.eventually_routes("play.example.com", Some(0)).await;
+
+    let mut idle = Vec::new();
+    for _ in 0..8 {
+        idle.push(TcpStream::connect(harness.health).await.unwrap());
+    }
+    let mut extra = TcpStream::connect(harness.health).await.unwrap();
+    let read = timeout(Duration::from_secs(1), extra.read(&mut [0])).await.expect("the edge dropped the connection");
+    assert!(matches!(read, Ok(0) | Err(_)), "expected a closed connection, got {read:?}");
+    assert_eq!(harness.gateway_for("play.example.com").await, Some(0));
+    drop(idle);
+    harness.stop.cancel();
 }
 
 #[tokio::test]

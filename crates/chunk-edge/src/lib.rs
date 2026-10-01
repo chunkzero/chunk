@@ -121,7 +121,13 @@ impl Edge {
         let routes = routes::Routes::default();
         let management = Client::new(&self.config.management_url).with_token(&self.config.edge_token);
         let watcher = tokio::spawn(routes::watch(management.clone(), routes.clone()));
-        let health = self.health.map(|listener| tokio::spawn(health::serve(listener, routes.clone())));
+        let health = self.health.map(|listener| health::serve(listener, routes.clone()));
+        let mut health = Box::pin(async {
+            match health {
+                Some(health) => health.await,
+                None => std::future::pending().await,
+            }
+        });
         let shared = Arc::new(Shared {
             routes,
             management,
@@ -133,6 +139,7 @@ impl Edge {
         loop {
             tokio::select! {
                 () = stop.cancelled() => break,
+                () = &mut health => {}
                 Some(_) = connections.join_next(), if !connections.is_empty() => {}
                 accepted = self.listener.accept() => match accepted {
                     Ok((stream, peer)) => {
@@ -148,9 +155,7 @@ impl Edge {
             }
         }
         watcher.abort();
-        if let Some(health) = health {
-            health.abort();
-        }
+        drop(health);
         connections.shutdown().await;
         Ok(())
     }

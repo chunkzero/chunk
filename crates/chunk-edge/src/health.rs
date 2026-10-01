@@ -9,31 +9,35 @@ use tokio::{net::TcpListener, task::JoinSet};
 
 use crate::routes::Routes;
 
-/// How long a connection may stay open.
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+/// A check needs one quick request.
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connections beyond this many are closed on arrival, so the listener can't starve player connections.
+const MAX_CONNECTIONS: usize = 8;
 
-/// Answers `GET /ready` on `listener` for as long as it runs; dropping it closes the open connections.
+/// Answers `GET /ready` on `listener` for as long as it is polled. Dropping it closes the listener and the open
+/// connections.
 pub(crate) async fn serve(listener: TcpListener, routes: Routes) {
     let mut connections = JoinSet::new();
     loop {
-        tokio::select! {
-            Some(_) = connections.join_next(), if !connections.is_empty() => {}
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) => {
-                    let routes = routes.clone();
-                    let service = service_fn(move |request: Request<_>| {
-                        let response = respond(&request, &routes);
-                        async move { Ok::<_, Infallible>(response) }
-                    });
-                    let connection = hyper::server::conn::http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), service);
-                    connections.spawn(async move { _ = tokio::time::timeout(CONNECTION_TIMEOUT, connection).await });
+        match listener.accept().await {
+            Ok((stream, _)) => {
+                while connections.try_join_next().is_some() {}
+                if connections.len() >= MAX_CONNECTIONS {
+                    continue;
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "health accept failed; retrying");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                }
-            },
+                let routes = routes.clone();
+                let service = service_fn(move |request: Request<_>| {
+                    let response = respond(&request, &routes);
+                    async move { Ok::<_, Infallible>(response) }
+                });
+                let connection =
+                    hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(stream), service);
+                connections.spawn(async move { _ = tokio::time::timeout(CONNECTION_TIMEOUT, connection).await });
+            }
+            Err(error) => {
+                tracing::warn!(%error, "health accept failed; retrying");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
     }
 }
