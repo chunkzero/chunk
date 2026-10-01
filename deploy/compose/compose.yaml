@@ -1,5 +1,5 @@
 # Self-hosts chunk on one Docker or Podman host: Postgres, management and the edge. Management runs each environment's
-# machines on the `chunk` network through the engine socket. Run ./init.sh first; see README.md.
+# machines on the `chunk` network through the engine socket. Settings come from .env; see README.md.
 name: chunk
 
 services:
@@ -9,7 +9,7 @@ services:
     environment:
       POSTGRES_USER: chunk
       POSTGRES_DB: chunk
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./init.sh first}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set it in .env; see .env.example}
     volumes:
       - postgres:/var/lib/postgresql/data
     networks: [chunk]
@@ -26,9 +26,9 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://chunk:${POSTGRES_PASSWORD}@postgres:5432/chunk
-      CHUNK_SECRET_KEY: ${CHUNK_SECRET_KEY:?run ./init.sh first}
-      CHUNK_OPERATOR_TOKEN: ${CHUNK_OPERATOR_TOKEN:?run ./init.sh first}
-      CHUNK_EDGE_TOKEN: ${CHUNK_EDGE_TOKEN:?run ./init.sh first}
+      CHUNK_SECRET_KEY: ${CHUNK_SECRET_KEY:?set it in .env; see .env.example}
+      CHUNK_OPERATOR_TOKEN: ${CHUNK_OPERATOR_TOKEN:?set it in .env; see .env.example}
+      CHUNK_EDGE_TOKEN: ${CHUNK_EDGE_TOKEN:?set it in .env; see .env.example}
       CHUNK_PUBLIC_URL: ${CHUNK_PUBLIC_URL:-http://localhost:8080}
       CHUNK_EDGE_DOMAIN: ${CHUNK_EDGE_DOMAIN:-localhost}
       CHUNK_EDGE_PORT: ${CHUNK_PLAYER_PORT:-25565}
@@ -43,7 +43,7 @@ services:
       - ${CHUNK_ENGINE_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
       - management:/data
     # The socket's group inside the container: the host's `docker` group, or 0 under rootless Podman.
-    group_add: ["${CHUNK_ENGINE_GID:-0}"]
+    group_add: ["${CHUNK_ENGINE_GID:?set it in .env; see .env.example}"]
     security_opt: [label=disable]
     ports:
       - ${CHUNK_MANAGEMENT_PUBLISH:-127.0.0.1:8080}:8080
@@ -65,7 +65,7 @@ services:
         condition: service_healthy
     environment:
       CHUNK_MANAGEMENT_URL: http://management:8080
-      CHUNK_EDGE_TOKEN: ${CHUNK_EDGE_TOKEN:?run ./init.sh first}
+      CHUNK_EDGE_TOKEN: ${CHUNK_EDGE_TOKEN:?set it in .env; see .env.example}
       CHUNK_BIND: 0.0.0.0:25565
     ports:
       # IPv4 only: Docker's userland proxy would hide IPv6 players' addresses behind the bridge.

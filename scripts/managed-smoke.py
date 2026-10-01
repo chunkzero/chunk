@@ -11,6 +11,7 @@ Needs `just toolchain` first, and a compose provider for Podman.
 """
 import argparse
 import asyncio
+import base64
 import contextlib
 import fcntl
 import hashlib
@@ -18,6 +19,7 @@ import io
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import signal
 import socket
@@ -282,9 +284,11 @@ class Smoke:
                      f'image-{image.split(":")[0]}.log', cwd=ROOT)
 
     def start(self):
-        self.run([str(BUNDLE / 'init.sh'), str(self.env_file)])
-        settings = dict(line.split('=', 1) for line in self.env_file.read_text().splitlines() if '=' in line)
-        settings.update({
+        settings = {
+            'CHUNK_SECRET_KEY': base64.b64encode(secrets.token_bytes(32)).decode(),
+            'CHUNK_OPERATOR_TOKEN': f'chunk_{secrets.token_hex(32)}',
+            'CHUNK_EDGE_TOKEN': f'chunk_{secrets.token_hex(32)}',
+            'POSTGRES_PASSWORD': secrets.token_hex(24),
             'CHUNK_ENGINE_SOCKET': str(self.engine_socket),
             'CHUNK_ENGINE_GID': str(self.engine_gid),
             'CHUNK_PLAYER_BIND': '127.0.0.1',
@@ -296,7 +300,7 @@ class Smoke:
             'CHUNK_JVM_IMAGE': f'chunk-jvm:{TAG}-{{java}}',
             'CHUNK_EDGE_IMAGE': f'chunk-edge:{TAG}',
             'CHUNK_MANAGEMENT_IMAGE': f'chunk-management:{TAG}',
-        })
+        }
         self.env_file.write_text(''.join(f'{name}={value}\n' for name, value in settings.items()))
         self.override.write_text(OVERRIDE)
         self.token = settings['CHUNK_OPERATOR_TOKEN']
