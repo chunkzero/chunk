@@ -42,7 +42,7 @@ pub(super) async fn run(
     let mut command = CommandWrap::with_new(&wrapper, |command| {
         chunk_service::withhold_platform_env(command.as_std_mut());
         if frozen {
-            command.env("CHUNK_FROZEN", "1");
+            command.env("CHUNK_FROZEN", "true");
         }
         command
             .current_dir(project)
