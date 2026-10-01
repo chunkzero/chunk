@@ -62,6 +62,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
         let project = prepare(&options)?;
         cliclack::log::info("Building application release…")?;
         let built = execute(&project, BuildMode::Release, stop, Progress::default()).await?;
+        warn_irreversible(&project.root.join(".chunk/build/backend/contract.json"))?;
         let release = built.release.archive.as_ref().unwrap_or(&built.release.directory);
         cliclack::log::success(format!("Built → {}", release.display()))
     })
@@ -101,6 +102,28 @@ pub(crate) async fn execute(
     cancelled(&stop)?;
     progress.emit(Event::Finished(Phase::Release, started.elapsed()));
     Ok(built)
+}
+
+/// Warns about expand migrations whose removed fields have no `back`, so older deployments see them frozen.
+fn warn_irreversible(contract: &std::path::Path) -> io::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Contract {
+        #[serde(default)]
+        migrations: Vec<chunk_contract::Migration>,
+    }
+    let contract: Contract = serde_json::from_slice(&std::fs::read(contract)?).map_err(io::Error::other)?;
+    for migration in &contract.migrations {
+        for (table, change) in &migration.tables {
+            if migration.kind == chunk_contract::MigrationKind::Expand && !change.back && !change.removed.is_empty() {
+                cliclack::log::warning(format!(
+                    "Migration {} has no back for {table}; older deployments see {} frozen until it's finished",
+                    migration.id,
+                    change.removed.join(", ")
+                ))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn cancelled(stop: &CancellationToken) -> io::Result<()> {

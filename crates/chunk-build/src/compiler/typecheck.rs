@@ -1,4 +1,3 @@
-use super::sources::Source;
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -23,7 +22,7 @@ pub(super) fn executable() -> io::Result<PathBuf> {
     Ok(path)
 }
 
-pub(super) fn check(files: &[Source<'_>], output: &Path) -> io::Result<()> {
+pub(super) fn check(files: &[&Path], output: &Path) -> io::Result<()> {
     let compiler = executable()?;
     let version = Command::new(&compiler).arg("--version").output()?;
     if !version.status.success() || String::from_utf8_lossy(&version.stdout).trim() != format!("Version {VERSION}") {
@@ -38,7 +37,7 @@ pub(super) fn check(files: &[Source<'_>], output: &Path) -> io::Result<()> {
                 "strict": true, "exactOptionalPropertyTypes": true, "noEmit": true, "allowImportingTsExtensions": true,
                 "types": [], "lib": ["ES2023"]
             },
-            "files": files.iter().map(|file| &file.path).collect::<Vec<_>>()
+            "files": files
         }))
         .map_err(io::Error::other)?,
     )?;

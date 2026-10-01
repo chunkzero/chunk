@@ -279,7 +279,7 @@ fn publish(root: &Path, status: u8) -> std::path::PathBuf {
     fs::write(project.join("apps/lobby/app.toml"), "").unwrap();
     fs::write(project.join("apps/lobby/build.gradle.kts"), "").unwrap();
     fs::write(backend.join("source.mjs"), format!("export function status() {{ return {status}; }}")).unwrap();
-    fs::write(backend.join("contract.json"), r#"{"contract_version":2,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
+    fs::write(backend.join("contract.json"), r#"{"contract_version":3,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
     let mut jar = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let class = vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 69, 1];
     for (name, bytes) in [
@@ -446,7 +446,7 @@ impl Harness {
         for index in 0..count {
             let bundle = chunk_contract::Deployment {
                 contracts: chunk_contract::Contracts::default(),
-                contract_version: 2,
+                contract_version: 3,
                 runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
                 id: format!("dep_abandoned_{index}"),
                 source: "export function status() { return 1; }".into(),

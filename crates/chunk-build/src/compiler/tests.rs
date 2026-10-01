@@ -241,6 +241,7 @@ fn generated_helpers_infer_the_live_schema_and_resolve_package_imports() {
     .unwrap();
     let inventory = crate::project::load(project.path()).unwrap();
     let files = sources::discover(project.path(), &inventory).unwrap();
+    let files: Vec<_> = files.iter().map(|file| file.path.as_path()).collect();
     // No generation between schema edits: TypeScript follows typeof schema.tables.
     let error = typecheck::check(&files, output.path()).unwrap_err().to_string();
     assert!(error.contains("added") && error.contains("missing"), "{error}");

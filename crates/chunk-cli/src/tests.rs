@@ -15,6 +15,10 @@ fn command_structure_is_valid() {
     assert!(Cli::try_parse_from(["chunk", "gen", "--target", "typescript"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "gen", "--target", "kotlin"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "build", "example", "--output", "dist"]).is_ok());
+    assert!(
+        Cli::try_parse_from(["chunk", "migrate", "new", "rename", "--rename", "fighters.name=displayName"]).is_ok()
+    );
+    assert!(Cli::try_parse_from(["chunk", "migrate", "finish", "0002", "example"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "dev", "example"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "local", "example", "--java", "/jdk/bin/java"]).is_ok());
     assert!(Cli::try_parse_from(["chunk", "dev", "--project", "project.json"]).is_err());

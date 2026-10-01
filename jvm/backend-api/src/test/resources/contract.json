@@ -1,5 +1,5 @@
 {
-  "contract_version": 2,
+  "contract_version": 3,
   "runtime_profile": "transactional_v1",
   "tables": {
     "profiles": {

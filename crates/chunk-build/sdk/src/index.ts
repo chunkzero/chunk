@@ -64,6 +64,8 @@ export { sessionMethod } from "./sessions.ts";
 export type { SessionMethodDeclaration, SessionMethodReference } from "./sessions.ts";
 export { defineDestination } from "./destinations.ts";
 export type { DestinationDefinition, DestinationOptions } from "./destinations.ts";
+export { defineMigration } from "./migrations.ts";
+export type { MigrationDefinition, Migrations } from "./migrations.ts";
 
 export type { JobId, Scheduler } from "./jobs.ts";
 export type { CommandEffectReceipt, CommandPlayer, CommandSession, CommandRouting } from "./command-effects.ts";

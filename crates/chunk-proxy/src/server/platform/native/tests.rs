@@ -319,7 +319,7 @@ export function ban(ctx) { ctx.db.put('state','ban',{value:'yes'}); return null;
     }
     Deployment {
         contracts: Contracts { domains: Some(manifest), ..Default::default() },
-        contract_version: 2,
+        contract_version: 3,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: "candidate".into(),
         source,

@@ -14,7 +14,7 @@ use std::{
     borrow::Cow,
     collections::BTreeMap,
     fs, io,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 const ENTRY: &str = "\0chunk-entry";
@@ -98,6 +98,7 @@ pub(super) async fn build(
     output: &Path,
     sdk: &Path,
     files: &[Source<'_>],
+    migrations: &[(String, PathBuf)],
     inventory: &Inventory,
 ) -> io::Result<()> {
     let entries: Vec<_> = files.iter().filter(|source| !source.path.to_string_lossy().ends_with(".d.ts")).collect();
@@ -114,7 +115,8 @@ pub(super) async fn build(
         return Err(error(warning));
     }
     let modules = std::mem::take(&mut *discovered_exports.lock().map_err(error)?);
-    let source = entry_source(root, sdk, &entries, &modules, inventory)?;
+    let mut source = entry_source(root, sdk, &entries, &modules, inventory)?;
+    migration_source(sdk, migrations, &mut source)?;
     let mut config = options(root, vec![ENTRY.into()]);
     config.dir = Some(output.to_string_lossy().into_owned());
     config.entry_filenames = Some("source.mjs".to_string().into());
@@ -235,6 +237,32 @@ fn entry_source(
     let domain_metadata = domains.metadata()?;
     let [functions, methods, destinations, configurations] = descriptors.metadata();
     writeln!(source, "const destinationEntries = [{destinations}];").map_err(error)?;
-    write!(source, "export function __chunk_contract() {{ const methods = [{methods}]; const configurations = [{configurations}]; return {{contract_version:2,runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{functions}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}}),...(configurations.length ? {{session_configurations:{{version:1,configurations}}}} : {{}})}}; }}").map_err(error)?;
+    write!(source, "export function __chunk_contract() {{ const methods = [{methods}]; const configurations = [{configurations}]; return {{contract_version:{},runtime_profile:'transactional_v1',tables:schema.contract,functions:Object.fromEntries([{functions}]){domain_metadata},...(destinationEntries.length ? {{destinations:{{version:1,entries:Object.fromEntries(destinationEntries)}}}} : {{}}),...(methods.length ? {{session_methods:{{version:1,methods}}}} : {{}}),...(configurations.length ? {{session_configurations:{{version:1,configurations}}}} : {{}})}}; }}", chunk_contract::CONTRACT_VERSION).map_err(error)?;
     Ok(source)
+}
+
+/// Registers each migration by ID behind `__chunk_migrate`, and reports which tables have `back` through
+/// `__chunk_migrations`.
+fn migration_source(sdk: &Path, migrations: &[(String, PathBuf)], source: &mut String) -> io::Result<()> {
+    use std::fmt::Write;
+    writeln!(
+        source,
+        "import {{ isMigration, migrate, migrationBacks }} from {};\nconst migrations = {{}};",
+        quote(sdk.join("migrations.ts").to_string_lossy())
+    )
+    .map_err(error)?;
+    for (index, (id, path)) in migrations.iter().enumerate() {
+        let message = format!("server/migrations/{id}.ts must default-export defineMigration({})", quote(id));
+        writeln!(
+            source,
+            "import mg{index} from {};\nif (!isMigration(mg{index}) || mg{index}.id !== {}) throw new Error({});\nmigrations[{}] = mg{index};",
+            quote(path.to_string_lossy()),
+            quote(id),
+            quote(message),
+            quote(id)
+        )
+        .map_err(error)?;
+    }
+    source.push_str("export const __chunk_migrate = (_, args) => migrate(migrations, args);\nexport const __chunk_migrations = () => migrationBacks(migrations);\n");
+    Ok(())
 }

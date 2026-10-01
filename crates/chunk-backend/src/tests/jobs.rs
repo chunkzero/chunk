@@ -32,7 +32,7 @@ pub(super) fn deployment(id: &str, increment: i32) -> Deployment {
     let retry: Schema = serde_json::from_value(json!({"type":"object","fields":{"at":{"schema":{"type":"integer"}},"id":{"schema":{"type":"string"}},"ack":{"schema":{"type":"boolean"}}}})).unwrap();
     Deployment {
         contracts: Contracts::default(),
-        contract_version: 2,
+        contract_version: 3,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: id.into(),
         source: format!(

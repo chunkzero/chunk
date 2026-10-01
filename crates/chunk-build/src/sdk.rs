@@ -22,6 +22,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("validators.ts", include_str!("../sdk/src/validators.ts")),
     ("documents.ts", include_str!("../sdk/src/documents.ts")),
     ("schema.ts", include_str!("../sdk/src/schema.ts")),
+    ("migrations.ts", include_str!("../sdk/src/migrations.ts")),
     ("web.d.ts", include_str!("../sdk/src/web.d.ts")),
 ];
 
@@ -59,6 +60,10 @@ pub(crate) fn generate(project: &Path, inventory: &Inventory) -> io::Result<()> 
     write_changed(&project.join(".chunk/generated/index.ts"), include_bytes!("sdk/index.ts"))?;
     write_changed(&project.join(".chunk/generated/apps.ts"), app_references(inventory)?.as_bytes())?;
     write_changed(&project.join(".chunk/generated/env.ts"), env_types(&inventory.env).as_bytes())?;
+    write_changed(
+        &project.join(".chunk/generated/migrations.ts"),
+        crate::migrations::declarations(project)?.as_bytes(),
+    )?;
     if original != package {
         let mut bytes = serde_json::to_vec_pretty(&package).map_err(io::Error::other)?;
         bytes.push(b'\n');

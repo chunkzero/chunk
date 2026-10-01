@@ -7,6 +7,8 @@ mod compiler;
 #[cfg(feature = "compiler")]
 pub use compiler::compile;
 #[cfg(feature = "compiler")]
+pub mod migrations;
+#[cfg(feature = "compiler")]
 pub mod project;
 mod publication;
 mod release;

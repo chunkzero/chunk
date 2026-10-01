@@ -5,6 +5,7 @@ import { defineFunctions } from "../sdk/functions.ts";
 import type { QueryContext as SchemaQueryContext, MutationContext as SchemaMutationContext } from "../sdk/functions.ts";
 import type { Id as TableId } from "../sdk/validators.ts";
 import type {} from "./env.ts";
+import type {} from "./migrations.ts";
 
 export {
   defineApp,
@@ -17,12 +18,14 @@ export {
   commandArg,
   sessionMethod,
   defineDestination,
+  defineMigration,
 } from "../sdk/index.ts";
 export type {
   SessionMethodDeclaration,
   SessionMethodReference,
   DestinationDefinition,
   DestinationOptions,
+  MigrationDefinition,
   AppDefinition,
   AppRuntime,
   ImplementationOptions,

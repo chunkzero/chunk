@@ -160,7 +160,7 @@ fn deployment() -> Deployment {
             session_methods: Some(serde_json::from_value(runtime::session_methods()).unwrap()),
             ..Contracts::default()
         },
-        contract_version: 2,
+        contract_version: 3,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: "test".into(),
         source: SOURCE.into(),

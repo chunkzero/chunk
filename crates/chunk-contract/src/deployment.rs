@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{DatabaseSchema, DomainManifest, Schema};
 
-pub const CONTRACT_VERSION: u32 = 2;
+pub const CONTRACT_VERSION: u32 = 3;
 const SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +68,8 @@ pub struct Contracts {
     pub destinations: Option<crate::DestinationManifest>,
     #[serde(default, skip_serializing_if = "crate::EnvManifest::is_empty")]
     pub env: crate::EnvManifest,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub migrations: Vec<crate::Migration>,
 }
 
 impl Deployment {
@@ -89,6 +91,7 @@ impl Deployment {
         crate::validate(&self.tables)?;
         let contracts = &self.contracts;
         contracts.env.validate().map_err(|_| "invalid variables or secret names")?;
+        crate::validate_migrations(&contracts.migrations)?;
         if let Some(methods) = &contracts.session_methods {
             methods.validate()?;
         }

@@ -436,3 +436,38 @@ defineApp({
   },
 });
 defineApp({ id: "lobby", destinations: { main: { implementation: "default", key: "lobby" } } });
+
+import { defineMigration } from "../src/index.ts";
+
+declare module "../src/migrations.ts" {
+  interface Migrations {
+    "0002_display_name": {
+      fighters: {
+        old: { readonly _id: Id<"fighters">; name: string };
+        row: { readonly _id: Id<"fighters">; displayName: string; title?: string };
+        added: { displayName: string; title?: string };
+        removed: { name: string };
+      };
+    };
+  }
+}
+defineMigration("0002_display_name", {
+  fighters: { to: (old) => ({ displayName: old.name.trim() }), back: (row) => ({ name: row.displayName }) },
+});
+defineMigration("0002_display_name", {
+  // @ts-expect-error to returns exactly the new fields
+  fighters: { to: (old) => ({ displayName: old.name, name: old.name }) },
+});
+defineMigration("0002_display_name", {
+  fighters: {
+    to: (old) => ({ displayName: old.name }),
+    // @ts-expect-error back returns the removed fields
+    back: () => ({}),
+  },
+});
+defineMigration("0002_display_name", {
+  // @ts-expect-error old is the previous snapshot's row
+  fighters: { to: (old) => ({ displayName: old.displayName }) },
+});
+// @ts-expect-error migrations transform the tables their snapshots change
+defineMigration("0002_display_name", { players: { to: () => ({}) } });

@@ -116,7 +116,7 @@ fn deployment(id: &str) -> Deployment {
     };
     Deployment {
         contracts: Contracts { env, ..Contracts::default() },
-        contract_version:2,runtime_profile:RuntimeProfile::TransactionalV1,id:id.into(),tables:BTreeMap::new(),
+        contract_version:3,runtime_profile:RuntimeProfile::TransactionalV1,id:id.into(),tables:BTreeMap::new(),
         source:r"
 export async function run(ctx,args) { return JSON.stringify(await ctx.fetch({url:args.url,method:args.method??'GET',body:args.body})); }
 export async function credential(ctx,args) { return JSON.stringify(await ctx.fetch({url:args.url,headers:{authorization:ctx.env.TOKEN}})); }

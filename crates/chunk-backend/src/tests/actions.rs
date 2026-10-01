@@ -10,7 +10,7 @@ use crate::{ActionEffects, ActionHandle, ActionStatus, Backend, Call, Error, Lim
 fn deployment(id: &str, increment: i32) -> Deployment {
     let mut deployment = Deployment {
         contracts: Contracts::default(),
-        contract_version: 2,
+        contract_version: 3,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: id.into(),
         source: format!(
