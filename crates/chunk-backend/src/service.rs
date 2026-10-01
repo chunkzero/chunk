@@ -128,6 +128,13 @@ impl<T> Request<T> {
     }
 }
 
+/// Whether a deployment accepts calls, and the work it still waits on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Readiness {
+    pub ready: bool,
+    pub pending: Vec<chunk_store::PendingWork>,
+}
+
 pub(crate) enum Command {
     Catalog {
         id: DeploymentId,
@@ -185,9 +192,17 @@ pub(crate) enum Command {
         caller: Json,
         reply: Request<ActionStatus>,
     },
-    Deploy {
+    Install {
         deployment: Arc<Deployment>,
         reply: Request<()>,
+    },
+    Ready {
+        id: DeploymentId,
+        reply: Request<()>,
+    },
+    Readiness {
+        id: DeploymentId,
+        reply: Request<Readiness>,
     },
     #[cfg(test)]
     Register {
@@ -238,7 +253,10 @@ impl Command {
             Self::OwnedIdentity { reply, .. } => reply.finish(Err(error)),
             Self::StartAction { reply, .. } => reply.finish(Err(error)),
             Self::ActionStatus { reply, .. } => reply.finish(Err(error)),
-            Self::Deploy { reply, .. } | Self::CheckDeployment { reply, .. } => reply.finish(Err(error)),
+            Self::Install { reply, .. } | Self::Ready { reply, .. } | Self::CheckDeployment { reply, .. } => {
+                reply.finish(Err(error));
+            }
+            Self::Readiness { reply, .. } => reply.finish(Err(error)),
             #[cfg(test)]
             Self::Register { reply, .. } => reply.finish(Err(error)),
             Self::Release { reply, .. } => reply.finish(Err(error)),
@@ -284,11 +302,16 @@ pub(crate) enum Event {
         operation: String,
         result: Result<(Update, Snapshot, Option<chunk_store::Jobs>)>,
     },
-    Activated {
-        result: Result<chunk_store::Snapshot>,
+    Installed {
+        result: Result<(Snapshot, Vec<chunk_store::PendingWork>)>,
+    },
+    /// One item of pending work ran.
+    Worked {
+        id: u64,
+        result: Result<(Snapshot, Vec<chunk_store::PendingWork>)>,
     },
     Released {
-        result: Result<bool>,
+        result: Result<(bool, Vec<chunk_store::PendingWork>)>,
     },
     Evaluated(Box<crate::actor::Evaluated>),
     /// System commits up to `revision` that precede every app commit not yet acknowledged,
@@ -500,14 +523,39 @@ impl Backend {
         crate::System::new(self.clone(), self.0.lane.clone())
     }
 
-    /// Validates and durably retains a deployment before enabling its functions.
-    /// Activation installs additive tables/indexes at a commit barrier. Restart reloads retained bundles.
+    /// Installs a deployment, then waits until it is [ready](Self::ready).
+    /// # Errors
+    /// Fails like [`Self::install`] and [`Self::ready`].
+    pub async fn deploy(&self, deployment: Deployment) -> Result<()> {
+        let id = DeploymentId::new(&deployment.id)?;
+        self.install(deployment).await?;
+        self.ready(id).await
+    }
+
+    /// Validates and durably retains a deployment, installing its new tables and optional fields at a commit
+    /// barrier. The work it waits on, such as building its indexes, then runs in the background, and the deployment
+    /// accepts calls once that is done. Installing a resident deployment that is not ready installs it again and
+    /// retries its failed work. Restart reloads retained bundles and resumes their work.
     /// # Errors
     /// Rejects incompatible metadata, invalid JS, pending commits or retention limits.
-    pub async fn deploy(&self, deployment: Deployment) -> Result<()> {
+    pub async fn install(&self, deployment: Deployment) -> Result<()> {
         deployment.validate().map_err(Error::Invalid)?;
         let bytes = serde_json::to_vec(&deployment)?.len();
-        self.submit_sized(bytes, |reply| Command::Deploy { deployment: Arc::new(deployment), reply }).await
+        self.submit_sized(bytes, |reply| Command::Install { deployment: Arc::new(deployment), reply }).await
+    }
+
+    /// Waits until the resident deployment `id` accepts calls.
+    /// # Errors
+    /// Reports unknown or released deployments and work that failed.
+    pub async fn ready(&self, id: DeploymentId) -> Result<()> {
+        self.submit(|reply| Command::Ready { id, reply }).await
+    }
+
+    /// Whether the resident deployment `id` accepts calls, and the work it waits on.
+    /// # Errors
+    /// Reports unknown deployments or an unavailable service.
+    pub async fn readiness(&self, id: DeploymentId) -> Result<Readiness> {
+        self.submit(|reply| Command::Readiness { id, reply }).await
     }
 
     pub(crate) async fn submit<T>(&self, make: impl FnOnce(Request<T>) -> Command) -> Result<T> {

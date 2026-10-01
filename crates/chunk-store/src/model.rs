@@ -105,14 +105,35 @@ impl KeyRange {
     }
 }
 
+/// An index as a deployment declares it. Definitions that share a table and
+/// name but differ in fields are distinct physical indexes.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct IndexDefinition {
+    pub table: String,
+    pub name: String,
+    pub fields: Vec<String>,
+}
+
+impl IndexDefinition {
+    /// Every index `tables` declare.
+    pub fn declared(tables: &chunk_contract::DatabaseSchema) -> impl Iterator<Item = Self> + '_ {
+        tables.iter().flat_map(|(table, schema)| {
+            schema.indexes.iter().map(|(name, fields)| Self {
+                table: table.clone(),
+                name: name.clone(),
+                fields: fields.clone(),
+            })
+        })
+    }
+}
+
 /// An equality prefix followed by an optional half-open range on the next field.
 /// Fields follow the declared index order; document ID breaks ties. Null denotes
 /// an absent optional scalar and sorts before present values. Complex fields
 /// (including nullable unions) cannot be indexed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexRange {
-    pub table: String,
-    pub index: String,
+    pub index: IndexDefinition,
     pub prefix: Vec<Value>,
     pub start: Option<Value>,
     pub end: Option<Value>,
@@ -125,10 +146,10 @@ impl IndexRange {
     /// # Errors
     /// Rejects invalid names, limits, prefix lengths, bound types and reversed bounds.
     pub fn validate(&self, table: &chunk_contract::TableSchema) -> Result<()> {
-        validate_table(&self.table)?;
-        chunk_contract::validate_name(&self.index).map_err(Error::Invalid)?;
-        let fields = table.indexes.get(&self.index).ok_or(Error::Invalid("undeclared index"))?;
-        if self.limit == 0 || self.limit > 100_000 || self.prefix.len() > fields.len() {
+        validate_table(&self.index.table)?;
+        chunk_contract::validate_name(&self.index.name).map_err(Error::Invalid)?;
+        let fields = &self.index.fields;
+        if fields.is_empty() || self.limit == 0 || self.limit > 100_000 || self.prefix.len() > fields.len() {
             return Err(Error::Invalid("invalid index range"));
         }
         let validate_value = |name: &str, value: &Value| -> Result<()> {

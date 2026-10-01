@@ -15,6 +15,14 @@ pub(crate) fn schema() -> DatabaseSchema {
     .unwrap()
 }
 
+pub(crate) fn index(table: &str, name: &str, fields: &[&str]) -> crate::IndexDefinition {
+    crate::IndexDefinition {
+        table: table.into(),
+        name: name.into(),
+        fields: fields.iter().map(|&field| field.into()).collect(),
+    }
+}
+
 pub(crate) fn operation(id: &str) -> Operation {
     Operation { id: id.into(), fingerprint: [7; 32] }
 }
@@ -87,8 +95,7 @@ pub(crate) fn snapshots_preserve_point_and_empty_range_reads_across_atomic_chang
     assert_eq!(empty.schema(), &schema());
     let range = KeyRange { table: "profiles".into(), start: Some("b".into()), end: Some("d".into()) };
     let index = IndexRange {
-        table: "profiles".into(),
-        index: "by_coins".into(),
+        index: index("profiles", "by_coins", &["coins"]),
         prefix: vec![],
         start: Some(json!(2)),
         end: Some(json!(4)),

@@ -234,6 +234,16 @@ impl Actor {
 
     /// System commits took the next revisions, so every staged commit moves past them. The
     /// base snapshot then includes every system commit seen, as each commit's expected revision assumes.
+    /// Replaces the view's base with `snapshot`, keeping staged writes it does not include.
+    pub(super) fn rebase(&mut self, snapshot: Snapshot) {
+        let durable = snapshot.revision;
+        let mut view = View::new(snapshot);
+        for next in self.pending.iter().filter(|next| next.revision > durable) {
+            view.apply(next.revision, &next.writes);
+        }
+        self.view = std::sync::Arc::new(view);
+    }
+
     pub(super) fn system_committed(&mut self, count: u64, revision: Revision, snapshot: Result<Snapshot>) {
         if self.failure.is_some() {
             return;
@@ -250,12 +260,7 @@ impl Actor {
         for (update, _) in &mut self.deferred {
             update.revision.0 += count;
         }
-        let durable = snapshot.revision;
-        let mut view = View::new(snapshot);
-        for next in self.pending.iter().filter(|next| next.revision > durable) {
-            view.apply(next.revision, &next.writes);
-        }
-        self.view = std::sync::Arc::new(view);
+        self.rebase(snapshot);
         if !self.pending.is_empty() {
             // Queries running against staged writes would report their old revisions.
             self.epoch += 1;
@@ -306,12 +311,7 @@ impl Actor {
         }
         pending.staged.stop(Phase::Durable);
         self.pending_bytes -= pending.bytes;
-        let durable = snapshot.revision;
-        let mut view = View::new(snapshot);
-        for next in self.pending.iter().filter(|next| next.revision > durable) {
-            view.apply(next.revision, &next.writes);
-        }
-        self.view = std::sync::Arc::new(view);
+        self.rebase(snapshot);
         if let Some(jobs) = jobs {
             self.scheduled.snapshot = jobs;
         }

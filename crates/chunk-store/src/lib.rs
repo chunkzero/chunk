@@ -9,11 +9,12 @@
 //! Declare physical tables before writing. Scalar fields become native SQL
 //! columns; objects, arrays, literals and unions use JSON text. SQL NULL encodes
 //! absence, while JSON `null` remains a present value. Indexes cover declared
-//! scalar fields with document ID as the final ordering tiebreaker.
+//! scalar fields with document ID as the final ordering tiebreaker. An index is
+//! identified by its table, name and fields together.
 //!
 //! ```
-//! use chunk_store::{Commit, DatabaseSchema, DocumentKey, IndexRange, Operation,
-//!     SqliteStore, Storage, Write};
+//! use chunk_store::{Commit, DatabaseSchema, DocumentKey, IndexDefinition, IndexRange,
+//!     Operation, SqliteStore, Storage, Write};
 //! use serde_json::json;
 //!
 //! # let directory = tempfile::tempdir()?;
@@ -39,9 +40,11 @@
 //!     result: json!("profile-1"),
 //! })?;
 //! let snapshot = store.snapshot()?;
+//! let index = IndexDefinition {
+//!     table: "profiles".into(), name: "by_player".into(), fields: vec!["player".into()],
+//! };
 //! let rows = snapshot.scan_index(&IndexRange {
-//!     table: "profiles".into(), index: "by_player".into(),
-//!     prefix: vec![json!("alex")], start: None, end: None, limit: 1,
+//!     index, prefix: vec![json!("alex")], start: None, end: None, limit: 1,
 //! })?;
 //! assert_eq!(rows[0].0, "profile-1");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
@@ -52,16 +55,18 @@ mod model;
 mod replication;
 mod snapshot;
 mod sqlite;
+mod work;
 
 pub use chunk_contract::DatabaseSchema;
 pub use jobs::{Job, JobCommand, JobIntent, JobState, Jobs, WakeHandoff};
 pub use model::{
-    Commit, Document, DocumentKey, Epoch, IndexRange, KeyRange, Operation, Outcome, ReadBudget, RetryContext, Revision,
-    Write,
+    Commit, Document, DocumentKey, Epoch, IndexDefinition, IndexRange, KeyRange, Operation, Outcome, ReadBudget,
+    RetryContext, Revision, Write,
 };
 pub use replication::{Listed, ObjectStorage, Replication, ReplicationProgress, Replicator, S3Bucket, S3Credentials};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
+pub use work::{PendingWork, Work};
 
 /// Tables whose names start with this prefix, in any letter case, belong to the
 /// environment itself. App deployments may not declare them.
@@ -81,14 +86,28 @@ pub trait Storage: Send {
     /// Rejects reused identities, changed deployment bindings or storage failures.
     fn prepare_operation(&mut self, operation: &Operation, context: RetryContext) -> Result<RetryContext>;
 
-    /// Installs an additive schema and retains its deployment in one transaction.
+    /// Retains a deployment, installs its new tables and optional fields, and
+    /// records the work it waits on, such as building its indexes, in one
+    /// transaction. Installing it again records work it still lacks.
     /// # Errors
     /// Rejects incompatible schemas, [system tables](is_system_table), retired
     /// identities and storage failures. A storage failure that changed nothing
     /// is [`Error::RolledBack`].
-    fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision>;
+    fn install_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision>;
 
-    /// Removes an inactive deployment, permanently retiring its identity.
+    /// Work installed deployments wait on, in the order it runs.
+    /// # Errors
+    /// Reports storage failures or corrupt work records.
+    fn pending_work(&self) -> Result<Vec<PendingWork>>;
+
+    /// Runs one item of pending work in its own write, without changing document
+    /// revisions. Work no longer pending is done already.
+    /// # Errors
+    /// Reports storage failures. A failure that changed nothing is [`Error::RolledBack`].
+    fn run_work(&mut self, id: u64) -> Result<()>;
+
+    /// Removes an inactive deployment, permanently retiring its identity. Indexes
+    /// and pending work that no remaining deployment or schema declares go with it.
     /// # Errors
     /// Reports storage failures; the caller must first drain references.
     fn release_deployment(&mut self, id: &str) -> Result<bool>;
@@ -107,6 +126,8 @@ pub trait Storage: Send {
     /// Atomically installs new tables, optional fields and indexes, advancing the
     /// environment revision. Reapplying declarations is a no-op. Omitted tables,
     /// fields and indexes are retained; existing definitions cannot be changed.
+    /// Unlike a deployment's, these indexes are built in the same transaction and
+    /// are never dropped.
     /// # Errors
     /// Rejects incompatible or invalid schemas and reports storage failures.
     fn apply_schema(&mut self, schema: &DatabaseSchema) -> Result<Revision>;

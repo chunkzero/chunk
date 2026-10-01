@@ -29,8 +29,7 @@ fn totals(store: &SqliteStore) -> (usize, usize) {
 
 fn by_coins() -> IndexRange {
     IndexRange {
-        table: "profiles".into(),
-        index: "by_coins".into(),
+        index: crate::tests::index("profiles", "by_coins", &["coins"]),
         prefix: vec![],
         start: None,
         end: None,
@@ -60,7 +59,12 @@ fn a_failure_after_document_writes_rolls_back_documents_indexes_counters_and_out
     assert!(snapshot.get(&DocumentKey::new("profiles", "a").unwrap()).unwrap().is_none());
     assert_eq!(totals(&store), (0, 0));
     assert!(snapshot.get(&stats.key).unwrap().is_none());
-    assert!(snapshot.scan_index(&IndexRange { table: "stats".into(), ..by_coins() }).unwrap().is_empty());
+    assert!(
+        snapshot
+            .scan_index(&IndexRange { index: crate::tests::index("stats", "by_coins", &["coins"]), ..by_coins() })
+            .unwrap()
+            .is_empty()
+    );
     assert!(store.outcome(&operation("failed")).unwrap().is_none());
     assert_eq!(
         store.prepare_operation(&operation("failed"), RetryContext { seed: 99, ..context.clone() }).unwrap(),

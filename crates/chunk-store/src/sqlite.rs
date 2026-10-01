@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -7,13 +8,14 @@ use std::{
 use rusqlite::Connection;
 
 use crate::{
-    Commit, DatabaseSchema, Epoch, Error, JobIntent, Operation, Outcome, Replication, Replicator, Reply, Request,
-    Result, RetryContext, Revision, Snapshot, Storage, replication,
+    Commit, DatabaseSchema, Epoch, Error, IndexDefinition, JobIntent, Operation, Outcome, PendingWork, Replication,
+    Replicator, Reply, Request, Result, RetryContext, Revision, Snapshot, Storage, Work, replication,
 };
 
 pub(crate) mod bootstrap;
 mod codec;
 mod deployments;
+mod indexes;
 pub(crate) mod jobs;
 pub(crate) mod log;
 mod operations;
@@ -21,6 +23,7 @@ mod read;
 pub(crate) mod retention;
 mod revision;
 mod schema;
+mod work;
 mod write;
 
 /// Expired outcomes and retry contexts are removed at most this often.
@@ -32,6 +35,7 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 pub struct SqliteStore {
     connection: Connection,
     schema: Arc<DatabaseSchema>,
+    indexes: Arc<BTreeSet<IndexDefinition>>,
     epoch: Epoch,
     log: Option<log::Log>,
     retention: retention::Retention,
@@ -144,18 +148,39 @@ impl SqliteStore {
         log: Option<log::Log>,
     ) -> Result<Self> {
         let schema = Arc::new(schema::load(&connection)?);
+        let indexes = Arc::new(indexes::load(&connection)?);
         let epoch = Epoch(log::epoch(&connection)?);
-        Ok(Self {
+        let mut store = Self {
             connection,
             readers: read::Pool::new(path),
             schema,
+            indexes,
             epoch,
             log,
             retention: retention::Retention::default(),
             job_limits: jobs::JobLimits::default(),
             pruned_at: None,
             _writer_lock: writer_lock,
-        })
+        };
+        store.schedule_missing_indexes()?;
+        Ok(store)
+    }
+
+    /// Records a build for each index a resident deployment declares that is neither built nor pending, so a
+    /// deployment is never unready with nothing to resume.
+    fn schedule_missing_indexes(&mut self) -> Result<()> {
+        let pending: Vec<_> = work::load(&self.connection)?.into_iter().map(|pending| pending.work).collect();
+        let missing: Vec<_> = deployments::load(&self.connection)?
+            .iter()
+            .flat_map(|deployment| IndexDefinition::declared(&deployment.tables).collect::<Vec<_>>())
+            .filter(|index| !self.indexes.contains(index))
+            .map(Work::Index)
+            .filter(|work| !pending.contains(work))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        log::write(&self.connection, self.log.as_mut(), &[], |transaction| work::record(transaction, missing))
     }
 
     /// Replaces the default one-day retention windows.
@@ -185,19 +210,78 @@ impl Storage for SqliteStore {
         }
     }
 
-    fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision> {
-        let migration = schema::merge(&self.schema, &deployment.tables)?;
+    fn install_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision> {
+        let migration = schema::merge(&self.schema, &deployment.tables, None)?;
+        let (current, built) = (&self.schema, &self.indexes);
         let revision =
             log::write_or_roll_back(&self.connection, self.log.as_mut(), &migration.statements, |transaction| {
                 deployments::insert(transaction, deployment)?;
-                schema::install(transaction, &migration)
+                let missing = IndexDefinition::declared(&deployment.tables).filter(|index| !built.contains(index));
+                work::record(transaction, missing.map(Work::Index))?;
+                schema::install(transaction, current, &migration)
             })?;
         self.schema = Arc::new(migration.schema);
         Ok(revision)
     }
 
+    fn pending_work(&self) -> Result<Vec<PendingWork>> {
+        work::load(&self.connection)
+    }
+
+    fn run_work(&mut self, id: u64) -> Result<()> {
+        let Some(Work::Index(index)) = work::get(&self.connection, id)? else {
+            return Ok(());
+        };
+        let built = self.indexes.contains(&index);
+        let statements = if built { Vec::new() } else { vec![indexes::create(&index)] };
+        log::write_or_roll_back(&self.connection, self.log.as_mut(), &statements, |transaction| {
+            for statement in &statements {
+                transaction.execute_batch(statement)?;
+            }
+            if !built {
+                indexes::record(transaction, std::slice::from_ref(&index))?;
+            }
+            work::finish(transaction, id)
+        })?;
+        if !built {
+            let mut indexes = (*self.indexes).clone();
+            indexes.insert(index);
+            self.indexes = Arc::new(indexes);
+        }
+        Ok(())
+    }
+
     fn release_deployment(&mut self, id: &str) -> Result<bool> {
-        log::write(&self.connection, self.log.as_mut(), &[], |transaction| deployments::release(transaction, id))
+        let deployments = deployments::load(&self.connection)?;
+        let resident = deployments.iter().any(|deployment| deployment.id == id);
+        let needed: BTreeSet<_> = deployments
+            .iter()
+            .filter(|deployment| deployment.id != id)
+            .flat_map(|deployment| IndexDefinition::declared(&deployment.tables))
+            .chain(IndexDefinition::declared(&self.schema))
+            .collect();
+        let dropped: Vec<_> = if resident {
+            self.indexes.iter().filter(|index| !needed.contains(index)).cloned().collect()
+        } else {
+            Vec::new()
+        };
+        let statements: Vec<_> = dropped.iter().map(indexes::drop).collect();
+        let removed = log::write(&self.connection, self.log.as_mut(), &statements, |transaction| {
+            let removed = deployments::release(transaction, id)?;
+            if removed {
+                for statement in &statements {
+                    transaction.execute_batch(statement)?;
+                }
+                indexes::forget(transaction, &dropped)?;
+                work::prune(transaction, &needed)?;
+            }
+            Ok(removed)
+        })?;
+        if !dropped.is_empty() {
+            let indexes = self.indexes.iter().filter(|index| !dropped.contains(index)).cloned().collect();
+            self.indexes = Arc::new(indexes);
+        }
+        Ok(removed)
     }
 
     fn deployments(&self) -> Result<Vec<chunk_contract::Deployment>> {
@@ -209,19 +293,25 @@ impl Storage for SqliteStore {
     }
 
     fn apply_schema(&mut self, schema: &DatabaseSchema) -> Result<Revision> {
-        let migration = schema::merge(&self.schema, schema)?;
-        if migration.statements.is_empty() {
+        let migration = schema::merge(&self.schema, schema, Some(&self.indexes))?;
+        if migration.statements.is_empty() && migration.schema == *self.schema {
             return revision::current(&self.connection);
         }
+        let current = &self.schema;
         let next = log::write(&self.connection, self.log.as_mut(), &migration.statements, |transaction| {
-            schema::install(transaction, &migration)
+            schema::install(transaction, current, &migration)
         })?;
+        if !migration.indexes.is_empty() {
+            let mut indexes = (*self.indexes).clone();
+            indexes.extend(migration.indexes);
+            self.indexes = Arc::new(indexes);
+        }
         self.schema = Arc::new(migration.schema);
         Ok(next)
     }
 
     fn snapshot(&mut self) -> Result<Snapshot> {
-        read::snapshot(&self.readers, self.schema.clone())
+        read::snapshot(&self.readers, self.schema.clone(), self.indexes.clone())
     }
 
     fn outcome(&self, operation: &Operation) -> Result<Option<Outcome>> {

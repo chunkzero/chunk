@@ -600,6 +600,8 @@ fn a_crash_right_after_a_format_migration_still_forces_a_new_snapshot() {
              ALTER TABLE _chunk_operations DROP COLUMN committed_at;
              ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
              ALTER TABLE _chunk_jobs DROP COLUMN updated_at;
+             DROP TABLE _chunk_indexes;
+             DROP TABLE _chunk_work;
              PRAGMA user_version = 7;",
         )
         .unwrap();
@@ -634,6 +636,8 @@ fn format_7_snapshots_and_segments_restore_and_fork_before_migrating() {
              ALTER TABLE _chunk_operations DROP COLUMN committed_at;
              ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
              ALTER TABLE _chunk_jobs DROP COLUMN updated_at;
+             DROP TABLE _chunk_indexes;
+             DROP TABLE _chunk_work;
              DELETE FROM _chunk_log;
              UPDATE _chunk_metadata SET epoch = 1, log_sequence = 1;
              PRAGMA user_version = 7;",

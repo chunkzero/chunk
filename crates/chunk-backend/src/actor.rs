@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -30,6 +30,7 @@ mod jobs;
 mod pipeline;
 mod queries;
 mod readers;
+mod readiness;
 mod subscriptions;
 mod watches;
 
@@ -70,6 +71,9 @@ pub(crate) struct Actor {
     /// Increments when staged writes roll back, so queries that read them run again.
     epoch: u64,
     versions: BTreeMap<DeploymentId, Option<Arc<Deployment>>>,
+    /// Resident deployments that wait on work, refusing calls until it is done.
+    unready: BTreeSet<DeploymentId>,
+    work: readiness::Work,
     deploying: Option<(Arc<Deployment>, Request<()>)>,
     releasing: Option<(DeploymentId, Request<bool>)>,
     view: Arc<View>,
@@ -98,14 +102,18 @@ impl Actor {
         queue: Arc<EngineQueue>,
         memory: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
-        let (committer, snapshot, deployments, scheduled) = Committer::new(store, events.clone())?;
+        let (committer, initial) = Committer::new(store, events.clone())?;
+        let crate::commit::Initial { snapshot, deployments, jobs: scheduled, work } = initial;
         let mut js = Engine::new()?;
         let mut versions = BTreeMap::new();
+        let mut unready = BTreeSet::new();
         let mut sources = BTreeMap::new();
         for deployment in deployments {
             deployment.validate().map_err(Error::Invalid)?;
-            Self::schema_ready(&deployment, snapshot.schema())?;
             let id = DeploymentId::new(&deployment.id)?;
+            if !Self::schema_ready(&deployment, &snapshot)? {
+                unready.insert(id.clone());
+            }
             let env = effects.env(&deployment);
             js.register_with_env(id.clone(), deployment.source.clone(), Limits::default(), env.clone())?;
             let secrets = effects.secrets.clone();
@@ -127,6 +135,8 @@ impl Actor {
             rerun_turn: false,
             epoch: 0,
             versions,
+            unready,
+            work: readiness::Work::new(work),
             deploying: None,
             releasing: None,
             view: Arc::new(View::new(snapshot)),
@@ -145,6 +155,7 @@ impl Actor {
     }
 
     pub fn run(mut self, mut incoming: mpsc::Receiver<Event>, stopped: &AtomicBool) {
+        self.dispatch_work();
         loop {
             if stopped.load(Ordering::Acquire) && self.outstanding == 0 {
                 break;
@@ -198,10 +209,11 @@ impl Actor {
                     self.outstanding -= 1;
                     self.committed(&operation, result);
                 }
-                Event::Activated { result } => {
+                Event::Installed { result } => {
                     self.outstanding -= 1;
-                    self.activated(result);
+                    self.installed(result);
                 }
+                Event::Worked { id, result } => self.worked(id, result),
                 Event::Released { result } => {
                     self.outstanding -= 1;
                     self.released(result);
@@ -218,6 +230,7 @@ impl Actor {
             if !stopped.load(Ordering::Acquire) {
                 self.dispatch_actions();
                 self.dispatch_jobs();
+                self.dispatch_work();
             }
             self.dispatch();
         }
@@ -271,12 +284,12 @@ impl Actor {
             Command::WakeHandoff { reply } => reply.finish(Ok(self.scheduled.snapshot.wake.clone())),
             Command::JobControl { command, reply } => self.job_control(command, reply),
             Command::ActionStatus { id, caller, reply } => reply.finish(self.actions.status(&id, &caller)),
-            Command::Deploy { deployment, reply } => {
+            Command::Install { deployment, reply } => {
                 if reply.cancellation.is_cancelled() {
                     reply.finish(Err(Error::Cancelled));
                     return;
                 }
-                let result = self.start_deployment(&deployment);
+                let result = self.start_install(&deployment);
                 match result {
                     Ok(true) => {
                         self.deploying = Some((deployment, reply));
@@ -308,6 +321,8 @@ impl Actor {
                 };
                 reply.finish(result);
             }
+            Command::Ready { id, reply } => self.await_ready(id, reply),
+            Command::Readiness { id, reply } => reply.finish(self.readiness(&id)),
             Command::Release { id, reply } => self.start_release(id, reply),
             Command::CheckDeployment { id, reply } => reply.finish(self.check_deployment(&id)),
             Command::Deployments { reply } => reply.finish(Ok(self.versions.keys().cloned().collect())),
@@ -334,6 +349,9 @@ impl Actor {
     fn check_deployment(&self, id: &DeploymentId) -> Result<()> {
         if self.releasing.as_ref().is_some_and(|(releasing, _)| releasing == id) {
             return Err(Error::Busy);
+        }
+        if self.unready.contains(id) {
+            return Err(Error::NotReady);
         }
         self.versions.get(id).ok_or(Error::Unknown).map(|_| ())
     }
@@ -444,5 +462,6 @@ impl Actor {
             waiting.fail(error);
         }
         self.watches.fail(error);
+        self.work.finish(|_, _| Some(Err(error.clone())));
     }
 }

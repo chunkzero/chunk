@@ -41,6 +41,7 @@ pub(super) fn backend(failure: &chunk_backend::Error) -> Error {
             chunk_js::Error::Cancelled | chunk_js::Error::Io(_) => Code::Unavailable,
         },
         Backend::Busy
+        | Backend::NotReady
         | Backend::Retry
         | Backend::Closed
         | Backend::Cancelled

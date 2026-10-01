@@ -1,5 +1,6 @@
 use chunk_contract::{Field, TableSchema};
 use std::{
+    collections::BTreeSet,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
@@ -9,11 +10,11 @@ use rusqlite::{Connection, OpenFlags, params_from_iter, types::Value as SqlValue
 use serde_json::Value;
 
 use crate::{
-    DatabaseSchema, Document, DocumentKey, Error, IndexRange, KeyRange, Operation, Outcome, ReadBudget, Result,
-    Revision, Snapshot, SnapshotReader,
+    DatabaseSchema, Document, DocumentKey, Error, IndexDefinition, IndexRange, KeyRange, Operation, Outcome,
+    ReadBudget, Result, Revision, Snapshot, SnapshotReader,
 };
 
-use super::{codec, revision, schema};
+use super::{codec, indexes, revision};
 
 /// Idle read connections beyond this are closed instead of kept.
 const IDLE: usize = 8;
@@ -79,14 +80,19 @@ impl Drop for Lease {
 struct Reader {
     connection: Mutex<Lease>,
     schema: Arc<DatabaseSchema>,
+    indexes: Arc<BTreeSet<IndexDefinition>>,
 }
 
-pub(super) fn snapshot(pool: &Arc<Pool>, schema: Arc<DatabaseSchema>) -> Result<Snapshot> {
+pub(super) fn snapshot(
+    pool: &Arc<Pool>,
+    schema: Arc<DatabaseSchema>,
+    indexes: Arc<BTreeSet<IndexDefinition>>,
+) -> Result<Snapshot> {
     let lease = pool.lease()?;
     lease.connection().execute_batch("BEGIN")?;
     // The first read establishes the WAL snapshot before any writer can advance it.
     let revision = revision::current(lease.connection())?;
-    Ok(Snapshot::new(revision, Reader { connection: Mutex::new(lease), schema }))
+    Ok(Snapshot::new(revision, Reader { connection: Mutex::new(lease), schema, indexes }))
 }
 
 /// A row copied out of SQLite, decoded once the connection is released.
@@ -158,6 +164,10 @@ impl SnapshotReader for Reader {
         &self.schema
     }
 
+    fn indexes(&self) -> &BTreeSet<IndexDefinition> {
+        &self.indexes
+    }
+
     fn get(&self, key: &DocumentKey, budget: &mut ReadBudget) -> Result<Option<Document>> {
         key.validate()?;
         let table = self.table(&key.table)?;
@@ -184,8 +194,11 @@ impl SnapshotReader for Reader {
     }
 
     fn scan_index(&self, range: &IndexRange, budget: &mut ReadBudget) -> Result<Vec<(String, Document)>> {
-        let table = self.table(&range.table)?;
+        let table = self.table(&range.index.table)?;
         range.validate(table)?;
+        if !self.indexes.contains(&range.index) {
+            return Err(Error::Invalid("index is not built"));
+        }
         if range.end.as_ref().is_some_and(Value::is_null) {
             return Ok(Vec::new());
         }
@@ -196,7 +209,7 @@ impl SnapshotReader for Reader {
 
 /// Builds the SQL for an already validated range; tests inspect its query plan.
 pub(super) fn index_query(table: &TableSchema, range: &IndexRange) -> Result<(String, Vec<SqlValue>)> {
-    let fields = &table.indexes[&range.index];
+    let fields = &range.index.fields;
     let mut conditions = Vec::new();
     let mut params = Vec::new();
     for (name, value) in fields.iter().zip(&range.prefix) {
@@ -232,8 +245,8 @@ pub(super) fn index_query(table: &TableSchema, range: &IndexRange) -> Result<(St
     let sql = format!(
         "SELECT {} FROM {} INDEXED BY {}{predicate} ORDER BY {} LIMIT ?",
         select(table),
-        codec::quote(&range.table),
-        codec::quote(&schema::index_name(&range.table, &range.index)),
+        codec::quote(&range.index.table),
+        codec::quote(&indexes::name(&range.index)),
         order.join(", ")
     );
     params.push(i64::try_from(range.limit).map_err(|_| Error::Invalid("index limit"))?.into());

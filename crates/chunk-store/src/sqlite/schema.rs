@@ -1,8 +1,13 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use rusqlite::{Connection, OptionalExtension};
 
-use crate::{DatabaseSchema, Error, Result};
+use crate::{DatabaseSchema, Error, IndexDefinition, Result};
 
-use super::codec::{column, quote};
+use super::{
+    codec::{column, quote},
+    indexes,
+};
 
 pub(super) fn load(connection: &Connection) -> Result<DatabaseSchema> {
     let schema: Option<String> = connection
@@ -21,43 +26,22 @@ pub(super) fn load(connection: &Connection) -> Result<DatabaseSchema> {
 pub(super) struct Migration {
     pub schema: DatabaseSchema,
     pub statements: Vec<String>,
+    /// Indexes built by the statements.
+    pub indexes: Vec<IndexDefinition>,
 }
 
-pub(super) fn merge(current: &DatabaseSchema, incoming: &DatabaseSchema) -> Result<Migration> {
+/// Adds `incoming`'s tables and optional fields to `current`. With the indexes
+/// already `built`, `incoming`'s indexes join the schema too, and the statements
+/// build those not built yet. Without, its indexes are left to pending work.
+pub(super) fn merge(
+    current: &DatabaseSchema,
+    incoming: &DatabaseSchema,
+    built: Option<&BTreeSet<IndexDefinition>>,
+) -> Result<Migration> {
     let mut merged = current.clone();
     let mut statements = Vec::new();
     for (name, table) in incoming {
-        if let Some(existing) = merged.get_mut(name) {
-            for (field, definition) in &table.fields {
-                match existing.fields.get(field) {
-                    Some(old) if old != definition => {
-                        return Err(Error::Invalid("changing a field requires an explicit migration"));
-                    }
-                    Some(_) => {}
-                    None if !definition.optional => return Err(Error::Invalid("added fields must be optional")),
-                    None => {
-                        statements.push(format!(
-                            "ALTER TABLE {} ADD COLUMN {}",
-                            quote(name),
-                            column(field, definition)
-                        ));
-                        existing.fields.insert(field.clone(), definition.clone());
-                    }
-                }
-            }
-            for (index, fields) in &table.indexes {
-                match existing.indexes.get(index) {
-                    Some(old) if old != fields => {
-                        return Err(Error::Invalid("changing an index requires an explicit migration"));
-                    }
-                    Some(_) => {}
-                    None => {
-                        statements.push(create_index(name, index, fields));
-                        existing.indexes.insert(index.clone(), fields.clone());
-                    }
-                }
-            }
-        } else {
+        let existing = merged.entry(name.clone()).or_insert_with(|| {
             let mut columns = vec![
                 "_id TEXT PRIMARY KEY".to_owned(),
                 "_revision INTEGER NOT NULL CHECK (_revision > 0)".to_owned(),
@@ -65,35 +49,58 @@ pub(super) fn merge(current: &DatabaseSchema, incoming: &DatabaseSchema) -> Resu
             ];
             columns.extend(table.fields.iter().map(|(name, field)| column(name, field)));
             statements.push(format!("CREATE TABLE {} ({}) STRICT, WITHOUT ROWID", quote(name), columns.join(", ")));
-            for (index, fields) in &table.indexes {
-                statements.push(create_index(name, index, fields));
+            chunk_contract::TableSchema { fields: table.fields.clone(), indexes: BTreeMap::new() }
+        });
+        for (field, definition) in &table.fields {
+            match existing.fields.get(field) {
+                Some(old) if old != definition => {
+                    return Err(Error::Invalid("changing a field requires an explicit migration"));
+                }
+                Some(_) => {}
+                None if !definition.optional => return Err(Error::Invalid("added fields must be optional")),
+                None => {
+                    statements.push(format!("ALTER TABLE {} ADD COLUMN {}", quote(name), column(field, definition)));
+                    existing.fields.insert(field.clone(), definition.clone());
+                }
             }
-            merged.insert(name.clone(), table.clone());
+        }
+        if built.is_none() {
+            continue;
+        }
+        for (index, fields) in &table.indexes {
+            match existing.indexes.get(index) {
+                Some(old) if old != fields => {
+                    return Err(Error::Invalid("changing a schema's index requires an explicit migration"));
+                }
+                Some(_) => {}
+                None => {
+                    existing.indexes.insert(index.clone(), fields.clone());
+                }
+            }
         }
     }
     chunk_contract::validate(&merged).map_err(Error::Invalid)?;
-    Ok(Migration { schema: merged, statements })
+    let indexes: Vec<_> = built.map_or_else(Vec::new, |built| {
+        IndexDefinition::declared(incoming).filter(|index| !built.contains(index)).collect()
+    });
+    statements.extend(indexes.iter().map(indexes::create));
+    Ok(Migration { schema: merged, statements, indexes })
 }
 
-fn create_index(table: &str, index: &str, fields: &[String]) -> String {
-    let mut columns: Vec<_> = fields.iter().map(|field| quote(field)).collect();
-    columns.push("_id".into());
-    format!("CREATE INDEX {} ON {} ({})", quote(&index_name(table, index)), quote(table), columns.join(", "))
-}
-
-pub(super) fn index_name(table: &str, index: &str) -> String {
-    format!("_chunk_index_{}_{table}_{index}", table.len())
-}
-
-pub(super) fn install(transaction: &rusqlite::Transaction<'_>, migration: &Migration) -> Result<crate::Revision> {
-    let current = super::revision::current(transaction)?;
-    if migration.statements.is_empty() {
-        return Ok(current);
+pub(super) fn install(
+    transaction: &rusqlite::Transaction<'_>,
+    current: &DatabaseSchema,
+    migration: &Migration,
+) -> Result<crate::Revision> {
+    let revision = super::revision::current(transaction)?;
+    if migration.statements.is_empty() && migration.schema == *current {
+        return Ok(revision);
     }
-    let next = super::revision::next(current)?;
+    let next = super::revision::next(revision)?;
     for statement in &migration.statements {
         transaction.execute_batch(statement)?;
     }
+    indexes::record(transaction, &migration.indexes)?;
     transaction.execute(
         "INSERT INTO _chunk_migrations (revision, schema) VALUES (?1, ?2)",
         rusqlite::params![next, serde_json::to_string(&migration.schema)?],

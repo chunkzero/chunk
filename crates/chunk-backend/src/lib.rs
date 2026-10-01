@@ -40,7 +40,9 @@ pub use effects::{ActionEffects, Secrets};
 pub use limits::Limit;
 pub use moves::PlayerMoves;
 pub use send::{SendBudget, SendCharge};
-pub use service::{Backend, Call, GroupSubscription, GroupUpdate, Progress, RequestCharge, Subscription, Update};
+pub use service::{
+    Backend, Call, GroupSubscription, GroupUpdate, Progress, Readiness, RequestCharge, Subscription, Update,
+};
 pub use system::{ScopeLock, System};
 #[cfg(feature = "bench-support")]
 pub use timing::{Phase, observe};
@@ -67,6 +69,8 @@ pub enum Error {
     Contract,
     #[error("unknown or inaccessible function")]
     Unknown,
+    #[error("deployment is not ready")]
+    NotReady,
     #[error("operation ID was reused for a different request")]
     OperationMismatch,
     #[error("commit pipeline failed; recover the operation outcome after restarting the backend")]

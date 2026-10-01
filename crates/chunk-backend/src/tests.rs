@@ -102,6 +102,8 @@ struct ControlledStore {
     batched: bool,
     /// Holds the first shared write that contains a commit.
     batch: Option<mpsc::Receiver<()>>,
+    /// Holds the first item of pending work; it fails once the sender drops.
+    work: Option<mpsc::Receiver<()>>,
     /// The most successful commits one underlying write has persisted.
     largest_write: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -122,6 +124,7 @@ impl ControlledStore {
             scheduling: None,
             batched: false,
             batch: None,
+            work: None,
             largest_write: std::sync::Arc::default(),
         }
     }
@@ -194,8 +197,19 @@ impl Storage for ControlledStore {
         Err(chunk_store::Error::Invalid("durable scheduling unsupported"))
     }
 
-    fn activate_deployment(&mut self, deployment: &chunk_contract::Deployment) -> chunk_store::Result<Revision> {
-        self.inner.activate_deployment(deployment)
+    fn install_deployment(&mut self, deployment: &chunk_contract::Deployment) -> chunk_store::Result<Revision> {
+        self.inner.install_deployment(deployment)
+    }
+    fn pending_work(&self) -> chunk_store::Result<Vec<chunk_store::PendingWork>> {
+        self.inner.pending_work()
+    }
+    fn run_work(&mut self, id: u64) -> chunk_store::Result<()> {
+        if let Some(gate) = self.work.take()
+            && gate.recv().is_err()
+        {
+            return Err(chunk_store::Error::RolledBack(Box::new(chunk_store::Error::Invalid("stopped"))));
+        }
+        self.inner.run_work(id)
     }
     fn release_deployment(&mut self, id: &str) -> chunk_store::Result<bool> {
         self.inner.release_deployment(id)
@@ -839,4 +853,5 @@ mod effects;
 mod integration;
 mod jobs;
 mod limits;
+mod readiness;
 mod subscriptions;

@@ -7,7 +7,9 @@ use std::{
 
 use chunk_contract::IndexQuery;
 use chunk_js::{IndexRows, Key, ReadHost};
-use chunk_store::{Document, DocumentKey, IndexRange, KeyRange, ReadBudget, Revision, Snapshot, Write};
+use chunk_store::{
+    Document, DocumentKey, IndexDefinition, IndexRange, KeyRange, ReadBudget, Revision, Snapshot, Write,
+};
 use serde_json::Value;
 
 use crate::{Error, Result};
@@ -55,13 +57,12 @@ impl View {
         Ok(rows)
     }
 
-    pub fn index(&self, query: &IndexQuery, budget: &mut ReadBudget) -> Result<IndexRows> {
-        let table = self.base.schema().get(&query.table).ok_or(Error::Contract)?;
-        let fields = table.indexes.get(&query.index).ok_or(Error::Contract)?;
+    /// Reads the physical index of `fields`, the definition of `query`'s index the caller declares.
+    pub fn index(&self, query: &IndexQuery, fields: &[String], budget: &mut ReadBudget) -> Result<IndexRows> {
         let extra = self.overlay.keys().filter(|key| key.table == query.table).count();
+        let index = IndexDefinition { table: query.table.clone(), name: query.index.clone(), fields: fields.to_vec() };
         let range = IndexRange {
-            table: query.table.clone(),
-            index: query.index.clone(),
+            index,
             prefix: query.prefix.clone(),
             start: query.start.clone(),
             end: query.end.clone(),
@@ -87,7 +88,7 @@ impl View {
         let mut rows: Vec<_> = rows.into_iter().collect();
         rows.sort_by(|a, b| IndexQuery::compare(fields, a, b));
         rows.truncate(query.limit);
-        Ok(IndexRows { fields: fields.clone(), rows })
+        Ok(IndexRows { fields: fields.to_vec(), rows })
     }
 
     pub fn changes(&self, writes: &[Write]) -> Result<Vec<Change>> {
@@ -254,13 +255,12 @@ impl ReadHost for Host {
     }
     fn scan_index(&mut self, query: &IndexQuery) -> std::result::Result<IndexRows, String> {
         self.table(&query.table)?;
-        if self.contract.as_ref().is_some_and(|c| !c.tables[&query.table].indexes.contains_key(&query.index)) {
-            return Err("undeclared index".into());
-        }
-        let table = self.view.base.schema().get(&query.table).ok_or("undeclared table")?;
-        let fields = table.indexes.get(&query.index).ok_or("undeclared index")?.clone();
-        self.trace.borrow_mut().indexes.push((query.clone(), fields));
-        let mut indexed = self.view.index(query, &mut self.budget).map_err(|e| e.to_string())?;
+        // A deployment reads its own definition; code without a contract reads one the schema declares.
+        let tables = self.contract.as_ref().map_or_else(|| self.view.base.schema(), |contract| &contract.tables);
+        let fields = tables.get(&query.table).and_then(|table| table.indexes.get(&query.index));
+        let fields = fields.ok_or("undeclared index")?.clone();
+        self.trace.borrow_mut().indexes.push((query.clone(), fields.clone()));
+        let mut indexed = self.view.index(query, &fields, &mut self.budget).map_err(|e| e.to_string())?;
         indexed.rows = indexed
             .rows
             .into_iter()

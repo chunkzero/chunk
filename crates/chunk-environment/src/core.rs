@@ -407,9 +407,10 @@ impl Core {
         }
     }
 
-    /// Makes `bundle` resident beside earlier versions, retrying while the backend is busy.
+    /// Makes `bundle` resident beside earlier versions, retrying while the backend is busy, and waits until it is
+    /// ready: until the work it waits on, such as building its indexes, is done.
     /// # Errors
-    /// Reports a stopped, busy or rejecting backend.
+    /// Reports a stopped, busy or rejecting backend, and work that failed.
     pub async fn deploy(&self, bundle: chunk_contract::Deployment) -> io::Result<()> {
         let backend = self.handle.as_ref().ok_or_else(|| io::Error::other("backend is not running"))?;
         for _ in 0..50 {

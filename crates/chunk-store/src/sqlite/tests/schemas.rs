@@ -75,7 +75,11 @@ fn additive_schema_changes_preserve_old_snapshots_and_survive_reopen() {
     profile.indexes.insert("by_rank".into(), vec!["rank".into()]);
     assert_eq!(store.apply_schema(&expanded).unwrap(), Revision(3));
     let migrated = store.snapshot().unwrap();
-    let range = IndexRange { index: "by_rank".into(), prefix: vec![json!(null)], ..by_coins() };
+    let range = IndexRange {
+        index: crate::tests::index("profiles", "by_rank", &["rank"]),
+        prefix: vec![json!(null)],
+        ..by_coins()
+    };
     assert_eq!(migrated.scan_index(&range).unwrap()[0].0, "a");
     assert!(old.scan_index(&range).is_err());
     store.commit(commit("rank", 3, vec![write("a", Some(json!({"coins": 7, "rank": 1})))])).unwrap();
@@ -120,7 +124,7 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
         .into(),
     };
     store.connection.execute_batch("CREATE TRIGGER fail_migration BEFORE INSERT ON _chunk_migrations BEGIN SELECT RAISE(ABORT, 'injected failure'); END;").unwrap();
-    assert!(store.activate_deployment(&deployment).is_err());
+    assert!(store.install_deployment(&deployment).is_err());
     assert!(store.deployments().unwrap().is_empty());
     assert_eq!(store.snapshot().unwrap().revision, Revision(1));
     assert_eq!(*store.schema, crate::tests::schema());
@@ -135,7 +139,7 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
         .unwrap();
     assert_eq!(fields, 0);
     store.connection.execute_batch("DROP TRIGGER fail_migration").unwrap();
-    assert_eq!(store.activate_deployment(&deployment).unwrap(), Revision(2));
+    assert_eq!(store.install_deployment(&deployment).unwrap(), Revision(2));
 }
 
 #[test]
@@ -144,7 +148,7 @@ fn deployments_cannot_declare_system_tables() {
     let mut deployment = crate::tests::target();
     let table = deployment.tables["profiles"].clone();
     deployment.tables.insert("Chunk_claims".into(), table);
-    assert!(matches!(store.activate_deployment(&deployment), Err(Error::Invalid(_))));
+    assert!(matches!(store.install_deployment(&deployment), Err(Error::Invalid(_))));
     assert!(matches!(store.retain_deployment(&deployment), Err(Error::Invalid(_))));
     assert!(store.deployments().unwrap().is_empty());
     // A deployment stored before the prefix was reserved is refused when it reloads.
@@ -160,7 +164,7 @@ fn deployments_cannot_declare_system_tables() {
 
 #[test]
 fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
-    for version in [3, 4, 5, 6, 7] {
+    for version in [3, 4, 5, 6, 7, 8] {
         let (directory, mut store) = open();
         let path = directory.path().join("data.db");
         let deployment = chunk_contract::Deployment {
@@ -179,12 +183,22 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         store
             .connection
             .execute_batch(
-                "DROP INDEX _chunk_operations_committed;
-                 ALTER TABLE _chunk_operations DROP COLUMN committed_at;
-                 ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
-                 ALTER TABLE _chunk_jobs DROP COLUMN updated_at;",
+                "DROP INDEX _chunk_index_70726f66696c6573_62795f636f696e73_636f696e73;
+                 DROP TABLE _chunk_indexes;
+                 DROP TABLE _chunk_work;",
             )
             .unwrap();
+        if version < 8 {
+            store
+                .connection
+                .execute_batch(
+                    "DROP INDEX _chunk_operations_committed;
+                     ALTER TABLE _chunk_operations DROP COLUMN committed_at;
+                     ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
+                     ALTER TABLE _chunk_jobs DROP COLUMN updated_at;",
+                )
+                .unwrap();
+        }
         if version < 7 {
             store
                 .connection
@@ -213,6 +227,10 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         assert!(store.jobs().unwrap().records.is_empty());
         assert_eq!(store.deployments().unwrap(), vec![deployment.clone()]);
         assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome.clone()));
+        let pending = store.pending_work().unwrap();
+        assert_eq!(pending.len(), 1);
+        store.run_work(pending[0].id).unwrap();
+        assert!(store.pending_work().unwrap().is_empty());
         assert_eq!(store.snapshot().unwrap().scan_index(&by_coins()).unwrap()[0].1.value, json!({"coins": 7}));
         assert_eq!(store.prepare_operation(&operation("failed"), context.clone()).unwrap(), context);
         assert!(store.release_deployment("old").unwrap());
@@ -220,7 +238,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
 
         let mut store = SqliteStore::open(&path, "local").unwrap();
         assert!(store.deployments().unwrap().is_empty());
-        assert!(matches!(store.activate_deployment(&deployment), Err(Error::Invalid(_))));
+        assert!(matches!(store.install_deployment(&deployment), Err(Error::Invalid(_))));
         assert_eq!(store.snapshot().unwrap().revision, outcome.revision);
         assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome));
         assert!(matches!(
@@ -310,7 +328,7 @@ fn index_can_be_added_to_a_retained_but_omitted_field() {
     }))
     .unwrap();
     assert_eq!(store.apply_schema(&partial).unwrap(), Revision(3));
-    let range = IndexRange { index: "by_retained_coins".into(), ..by_coins() };
+    let range = IndexRange { index: crate::tests::index("profiles", "by_retained_coins", &["coins"]), ..by_coins() };
     assert_eq!(store.snapshot().unwrap().scan_index(&range).unwrap()[0].0, "a");
     assert!(old.scan_index(&range).is_err());
     assert_eq!(store.apply_schema(&partial).unwrap(), Revision(3));
