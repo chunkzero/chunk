@@ -509,6 +509,14 @@ fn structured_clone_reads_built_ins_by_brand_despite_modified_prototypes() {
           });
         const array = structuredClone(Object.setPrototypeOf([1, , 3], null));
         const views = structuredClone([new Uint8Array(bytes.buffer, 0, 2), new Uint16Array(bytes.buffer, 2, 1)]);
+        const keyed = Object.defineProperty({
+          get a() {
+            Object.defineProperty(this, "b", { enumerable: false });
+            Object.defineProperty(this, "c", { enumerable: true });
+            return 1;
+          },
+          b: 2,
+        }, "c", { value: 3, enumerable: false, configurable: true });
         return {
           map: Map.prototype.get.call(copy.map, "k"),
           view: copy.view.getUint16(0),
@@ -516,11 +524,12 @@ fn structured_clone_reads_built_ins_by_brand_despite_modified_prototypes() {
           errors,
           shared: views[0].buffer === views[1].buffer && views[0].buffer !== bytes.buffer,
           array: [Object.getPrototypeOf(array) === Array.prototype, array.length, Object.keys(array)],
+          keys: Object.keys(structuredClone(keyed)),
         };
     "#)
     .unwrap();
     assert_eq!(
         value(&execution),
-        json!({"map": 42, "view": 0x0203, "symbols": 0, "errors": vec!["DataCloneError"; 5], "shared": true, "array": [true, 3, ["0", "2"]]})
+        json!({"map": 42, "view": 0x0203, "symbols": 0, "errors": vec!["DataCloneError"; 5], "shared": true, "array": [true, 3, ["0", "2"]], "keys": ["a", "b"]})
     );
 }
