@@ -22,9 +22,8 @@ In game:
 - `/coin` is a Minestom command in the JVM. It runs the `coin` mutation, and the chat and action bar update from a watch
   on `stats`. Joining a session also increments your visits.
 - `/hello <message>` is a backend command available everywhere.
-- `/travel lobby|arena|large` is a Minestom command in the JVM. It asks core to move you through the same
-  capacity checks as any other move, and tells you in chat when the move is refused, such as while you are still
-  arriving.
+- `/travel lobby|arena|large` is a Minestom command in the JVM. It asks core to move you through the same capacity
+  checks as any other move, and tells you in chat when the move is refused, such as while you are still arriving.
 - `/population`, in the lobby only, is a backend command that calls the lobby session's `population` session method.
 
 Worlds live only in the JVMs; coins and visits persist in the backend across runs.
