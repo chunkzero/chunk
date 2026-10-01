@@ -181,7 +181,8 @@ impl Fetcher {
             };
             let status = response.status();
             let location = response.headers().get(header::LOCATION);
-            if !status.is_redirection() || status == StatusCode::NOT_MODIFIED || location.is_none() {
+            // As in the Fetch Standard, only these statuses redirect; any other response is the result.
+            if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) || location.is_none() {
                 return Ok((request.url, response));
             }
             let next =

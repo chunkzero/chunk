@@ -60,6 +60,8 @@ impl Fixture {
                         };
                         let response = if path == "/api/redirect" {
                             redirect("/api/ok")
+                        } else if path == "/api/choices" {
+                            "HTTP/1.1 300 Multiple Choices\r\nLocation: /api/ok\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".into()
                         } else if path == "/api/metadata" {
                             redirect("http://169.254.169.254/latest/meta-data/")
                         } else if path == "/api/large" {
@@ -195,6 +197,9 @@ async fn fetch_refuses_private_addresses_after_resolution_and_on_redirects() {
     assert_eq!(followed["url"], format!("{}/api/ok", fixture.origin));
     assert!(fixture.observed().await.contains("/api/redirect"));
     assert!(fixture.observed().await.contains("/api/ok"));
+    let choices = outcome(&backend, &format!("{}/api/choices", fixture.origin)).await;
+    assert_eq!((choices["state"].as_str(), choices["status"].as_u64()), (Some("completed"), Some(300)), "{choices}");
+    assert!(fixture.observed().await.contains("/api/choices"));
     let refused = outcome(&backend, &format!("{}/api/metadata", fixture.origin)).await;
     assert_eq!(refused["state"], "unknown", "{refused}");
     assert!(refused["reason"].as_str().unwrap().contains("refused"));
