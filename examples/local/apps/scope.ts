@@ -28,23 +28,5 @@ export default defineScope({
         await ctx.player.message(message);
       },
     }),
-    travel: command("travel", {
-      args: { destination: commandArg.word({ suggestions: ["lobby", "arena", "large"] }) },
-      handler: async (ctx, { destination }) => {
-        const selected =
-          destination === "lobby"
-            ? apps.lobby.destinations.main
-            : destination === "arena"
-              ? apps.arena.destinations.standard
-              : destination === "large"
-                ? apps.arena.destinations.large
-                : null;
-        if (!selected) {
-          await ctx.player.message("Choose lobby, arena or large.");
-          return;
-        }
-        await ctx.routing.enter(selected);
-      },
-    }),
   },
 });
