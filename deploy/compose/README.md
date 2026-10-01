@@ -6,20 +6,23 @@ environment's machines itself, through the engine's socket, on the `chunk` netwo
 
 ## Security
 
-- **The engine socket is root-equivalent.** Management can start any container with any mount. With rootful Docker that
-  means root on the host; with rootless Podman it means the account that runs Podman. Guard management's operator token
-  and `CHUNK_SECRET_KEY` accordingly.
-- **Self-hosting is single-host and single-tenant.** Every environment's machines share one engine and one network, next
-  to Postgres and management. Only deploy code you trust.
-- Gateways accept PROXY headers, which carry players' addresses, only from the edge's static address (`10.231.0.2`). The
-  network uses `10.231.0.0/16`; if that collides with a network the host reaches, change the subnet, the edge's address
-  and `CHUNK_MACHINE_TRUSTED_EDGES` in `compose.yaml` together.
-- **Players' addresses need rootful Docker or rootful Podman.** Rootful engines forward the published IPv4 port with NAT
-  and keep the player's address. Rootless Podman forwards through `rootlessport`, so every player arrives from the
-  bridge's address, and per-player address limits and logs see one address. The player port is published on IPv4 only,
-  since Docker's userland proxy hides IPv6 players the same way.
+- **The engine socket is root-equivalent.** Management can start any container with any mount: root on the host with
+  rootful Docker, the Podman user's account with rootless Podman. Guard the operator token and `CHUNK_SECRET_KEY`
+  accordingly.
+- **One host, one tenant.** Every environment's machines share one engine and one network with Postgres and management.
+  Only deploy code you trust.
+- **Gateways trust PROXY headers from the edge alone**, at its static address `10.231.0.2`. If the network's
+  `10.231.0.0/16` collides with one the host reaches, change the subnet, the edge's address and
+  `CHUNK_MACHINE_TRUSTED_EDGES` in `compose.yaml` together.
+- **Players' real addresses need a rootful engine**, which forwards the published IPv4 port with NAT. Rootless Podman
+  forwards through `rootlessport`, so every player arrives from the bridge's address, and per-player limits and logs see
+  only that. The player port is published on IPv4 only, since Docker's userland proxy hides IPv6 players the same way.
 
 ## Running
+
+You need Docker or Podman with a compose provider (`podman compose` runs `docker-compose` or `podman-compose` from the
+`PATH`), and the toolchain from the root README's [Getting started](../../README.md#getting-started). For rootless
+Podman, enable its socket: `systemctl --user enable --now podman.socket`.
 
 From the repository root, build the images:
 
@@ -27,33 +30,16 @@ From the repository root, build the images:
 just image && just jvm-image 25 && just edge-image && just management-image
 ```
 
-Then, in this directory:
+Then, in this directory, create `.env` and start the stack:
 
 ```sh
-./init.sh             # writes .env (mode 600) with fresh secrets and the engine socket; never overwrites one
-docker compose up -d  # or: podman compose up -d
+cp .env.example .env && chmod 600 .env  # then fill in the secrets and the engine socket, as its comments show
+docker compose up -d                    # or: podman compose up -d
 ```
 
-Keep `.env`: `CHUNK_SECRET_KEY` encrypts stored secrets, so it must stay the same for the database's life. For rootless
-Podman, enable its socket first (`systemctl --user enable --now podman.socket`); `init.sh` uses it when
-`/var/run/docker.sock` doesn't exist. `podman compose` needs a compose provider, `docker-compose` or `podman-compose`,
-on the `PATH`. The `chunk` network has a fixed name, so one engine runs one install.
-
-These settings can be added to `.env`:
-
-| Variable                   | Default                   | Meaning                                                                                      |
-| -------------------------- | ------------------------- | -------------------------------------------------------------------------------------------- |
-| `CHUNK_PLAYER_PORT`        | `25565`                   | The host port players connect to.                                                            |
-| `CHUNK_PLAYER_BIND`        | `0.0.0.0`                 | The host IPv4 address the player port is published on.                                       |
-| `CHUNK_EDGE_DOMAIN`        | `localhost`               | Environments get the hostname `env-<24 hex digits>.<domain>`; point `*.<domain>` here.       |
-| `CHUNK_MANAGEMENT_PUBLISH` | `127.0.0.1:8080`          | Where the host publishes management's API and dashboard.                                     |
-| `CHUNK_PUBLIC_URL`         | `http://localhost:8080`   | How clients reach management; used in upload and login URLs. Keep it in step with the above. |
-| `CHUNK_ENVIRONMENT_IMAGE`  | `chunk-environment:0.1.0` | The image core and gateway machines run.                                                     |
-| `CHUNK_JVM_IMAGE`          | `chunk-jvm:{java}`        | The image JVM machines run, `{java}` being the release's Java version.                       |
-| `CHUNK_EDGE_IMAGE`         | `chunk-edge:0.1.0`        | The edge's image.                                                                            |
-| `CHUNK_MANAGEMENT_IMAGE`   | `chunk-management:0.1.0`  | Management's image.                                                                          |
-| `CHUNK_ENGINE_SOCKET`      | `/var/run/docker.sock`    | The host's engine socket; `init.sh` detects it.                                              |
-| `CHUNK_ENGINE_GID`         | `0`                       | The socket's group inside management: the `docker` group's ID, or `0`.                       |
+Keep `.env` for the life of the install: `CHUNK_SECRET_KEY` encrypts stored secrets. [`.env.example`](.env.example) also
+lists the optional settings, such as the player port, the edge domain, where management is published, and the images.
+The `chunk` network has a fixed name, so one engine runs one install.
 
 Other management settings go in a `compose.override.yaml` next to `compose.yaml`, which Compose reads automatically. For
 example, to let idle environments sleep until a player logs in:
@@ -69,79 +55,80 @@ Log storage (the `CHUNK_LOG_STORE_*` variables) is added the same way.
 
 ## Reaching management
 
-The dashboard is at `CHUNK_PUBLIC_URL`; sign in with the operator token from `.env`. The API takes the same token as a
-bearer token, over Connect JSON:
+The dashboard is at `CHUNK_PUBLIC_URL`, `http://localhost:8080` by default; sign in with the operator token from `.env`.
+The [`chunk` CLI](../../crates/chunk-cli/README.md) logs in through it. Scripts can call the `chunk.management.v1` API
+over Connect JSON with the operator token as a bearer token.
 
-```sh
-url=http://localhost:8080  # CHUNK_PUBLIC_URL
-token=$(sed -n 's/^CHUNK_OPERATOR_TOKEN=//p' .env)
-curl -sS "$url/chunk.management.v1.ProjectService/ListProjects" \
-  -H "authorization: Bearer $token" -H 'content-type: application/json' -d '{}'
-```
-
-To reach it from elsewhere, put a TLS reverse proxy in front and set `CHUNK_PUBLIC_URL` to its URL.
+To reach management from elsewhere, put a TLS reverse proxy in front, and set `CHUNK_PUBLIC_URL` to its URL and
+`CHUNK_MANAGEMENT_PUBLISH` to where the proxy reaches it.
 
 ## Deploying
 
-Build a release with `chunk build`, which prints the archive's path, `dist/<release id>.tar.gz`. Then create a project
-and an environment, upload the release and deploy it. With `url` and `token` from above, `jq` and `uuidgen`:
+Back in the repository root, build the CLI and put it on your `PATH`, then log in, create a project and an environment,
+and deploy a project to it, here the [local example](../../examples/local/README.md):
 
 ```sh
-rpc() {
-  curl -fsS "$url/chunk.management.v1.$1" \
-    -H "authorization: Bearer $token" -H 'content-type: application/json' -d "$2"
-}
-project=$(rpc ProjectService/CreateProject "{\"requestId\":\"$(uuidgen)\",\"name\":\"my-server\"}" | jq -r .project.id)
-environment=$(rpc ProjectService/CreateEnvironment \
-  "{\"requestId\":\"$(uuidgen)\",\"projectId\":\"$project\",\"name\":\"prod\"}" | jq -r .environment.id)
-
-archive=path/to/dist/RELEASE.tar.gz  # the path chunk build printed
-release=$(basename "$archive" .tar.gz)
-upload=$(rpc DeploymentService/UploadRelease "{\"projectId\":\"$project\",\"releaseId\":\"$release\",
-  \"archiveSha256\":\"$(sha256sum "$archive" | cut -d' ' -f1)\",\"archiveSizeBytes\":\"$(wc -c <"$archive" | tr -d ' ')\"}")
-curl -fsS -X PUT -H 'content-type: application/gzip' --data-binary @"$archive" "$(echo "$upload" | jq -r .upload.url)"
-rpc DeploymentService/CompleteReleaseUpload "{\"projectId\":\"$project\",\"releaseId\":\"$release\"}"
-deployment=$(rpc DeploymentService/Deploy \
-  "{\"requestId\":\"$(uuidgen)\",\"environmentId\":\"$environment\",\"releaseId\":\"$release\"}" | jq -r .deployment.id)
+just toolchain && export PATH="$PWD/target/debug:$PATH"
+chunk auth login --url http://localhost:8080  # CHUNK_PUBLIC_URL
+chunk projects create my-server
+chunk environments create prod
+chunk deploy examples/local --env prod
 ```
 
-`UploadRelease` returns no `upload` when the project already holds the release; skip the `PUT` then. Follow the
-deployment in the dashboard, or until it is `DEPLOYMENT_STATE_ACTIVE`:
+`chunk auth login` prints a link to the dashboard; open it, signed in with the operator token, and approve the login.
+`chunk deploy` builds a release, uploads it unless management already holds it, deploys it and waits until it is active,
+then prints the environment's hostname. Run it again to deploy a new release; the dashboard can roll back to an earlier
+one.
+
+Players join at that hostname and the player port, for example `env-<id>.localhost:25565` from this host with the
+default domain. The edge routes by hostname, so a bare IP address or `localhost` reaches no environment.
+
+To see what is running:
 
 ```sh
-rpc DeploymentService/GetDeployment "{\"deploymentId\":\"$deployment\"}" | jq -r .deployment.state
-rpc ProjectService/GetEnvironment "{\"environmentId\":\"$environment\"}" | jq -r .environment.hostname
+chunk environments            # state, players and hostname
+chunk deployments --env prod  # recent deployments
+chunk apps --env prod         # the active release's apps and session types
 ```
 
-Players join at the environment's hostname and the player port, for example `env-<id>.localhost:25565` from this host
-with the default domain. The edge routes by that hostname, so a bare IP address or `localhost` reaches no environment.
-Deploy later releases to the same environment the same way.
+Environments don't send their logs to management yet, so `chunk logs` prints nothing here. Read them from the engine
+instead: `docker ps --filter label=chunk.environment` lists the machines, and `docker logs` shows each one's.
 
-`just managed-smoke`, from the repository root, runs this whole flow on a throwaway install with offline test players,
-and removes everything it created; it refuses to run while another install uses the engine.
+`just managed-smoke`, from the repository root, deploys the local example to a throwaway install like this one, plays it
+with offline test players, and removes everything it created. It refuses to run while another install uses the engine.
 
 ## Stopping
 
-Delete environments before `compose down`: their machines are not part of the Compose project and keep the `chunk`
-network in use.
-
-Deletion finishes in the background. Wait until management reports the environment gone, stop management so it starts
-nothing new, remove anything a provider call still in flight left behind, then take the stack down:
+Environments' machines are not part of the Compose project: they keep running without management, and they keep the
+`chunk` network in use. To take the install down, delete every environment first. Neither the CLI nor the dashboard
+deletes environments yet, so call the API, from `deploy/compose` again:
 
 ```sh
-rpc ProjectService/DeleteEnvironment "{\"environmentId\":\"$environment\"}"
-until [ "$(curl -s -o /dev/null -w '%{http_code}' "$url/chunk.management.v1.ProjectService/GetEnvironment" \
-  -H "authorization: Bearer $token" -H 'content-type: application/json' \
-  -d "{\"environmentId\":\"$environment\"}")" = 404 ]; do
-  sleep 2
+cd deploy/compose  # from the repository root
+url=http://localhost:8080  # CHUNK_PUBLIC_URL
+token=$(sed -n 's/^CHUNK_OPERATOR_TOKEN=//p' .env)
+environments="ENVIRONMENT_ID ..."  # every ID `chunk environments` lists
+call() {
+  curl -sS -o /dev/null -w '%{http_code}\n' "$url/chunk.management.v1.ProjectService/$1" \
+    -H "authorization: Bearer $token" -H 'content-type: application/json' -d "{\"environmentId\":\"$2\"}"
+}
+for environment in $environments; do
+  call DeleteEnvironment "$environment"
+  until [ "$(call GetEnvironment "$environment")" = 404 ]; do sleep 2; done
 done
-docker compose stop &&
-  containers=$(docker ps -aq --filter "label=chunk.environment=$environment") &&
-  volumes=$(docker volume ls -q --filter "label=chunk.environment=$environment") &&
-  { [ -z "$containers" ] || docker rm -fv $containers; } &&
-  { [ -z "$volumes" ] || docker volume rm $volumes; } &&
-  docker compose down
 ```
 
-Add `-v` to `compose down` only once no environment remains: it deletes the database and stored releases, including the
-install ID that management uses to recognize and clean up its own machines.
+Once management reports them gone, stop it so it starts nothing new, remove anything a provider call still in flight
+left behind, and take the stack down:
+
+```sh
+docker compose stop
+for environment in $environments; do
+  for container in $(docker ps -aq --filter "label=chunk.environment=$environment"); do docker rm -fv "$container"; done
+  for volume in $(docker volume ls -q --filter "label=chunk.environment=$environment"); do docker volume rm "$volume"; done
+done
+docker compose down
+```
+
+With Podman, write `podman` for `docker`. Add `-v` to `compose down` only once no environment remains: it deletes the
+database and stored releases, including the install ID that management uses to recognize and clean up its own machines.

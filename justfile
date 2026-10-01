@@ -108,13 +108,13 @@ management-image:
     "$engine" build -f packages/management/Dockerfile -t "chunk-management:$version" \
         --build-arg VERSION="$version" --build-arg REVISION="$(git rev-parse HEAD)" .
 
-# Validate the self-hosting compose bundle against a throwaway `init.sh` environment.
+# Validate the self-hosting compose bundle against `.env.example` with placeholder secrets.
 compose-check:
     #!/usr/bin/env bash
     set -euo pipefail
     env_dir=$(mktemp -d)
     trap 'rm -rf "$env_dir"' EXIT
-    deploy/compose/init.sh "$env_dir/.env" >/dev/null
+    sed 's/=$/=compose-check/' deploy/compose/.env.example >"$env_dir/.env"
     if command -v docker >/dev/null; then compose=(docker compose); else compose=(podman compose); fi
     "${compose[@]}" --env-file "$env_dir/.env" -f deploy/compose/compose.yaml config --quiet
 

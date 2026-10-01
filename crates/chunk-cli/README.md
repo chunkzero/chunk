@@ -1,10 +1,10 @@
 # chunk CLI
 
 `chunk` is the command-line tool for a chunk project: it scaffolds projects, generates the TypeScript SDK and backend
-clients, builds releases, runs a project locally with `chunk dev`, and operates that local environment. It embeds the
-compiler and release packaging from [`chunk-build`](../chunk-build/README.md) and runs core and the gateway in-process
-through [`chunk-environment`](../chunk-environment/README.md). It does not deploy; self-hosted releases are deployed
-through the management API (see [`deploy/compose`](../../deploy/compose/README.md)).
+clients, builds releases, runs a project locally with `chunk dev`, operates that local environment, and deploys releases
+to a platform: a [self-hosted install](../../deploy/compose/README.md) or Chunk Cloud. It embeds the compiler and
+release packaging from [`chunk-build`](../chunk-build/README.md) and runs core and the gateway in-process through
+[`chunk-environment`](../chunk-environment/README.md).
 
 From a checkout, `just toolchain` builds `target/debug/chunk` and installs the pinned native TypeScript compiler beside
 it; `chunk --help` and `chunk <command> --help` list every option. [`docs/distribution.md`](../../docs/distribution.md)
@@ -12,22 +12,29 @@ covers the packaged SDK.
 
 ## Commands
 
-| Command                           | What it does                                                                                |
-| --------------------------------- | ------------------------------------------------------------------------------------------- |
-| `chunk create DIR`                | Creates a project with one `lobby` app. `--language java` or `kotlin` (the default).        |
-| `chunk codegen [PROJECT]`         | Writes the schema-aware TypeScript SDK into `PROJECT/.chunk/` for editors, without a build. |
-| `chunk build [PROJECT]`           | Builds the backend and every app into a release, `dist/<release id>.tar.gz`.                |
-| `chunk dev [PROJECT]`             | Builds the project and runs it locally, rebuilding on change. `chunk local` is an alias.    |
-| `chunk clean [PROJECT]`           | Deletes `dist/` and `.chunk/` output, keeping `chunk dev` backend data unless `--data`.     |
-| `chunk gen [PROJECT] --target T`  | Compiles the backend and generates a `java`, `kotlin` or `typescript` client for it.        |
-| `chunk inspect [PROJECT]`         | Prints the project and app manifests as JSON, without building.                             |
-| `chunk players --player UUID ...` | Moves a player to another session, or drains the JVM they are on, in a running `chunk dev`. |
-| `chunk nodes ...`                 | Lists the JVMs of a running `chunk dev` as JSON, or shuts one down.                         |
-| `chunk auth login`, `chunk login` | Records which platform later commands will use. Logging in itself is not implemented yet.   |
-| `chunk auth status`               | Shows the recorded platform.                                                                |
+| Command                            | What it does                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------------------------- |
+| `chunk create DIR`                 | Creates a project with one `lobby` app. `--language java` or `kotlin` (the default).        |
+| `chunk codegen [PROJECT]`          | Writes the schema-aware TypeScript SDK into `PROJECT/.chunk/` for editors, without a build. |
+| `chunk build [PROJECT]`            | Builds the backend and every app into a release, `dist/<release id>.tar.gz`.                |
+| `chunk dev [PROJECT]`              | Builds the project and runs it locally, rebuilding on change. `chunk local` is an alias.    |
+| `chunk clean [PROJECT]`            | Deletes `dist/` and `.chunk/` output, keeping `chunk dev` backend data unless `--data`.     |
+| `chunk gen [PROJECT] --target T`   | Compiles the backend and generates a `java`, `kotlin` or `typescript` client for it.        |
+| `chunk inspect [PROJECT]`          | Prints the project and app manifests as JSON, without building.                             |
+| `chunk players --player UUID ...`  | Moves a player to another session, or drains the JVM they are on, in a running `chunk dev`. |
+| `chunk nodes ...`                  | Lists the JVMs of a running `chunk dev` as JSON, or shuts one down.                         |
+| `chunk auth login`, `chunk login`  | Logs in to a platform, approving the login in its dashboard.                                |
+| `chunk auth status`                | Shows the platform and who you are logged in as.                                            |
+| `chunk auth logout`                | Revokes the CLI's token and forgets it.                                                     |
+| `chunk projects [create NAME]`     | Lists the platform's projects, or creates one.                                              |
+| `chunk environments [create NAME]` | Lists a project's environments with their state and hostname, or creates one.               |
+| `chunk deploy [PROJECT] --env E`   | Builds the project, uploads and deploys its release, and waits until it is active.          |
+| `chunk deployments --env E`        | Lists an environment's recent deployments, newest first.                                    |
+| `chunk apps --env E`               | Lists the apps and session types the environment's active release runs.                     |
+| `chunk logs --env E`               | Prints an environment's logs; `--follow` keeps printing new ones.                           |
 
 `PROJECT` defaults to the current directory. The commands that take `PROJECT`, except `create` and `codegen`, need its
-`chunk.toml`.
+`chunk.toml`. The commands from `auth` down call a platform's management API.
 
 ### `create`
 
@@ -115,8 +122,38 @@ outcome is unknown, so it is not applied twice.
 
 ### `auth`
 
-`chunk auth login --cloud` or `--url URL` records the platform in `target.json` under `CHUNK_CONFIG_DIR`, by default the
-user's configuration directory plus `chunk/`. `CHUNK_API_URL` overrides the recorded platform. No command uses it yet.
+`chunk auth login --url URL` logs in to a self-hosted install's management at `URL`, and `--cloud` to Chunk Cloud;
+without either, it asks in a terminal. It prints a link to the platform's dashboard and a code: open the link, signed
+in, and approve the login. The CLI then saves the platform and the token it issued under the config directory,
+`CHUNK_CONFIG_DIR` or by default the user's configuration directory plus `chunk/`, and sends that token only to that
+platform. `chunk auth status` shows the platform and who you are logged in as; `chunk auth logout` revokes the token and
+forgets it.
+
+Two variables override the saved login, for scripts and CI. `CHUNK_API_URL` selects another platform URL, which gets no
+saved token unless it is the saved platform's. `CHUNK_TOKEN` is the token to use instead, sent to `CHUNK_API_URL` or
+else the saved platform; `chunk auth logout` never revokes it.
+
+### `deploy`, `projects`, `environments`, `deployments`, `apps` and `logs`
+
+```sh
+chunk projects create my-server
+chunk environments create prod
+chunk deploy --env prod
+chunk deployments --env prod
+```
+
+`--project` (or `CHUNK_PROJECT`) selects a project by name or ID, and may be left out while there is only one; `--env`
+selects an environment of it the same way. Project and environment names are 1 to 63 lowercase letters, digits and
+hyphens, starting and ending with a letter or digit.
+
+`chunk deploy` builds the project as `chunk build` does, uploads the release unless the project already holds it,
+deploys it, and follows the deployment until it is active, then prints where players join. It fails if the deployment
+fails or a later one supersedes it first. Ctrl-C stops waiting but not the deployment; `chunk deployments` shows how it
+ends (`--limit`, default 20, lists up to 200).
+
+`chunk logs` prints the most recent entries (`--limit`, default 200), and with `--follow` keeps printing new ones;
+`--app ID` keeps only that app's JVM entries. A self-hosted install has none to show yet, since its environments don't
+send their logs to management.
 
 ## Testing
 
