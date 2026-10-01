@@ -498,9 +498,16 @@ fn structured_clone_reads_built_ins_by_brand_despite_modified_prototypes() {
         const copy = structuredClone({ map, view: new DataView(bytes.buffer, 1, 2), [Symbol("meta")]: 1 });
         const detached = new Uint8Array(4);
         detached.buffer.transfer();
-        const errors = [detached, [1].values(), new Error("x")].map((value) => {
-          try { structuredClone(value); } catch (e) { return e.name; }
-        });
+        const detachedLater = (View) => {
+          const buffer = new ArrayBuffer(8);
+          const view = new View(buffer, 4, 1);
+          return { buffer, get view() { buffer.transfer(); return view; } };
+        };
+        const errors = [detached, [1].values(), new Error("x"), detachedLater(Int32Array), detachedLater(DataView)]
+          .map((value) => {
+            try { structuredClone(value); } catch (e) { return e.name; }
+          });
+        const array = structuredClone(Object.setPrototypeOf([1, , 3], null));
         const views = structuredClone([new Uint8Array(bytes.buffer, 0, 2), new Uint16Array(bytes.buffer, 2, 1)]);
         return {
           map: Map.prototype.get.call(copy.map, "k"),
@@ -508,11 +515,12 @@ fn structured_clone_reads_built_ins_by_brand_despite_modified_prototypes() {
           symbols: Object.getOwnPropertySymbols(copy).length,
           errors,
           shared: views[0].buffer === views[1].buffer && views[0].buffer !== bytes.buffer,
+          array: [Object.getPrototypeOf(array) === Array.prototype, array.length, Object.keys(array)],
         };
     "#)
     .unwrap();
     assert_eq!(
         value(&execution),
-        json!({"map": 42, "view": 0x0203, "symbols": 0, "errors": ["DataCloneError", "DataCloneError", "DataCloneError"], "shared": true})
+        json!({"map": 42, "view": 0x0203, "symbols": 0, "errors": vec!["DataCloneError"; 5], "shared": true, "array": [true, 3, ["0", "2"]]})
     );
 }

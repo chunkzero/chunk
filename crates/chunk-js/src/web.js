@@ -93,6 +93,11 @@
     const fail = (kind) => {
       throw new DOMException(`${kind} could not be cloned`, "DataCloneError");
     };
+    // A getter may detach a buffer after it was copied, so check it before reusing the copy.
+    const copyViewBuffer = (buffer, memory) => {
+      if (detached(buffer)) fail("Detached ArrayBuffer");
+      return copy(buffer, memory);
+    };
     const copy = (value, memory) => {
       if (typeof value === "function") fail("Function");
       if (typeof value === "symbol") fail("Symbol");
@@ -116,11 +121,11 @@
         return remember(result);
       }
       if (ops.op_is_typed_array(value)) {
-        const buffer = copy(viewBuffer(value), memory);
+        const buffer = copyViewBuffer(viewBuffer(value), memory);
         return remember(new views[viewName(value)](buffer, viewOffset(value), viewLength(value)));
       }
       if (ops.op_is_data_view(value)) {
-        const buffer = copy(dataBuffer(value), memory);
+        const buffer = copyViewBuffer(dataBuffer(value), memory);
         return remember(new NativeDataView(buffer, dataOffset(value), dataLength(value)));
       }
       for (let i = 0; i < boxed.length; i++) {
@@ -142,14 +147,18 @@
       }
       const prototype = getPrototypeOf(value);
       const array = isArray(value);
-      if (array ? prototype !== ArrayPrototype : prototype !== ObjectPrototype && prototype !== null) fail("Object");
+      if (prototype !== null && prototype !== (array ? ArrayPrototype : ObjectPrototype)) fail("Object");
       for (let i = 0; i < exotic.length; i++) if (exotic[i](value)) fail("Object");
       const result = remember(array ? [] : {});
       if (array) result.length = value.length;
-      const keys = ownKeys(value);
-      for (let i = 0; i < keys.length; i++) {
-        const key = keys[i];
-        if (typeof key !== "string" || !getOwnPropertyDescriptor(value, key)?.enumerable) continue;
+      const keys = new NativeSet();
+      const names = ownKeys(value);
+      for (let i = 0; i < names.length; i++) {
+        const key = names[i];
+        if (typeof key === "string" && getOwnPropertyDescriptor(value, key).enumerable) setAdd(keys, key);
+      }
+      setEach(keys, (key) => {
+        if (getOwnPropertyDescriptor(value, key) === undefined) return;
         defineProperty(result, key, {
           __proto__: null,
           value: copy(value[key], memory),
@@ -157,7 +166,7 @@
           enumerable: true,
           configurable: true,
         });
-      }
+      });
       return result;
     };
     return (value) => copy(value, new NativeMap());
