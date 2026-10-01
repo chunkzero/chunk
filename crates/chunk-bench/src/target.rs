@@ -199,6 +199,6 @@ pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
     let host = Arc::new(fixtures::SyntheticHost::default());
     let core = chunk_environment::Core::start_with_host(config, host.clone()).await?;
     host.attach(&core.control()?);
-    core.control()?.activate_release(control::release()?)?;
+    core.control()?.activate_release(control::release()?, chunk_control::DrainPolicy::default())?;
     Ok(core)
 }

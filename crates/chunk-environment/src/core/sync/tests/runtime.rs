@@ -57,6 +57,7 @@ pub fn login() -> ClaimRequest {
         demand: Some(demand("lobby")),
         source: None,
         deployment: String::new(),
+        decline_reconnect: false,
     }
 }
 
@@ -107,7 +108,7 @@ impl Running {
 pub async fn with_jvm() -> (Fixture, Running) {
     let launches = Launches::default();
     let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
-    fixture.control.activate_release(release()).unwrap();
+    fixture.control.activate_release(release(), chunk_control::DrainPolicy::default()).unwrap();
     let (client, control) = (fixture.client.clone(), fixture.control.clone());
     let jvm = Arc::new(OnceLock::new());
     let running = jvm.clone();

@@ -24,6 +24,9 @@ use std::{
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
+/// How long a deployment waits for the backend to have room for it.
+const SLOT_WAIT: Duration = Duration::from_mins(5);
+
 pub struct CoreConfig {
     /// The backend deployment served first. Without one, the backend serves only the deployments it retained.
     pub bundle: Option<PathBuf>,
@@ -423,18 +426,27 @@ impl Core {
     }
 
     /// Makes `bundle` resident beside earlier versions as [`Self::deploy`] does, but keeps waiting while the backend is
-    /// busy, such as while it holds as many versions as it can, until `cancel`. Returns whether it deployed.
+    /// busy, such as while it holds as many versions as it can, until `cancel` or five minutes have passed. Returns whether
+    /// it deployed.
     /// # Errors
-    /// Reports a stopped or rejecting backend.
+    /// Reports a stopped or rejecting backend, and a backend that stayed busy.
     pub async fn deploy_when_free(
         &self,
         bundle: chunk_contract::Deployment,
         cancel: &tokio_util::sync::CancellationToken,
     ) -> io::Result<bool> {
         let backend = self.handle.as_ref().ok_or_else(|| io::Error::other("backend is not running"))?;
+        let waiting = tokio::time::Instant::now();
         loop {
             match backend.deploy(bundle.clone()).await {
                 Err(chunk_backend::Error::Busy) => {
+                    if waiting.elapsed() >= SLOT_WAIT {
+                        return Err(io::Error::other(format!(
+                            "the backend held {} deployments and none retired within {} minutes to make room",
+                            chunk_backend::MAX_DEPLOYMENTS,
+                            SLOT_WAIT.as_secs() / 60
+                        )));
+                    }
                     tokio::select! {
                         () = cancel.cancelled() => return Ok(false),
                         () = tokio::time::sleep(Duration::from_millis(200)) => {}
@@ -446,11 +458,11 @@ impl Core {
     }
 
     /// Makes `release` control's current release. Local JVMs launch from its release directory under `releases/` in the
-    /// state directory. Earlier releases keep their sessions.
+    /// state directory. Earlier releases start draining under `drain` and keep their sessions.
     /// # Errors
     /// Reports a stopped control or a rejected release.
-    pub fn activate(&self, release: chunk_control::Release) -> io::Result<()> {
-        self.control()?.activate_release(release).map_err(io::Error::other)
+    pub fn activate(&self, release: chunk_control::Release, drain: chunk_control::DrainPolicy) -> io::Result<()> {
+        self.control()?.activate_release(release, drain).map_err(io::Error::other)
     }
 
     /// Whether the backend stopped.

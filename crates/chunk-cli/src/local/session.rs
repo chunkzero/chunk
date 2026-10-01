@@ -235,10 +235,7 @@ impl<'a> Session<'a> {
         let (deadline, summary) = match change {
             Change::Unchanged => return Ok("no changes".into()),
             Change::Backend => (None, "backend only; existing sessions stay pinned".to_owned()),
-            Change::Jvm => (
-                Some(Instant::now() + drain),
-                format!("JVM change; earlier releases drain within {}s", drain.as_secs()),
-            ),
+            Change::Jvm => (Some(drain), format!("JVM change; earlier releases drain within {}s", drain.as_secs())),
         };
         let id = staged.release.id.clone();
         let resumed = self.live.iter().position(|live| live.version.release.id == id);
@@ -256,7 +253,7 @@ impl<'a> Session<'a> {
             if Some(index) == current {
                 live.drain = Some(Drain::until(deadline));
             } else if let (Some(deadline), Some(drain)) = (deadline, &mut live.drain) {
-                drain.drain_by(deadline);
+                drain.drain_within(deadline);
             }
         }
         let resumed = if resumed.is_some() { " resumed" } else { "" };
@@ -338,7 +335,7 @@ impl<'a> Session<'a> {
             let live = &self.live[index];
             let stopped = match (&live.drain, &control) {
                 (Some(drain), Some(control)) => {
-                    control.drain_release(&live.version.deployment, drain.policy(now)).unwrap_or_else(|error| {
+                    control.drain_release(&live.version.deployment, drain.policy()).unwrap_or_else(|error| {
                         tracing::warn!(%error, deployment = live.version.deployment, "release not draining");
                         false
                     })

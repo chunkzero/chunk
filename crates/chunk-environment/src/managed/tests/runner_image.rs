@@ -71,6 +71,7 @@ fn login(player: u8) -> ClaimRequest {
         }),
         source: None,
         deployment: String::new(),
+        decline_reconnect: false,
     }
 }
 

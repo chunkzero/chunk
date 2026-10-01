@@ -13,7 +13,7 @@ use std::{io, time::Duration};
 
 use chunk_proto::sync::v1::{
     AbandonMoveArguments, ActivateResult, ClaimArguments, ClaimAssignment, ClaimPhase, ClaimRefusal, ClaimResult,
-    GatewayLogin, PlayerSetup, Position, WithdrawResult, claim_result::Outcome,
+    GatewayLogin, PlayerSetup, Position, SessionDemand, WithdrawResult, claim_result::Outcome,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -90,6 +90,8 @@ struct Assignment {
     protocol: i32,
     /// The deployment of the release the session runs.
     deployment: String,
+    /// The session's destination.
+    destination: SessionDemand,
     /// The destination JVM's player listener.
     endpoint: String,
     setup: PlayerSetup,
@@ -105,16 +107,20 @@ impl Assignment {
             session: assigned.session,
             protocol: assigned.protocol,
             deployment: assigned.deployment,
+            destination: assigned.destination.unwrap_or_default(),
             endpoint: assigned.endpoint,
             setup: PlayerSetup { operation_id: claim.operation_id.clone(), capability: assigned.capability },
         })
     }
 }
 
-/// Claims `guard`'s login or queued move. `None` means the login's deployment no longer accepts logins, so it must be
-/// routed again; it reserved nothing.
+/// Claims `guard`'s login or queued move. `None` means the deployment that admitted it is no longer current, so it must
+/// be admitted again; it reserved nothing.
 async fn claim(guard: &ClaimGuard) -> io::Result<Option<Assignment>> {
-    let arguments = ClaimArguments { login: guard.claim.source.is_none().then(|| login(&guard.claim)) };
+    let arguments = ClaimArguments {
+        login: guard.claim.source.is_none().then(|| login(&guard.claim)),
+        deployment: guard.claim.deployment.clone(),
+    };
     let operation = &guard.claim.operation_id;
     let (result, _): (ClaimResult, _) = guard.platform.call("claim", operation, &arguments, WAIT_TIMEOUT).await?;
     match result.outcome {
@@ -136,6 +142,7 @@ fn login(claim: &Claim) -> GatewayLogin {
         player: Some(claim.player.clone()),
         demand: Some(claim.demand.clone()),
         deployment: claim.deployment.clone(),
+        decline_reconnect: claim.decline_reconnect,
     }
 }
 
@@ -150,7 +157,6 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let destination = claim_destination(&login, current);
     let (mut authenticated, mut settings, (mut guard, mut assignment)) =
         configuration::wait_for_destination(authenticated, destination, deadline.min(WAIT_TIMEOUT)).await?;
-    guard.platform = guard.platform.bind(&assignment.deployment);
     let mut platform = guard.platform.clone();
     let mut lifecycle = Lifecycle::new(platform.clone());
     let mut commands = commands::Commands::new(&platform).await?;
@@ -209,7 +215,6 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         guard.armed = false;
         drop(internal);
         (guard, assignment) = next;
-        guard.platform = guard.platform.bind(&assignment.deployment);
         if guard.platform.target.deployment != platform.target.deployment {
             platform = guard.platform.clone();
             lifecycle.rebind(platform.clone());
@@ -220,8 +225,11 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// Routes and claims `login` through the current release. A failed routing through a release that is no longer
 /// current, which a reload may have released meanwhile, is routed again, as is a claim core refuses because its
-/// release no longer accepts logins. The caller bounds the retries.
+/// release no longer accepts logins. A login core returns to the session its player left on an earlier release is
+/// admitted there, as that session's destination, and otherwise placed with the current release. The caller bounds the
+/// retries.
 async fn claim_destination(login: &Claim, current: &Retarget) -> io::Result<(ClaimGuard, Assignment)> {
+    let mut login = login.clone();
     loop {
         let platform = current.platform();
         let deployment = &platform.target.deployment;
@@ -233,11 +241,28 @@ async fn claim_destination(login: &Claim, current: &Retarget) -> io::Result<(Cla
         };
         // Construct before sending: cancellation must cover a claim whose reply was lost.
         let mut guard = ClaimGuard { platform: platform.clone(), claim, armed: true, failure: None };
-        if let Some(assignment) = self::claim(&guard).await? {
+        let Some(assignment) = self::claim(&guard).await? else {
+            guard.armed = false;
+            sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        if assignment.deployment.is_empty() || assignment.deployment == *deployment {
             return Ok((guard, assignment));
         }
-        guard.armed = false;
-        sleep(Duration::from_millis(100)).await;
+        let placed = guard.platform.bind(&assignment.deployment);
+        let claim = Claim { demand: assignment.destination.clone(), ..guard.claim.clone() };
+        match placed.admit_login(&claim).await {
+            Ok(()) => {
+                (guard.platform, guard.claim) = (placed, claim);
+                return Ok((guard, assignment));
+            }
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                guard.cancel().await?;
+                guard.armed = false;
+                login = Claim { operation_id: uuid::Uuid::new_v4().to_string(), decline_reconnect: true, ..login };
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 

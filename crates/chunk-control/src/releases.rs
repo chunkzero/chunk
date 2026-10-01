@@ -6,7 +6,7 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
-    Control, Error, Release, Result,
+    Control, DrainPolicy, Error, Release, Result,
     state::{Capacity, ReleaseState, State},
 };
 
@@ -25,16 +25,18 @@ impl Launches {
 }
 
 impl Control {
-    /// Records `release` if it is new, and makes it current, ending its drain. Sessions of earlier releases keep running.
+    /// Records `release` if it is new, and makes it current, ending its drain. Every other release that is not retired
+    /// starts draining under `policy` now, unless it drains already, and keeps its sessions.
     /// # Errors
     /// Rejects an invalid release, one of another environment, a changed or retired release, and a stopped store.
-    pub fn activate_release(&self, release: Release) -> Result<()> {
+    pub fn activate_release(&self, release: Release, policy: DrainPolicy) -> Result<()> {
         release.validate()?;
         if release.deployment.environment != self.config.environment {
             return Err(Error::Invalid("release belongs to another environment"));
         }
         let name = release.deployment.deployment.clone();
         let recorded = serde_json::to_vec(&release)?;
+        let now = crate::now_ms();
         self.update(|state| {
             match state.releases.get(&name) {
                 Some(existing) if existing.retired => return Err(Error::Invalid("release retired")),
@@ -49,6 +51,11 @@ impl Control {
             }
             if let Some(release) = state.releases.get_mut(&name) {
                 release.drain = None;
+            }
+            for release in state.releases.iter_mut().filter(|(other, _)| **other != name).map(|(_, release)| release) {
+                if !release.retired {
+                    release.start_draining(now, policy);
+                }
             }
             state.current = Some(name);
             Ok(())
@@ -83,7 +90,9 @@ impl Control {
 
     /// Whether `deployment`'s release retired and every one of its hosts has stopped, as for an unknown release, and no
     /// launch of an unknown release may still run.
-    pub(crate) fn release_stopped(&self, deployment: &str) -> Result<bool> {
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn release_stopped(&self, deployment: &str) -> Result<bool> {
         let launches = self.launches()?;
         let state = self.state()?;
         Ok(launches.attributed(&state)

@@ -72,7 +72,7 @@ fn open(path: &std::path::Path, release: Release, host: Arc<dyn Host>) -> Result
     let store = chunk_store::SqliteStore::open(path, &release.deployment.environment)?;
     let backend = chunk_backend::Backend::new(release.deployment.environment.clone(), Box::new(store))?;
     let control = Control::open(backend.system(), environment(&release), host, false)?;
-    control.activate_release(release)?;
+    control.activate_release(release, crate::DrainPolicy::default())?;
     Ok(control)
 }
 
@@ -163,6 +163,7 @@ fn request(operation: &str, player: &str) -> ClaimRequest {
         }),
         source: None,
         deployment: String::new(),
+        decline_reconnect: false,
     }
 }
 

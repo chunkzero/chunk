@@ -39,7 +39,7 @@ impl Shared {
     /// Makes `version` control's current release, whose JVMs launch from its release directory. Earlier releases keep
     /// their sessions.
     pub fn activate(&self, version: &Version) -> io::Result<()> {
-        self.core.activate(version.control.clone())
+        self.core.activate(version.control.clone(), chunk_control::DrainPolicy::default())
     }
 
     /// Sends later player connections to `version`'s backend.

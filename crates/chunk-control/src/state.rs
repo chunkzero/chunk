@@ -74,11 +74,12 @@ impl State {
         Ok(&self.releases.get(name).ok_or(Error::Invalid("unknown release"))?.release)
     }
 
-    /// The release that places `request`, which is always the current one. A login routed with another release is
-    /// rejected as unavailable so its proxy routes it again; a move out of another release goes to the current one.
-    pub fn placing(&self, request: &ClaimRequest) -> Result<(String, Arc<Release>)> {
+    /// The release that places `request`, which is always the current one. A claim admitted in another release, as a
+    /// login names in its request and a move in `approved`, is rejected as unavailable so its proxy admits it again.
+    pub fn placing(&self, request: &ClaimRequest, approved: &str) -> Result<(String, Arc<Release>)> {
         let name = self.current.clone().ok_or(Error::Invalid("no current release"))?;
-        if request.source.is_none() && !request.deployment.is_empty() && request.deployment != name {
+        let admitted = if request.source.is_none() { request.deployment.as_str() } else { approved };
+        if !admitted.is_empty() && admitted != name {
             return Err(Error::Unresolved(crate::ROUTE_AGAIN));
         }
         let release = self.releases.get(&name).ok_or(Error::Invalid("unknown release"))?;

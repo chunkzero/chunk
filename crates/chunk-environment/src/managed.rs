@@ -16,7 +16,7 @@ mod telemetry;
 mod usage;
 
 use crate::{Core, CoreConfig, Gateway, GatewayConfig};
-use activation::Activation;
+use activation::{Activation, Stopping};
 use chunk_management::{Client, Code, v1};
 pub(crate) use launcher::{Lease, ManagementLauncher};
 pub(crate) use log_store::renewing;
@@ -79,6 +79,8 @@ pub(crate) struct Managed<'a> {
     releases: release::Store,
     /// Where the activation management has not yet accepted is recorded.
     activation: PathBuf,
+    /// Where the deployments that stop at once are recorded.
+    stop_record: PathBuf,
     core: &'a Core,
     gateway: &'a OnceLock<Gateway>,
     /// The gateway to start once a deployment is active.
@@ -116,10 +118,9 @@ struct Deployments {
     loading: Option<String>,
     /// The latest deployment this core rejected, and why.
     rejected: Option<(String, String)>,
-    /// How the deployments the latest desired state replaces retire.
-    retiring: retire::Retiring,
-    /// The deployments a replacement that asked for it stops at once, whatever desired state arrived since.
-    stop_replaced: BTreeSet<String>,
+    /// The deployments that stop at once instead of draining: every one resident when a deployment activated with
+    /// `stop_previous`, until its backend version is released, as recorded at `Managed::stop_record`.
+    stopping: BTreeSet<String>,
 }
 
 impl Deployments {
@@ -180,6 +181,10 @@ impl<'a> Managed<'a> {
         gateway_config: Option<GatewayConfig>,
     ) -> Self {
         let (client, stopping) = (management.client(), CancellationToken::new());
+        // Drained releases retire in `retire`, which never retires one management may still ask for.
+        if let Ok(control) = core.control() {
+            control.defer_retirement();
+        }
         let telemetry =
             Telemetry::new(client.clone(), registration.instance_id.clone(), &crate::logs::LINES, lease.subscribe());
         Self {
@@ -198,6 +203,7 @@ impl<'a> Managed<'a> {
             environment: registration.environment,
             releases: release::Store::new(state, core.archives().clone()),
             activation: state.join("managed.json"),
+            stop_record: state.join("stopping.json"),
             core,
             gateway,
             gateway_config,
@@ -303,16 +309,25 @@ impl<'a> Managed<'a> {
         error
     }
 
-    /// Protects an activation an earlier run recorded until management accepts it, if control made it current.
+    /// Protects an activation an earlier run recorded until management accepts it, and restores the deployments it
+    /// was to stop, if control made it current.
     fn recover(&self) -> io::Result<()> {
-        let Some(recorded) = activation::read(&self.activation)? else { return Ok(()) };
         let current = self.core.control()?.current_release().map_err(io::Error::other)?;
-        if current.as_ref() == Some(&recorded.activated) {
-            lock(&self.deployments).unacknowledged = Some(recorded);
-            Ok(())
-        } else {
-            activation::clear(&self.activation)
+        if let Some(recorded) = activation::read::<Activation>(&self.activation)? {
+            if current.as_ref() == Some(&recorded.activated) {
+                lock(&self.deployments).unacknowledged = Some(recorded);
+            } else {
+                activation::clear(&self.activation)?;
+            }
         }
+        if let Some(recorded) = activation::read::<Stopping>(&self.stop_record)? {
+            if current.as_ref() == Some(&recorded.current) {
+                lock(&self.deployments).stopping = recorded.deployments;
+            } else {
+                activation::clear(&self.stop_record)?;
+            }
+        }
+        Ok(())
     }
 
     async fn follow(&self) -> io::Error {
@@ -366,7 +381,6 @@ impl<'a> Managed<'a> {
                         let mut deployments = lock(&self.deployments);
                         deployments.revision = desired.revision;
                         deployments.desired = Some(desired.deployment_id.clone());
-                        deployments.retiring = retire::Retiring::from(&desired);
                     }
                     if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
                         work.cancel.cancel();
@@ -485,26 +499,34 @@ impl<'a> Managed<'a> {
         if !self.core.deploy_when_free(loaded.bundle(deployment), cancel).await? {
             return Ok(false);
         }
+        let resident = match self.core.backend() {
+            Some(backend) => backend.deployments().await.map_err(io::Error::other)?,
+            None => return Err(io::Error::other("backend is not running")),
+        };
         // Nothing awaits between this check and switching traffic, so the attach loop cannot supersede it meanwhile.
         if cancel.is_cancelled() {
             return Ok(false);
         }
-        // Recorded first, so a crash once control has activated it still protects the predecessor. Activating the
-        // unaccepted deployment again keeps its predecessor.
-        let current = self.core.control()?.current_release().map_err(io::Error::other)?;
-        let predecessor = match &lock(&self.deployments).unacknowledged {
+        let control = self.core.control()?;
+        let current = control.current_release().map_err(io::Error::other)?;
+        let mut deployments = lock(&self.deployments);
+        // Recorded first, so a crash once control has activated it still protects the predecessor and still stops what
+        // it asked to stop. Activating the unaccepted deployment again keeps its predecessor.
+        let predecessor = match &deployments.unacknowledged {
             Some(pending) if pending.activated == *deployment => pending.predecessor.clone(),
-            _ => current.filter(|current| current != deployment),
+            _ => current.clone().filter(|current| current != deployment),
         };
         let pending = Activation { predecessor, activated: deployment.clone() };
+        let stopping = retire::stopping_after(&deployments.stopping, &resident, deployment, desired.stop_previous);
         activation::write(&self.activation, &pending)?;
+        activation::write(&self.stop_record, &Stopping { current: deployment.clone(), deployments: stopping.clone() })?;
         let release = loaded.control(&self.environment, deployment);
-        if let Err(error) = self.core.activate(release) {
+        if let Err(error) = self.core.activate(release, retire::drain_policy(desired)) {
             _ = activation::clear(&self.activation);
+            _ = self.record_stopping(current.as_deref(), &deployments.stopping);
             return Err(error);
         }
-        let mut deployments = lock(&self.deployments);
-        deployments.replaced(pending.predecessor.as_deref(), desired.stop_previous);
+        deployments.stopping = stopping;
         deployments.unacknowledged = Some(pending);
         Ok(true)
     }

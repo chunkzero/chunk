@@ -216,6 +216,8 @@ pub struct Control {
     authority: Authority,
     operations: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     draining: std::sync::atomic::AtomicBool,
+    /// Whether the caller retires drained releases through [`Control::due_releases`], rather than control itself.
+    defers_retirement: std::sync::atomic::AtomicBool,
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
     /// Counts health passes, so `nodes` streams see health that isn't in the log.
     observed: tokio::sync::watch::Sender<u64>,
@@ -256,6 +258,7 @@ impl Control {
             authority,
             operations: Mutex::default(),
             draining: std::sync::atomic::AtomicBool::new(false),
+            defers_retirement: std::sync::atomic::AtomicBool::new(false),
             capacity: tokio::sync::Notify::new(),
             logins: std::sync::atomic::AtomicU64::new(0),
         }))

@@ -281,3 +281,24 @@ async fn observed_application_failure_is_terminal_and_does_not_undo_prior_effect
     assert!(failed.result.is_none());
     assert_eq!(count(&backend, "alice").await, 41);
 }
+
+#[tokio::test]
+async fn retiring_a_deployment_frees_its_slot_despite_a_scheduled_job_and_a_subscription() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = backend(&directory);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    for index in 1..crate::MAX_DEPLOYMENTS {
+        backend.deploy(deployment(&format!("d{index}"), 1)).await.unwrap();
+    }
+    let id = schedule(&backend, "one", now() + 60_000, 0).await;
+    let mut group = backend.subscribe_group(vec![call("old", "read", "alice", json!(null))]).await.unwrap();
+    group.next().await.unwrap();
+    assert!(matches!(backend.deploy(deployment("next", 1)).await, Err(Error::Busy)));
+    assert!(matches!(backend.release(DeploymentId::new("old").unwrap()).await, Err(Error::Busy)));
+
+    assert!(backend.retire(DeploymentId::new("old").unwrap()).await.unwrap());
+    assert!(matches!(group.next().await, Err(Error::Retired)));
+    assert_eq!(job(&backend, &id).await.state, JobState::Cancelled);
+    assert!(backend.query(call("old", "read", "alice", json!(null))).await.is_err());
+    backend.deploy(deployment("next", 1)).await.unwrap();
+}

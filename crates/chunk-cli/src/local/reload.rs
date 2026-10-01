@@ -1,6 +1,6 @@
 use std::{
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use chunk_build::Release;
@@ -30,29 +30,33 @@ pub(super) fn classify(current: &Release, next: &Release) -> Change {
 
 /// A replaced release draining in control, which stops it once its sessions have no players, or at its deadline.
 pub(super) struct Drain {
-    deadline: Option<Instant>,
+    since: Instant,
+    /// How long after `since` the release stops, whoever remains.
+    deadline: Option<Duration>,
 }
 
 impl Drain {
-    /// Keeps existing sessions on the old version until their players leave, or until `deadline`.
-    pub fn until(deadline: Option<Instant>) -> Self {
-        Self { deadline }
+    /// Keeps existing sessions on the old version until their players leave, or until `deadline` after now.
+    pub fn until(deadline: Option<Duration>) -> Self {
+        Self { since: Instant::now(), deadline }
     }
 
-    /// Applies `deadline` unless an earlier one is already set; used when a JVM change supersedes pinned sessions.
-    pub fn drain_by(&mut self, deadline: Instant) {
+    /// Stops the release `within` from now unless it stops sooner anyway; used when a JVM change supersedes pinned
+    /// sessions.
+    pub fn drain_within(&mut self, within: Duration) {
+        let deadline = self.since.elapsed() + within;
         self.deadline = Some(self.deadline.map_or(deadline, |current| current.min(deadline)));
     }
 
-    /// Control's policy for the rest of the drain from `now`.
-    pub fn policy(&self, now: Instant) -> DrainPolicy {
-        DrainPolicy { max_age: None, deadline: self.deadline.map(|deadline| deadline.saturating_duration_since(now)) }
+    /// Control's policy: the deadline as a duration from when the drain started.
+    pub fn policy(&self) -> DrainPolicy {
+        DrainPolicy { max_age: None, deadline: self.deadline }
     }
 
     pub fn describe(&self, now: Instant) -> String {
-        match self.deadline {
-            Some(deadline) if deadline <= now => "stopping".into(),
-            Some(deadline) => format!("drains in {}s", deadline.saturating_duration_since(now).as_secs()),
+        match self.deadline.map(|deadline| (self.since + deadline).saturating_duration_since(now)) {
+            Some(remaining) if remaining.is_zero() => "stopping".into(),
+            Some(remaining) => format!("drains in {}s", remaining.as_secs()),
             None => "pinned".into(),
         }
     }

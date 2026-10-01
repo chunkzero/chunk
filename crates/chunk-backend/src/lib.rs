@@ -72,6 +72,8 @@ pub enum Error {
     Unknown,
     #[error("deployment is not ready")]
     NotReady,
+    #[error("deployment is retiring")]
+    Retired,
     #[error("operation ID was reused for a different request")]
     OperationMismatch,
     #[error("commit pipeline failed; recover the operation outcome after restarting the backend")]

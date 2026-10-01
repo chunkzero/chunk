@@ -50,6 +50,7 @@ pub(super) struct Service {
     pub watch_down: Arc<AtomicBool>,
     pub refused_watches: Arc<AtomicUsize>,
     pub logins: Arc<Mutex<Logins>>,
+    pub placement: Arc<Mutex<Placement>>,
     /// The next call naming the open stream drops it, then is stopped once the gateway resubscribes, before the new
     /// stream's first update.
     pub supersede: Arc<AtomicBool>,
@@ -72,6 +73,21 @@ pub(super) struct Logins {
     pub retired: Option<String>,
     /// The next routing waits for this, then fails.
     pub unroutable: Option<tokio::sync::oneshot::Receiver<()>>,
+}
+
+/// The deployments the fake core knows, and how it places claims among them.
+#[derive(Default)]
+pub(super) struct Placement {
+    /// Domain manifests by deployment; others get the fixture's own. Routing sends a login to its first app.
+    pub manifests: BTreeMap<String, serde_json::Value>,
+    /// The deployments whose admission hooks deny.
+    pub denying: BTreeSet<String>,
+    /// The hooks run, as deployment, hook and payload.
+    pub hooks: Vec<(String, String, serde_json::Value)>,
+    /// Claims admitted in another deployment are refused. Unset, every one is placed.
+    pub current: Option<String>,
+    /// Where a login's player returns unless it declines: the session's deployment and destination.
+    pub returns: Option<(String, sync::SessionDemand)>,
 }
 
 #[derive(Default)]
@@ -136,6 +152,7 @@ impl Fixture {
             watch_down: Arc::default(),
             refused_watches: Arc::default(),
             logins: Arc::default(),
+            placement: Arc::default(),
             supersede: Arc::default(),
             superseded: Arc::default(),
             stream: Arc::default(),
@@ -256,5 +273,6 @@ fn claim() -> Claim {
         },
         source: None,
         deployment: String::new(),
+        decline_reconnect: false,
     }
 }

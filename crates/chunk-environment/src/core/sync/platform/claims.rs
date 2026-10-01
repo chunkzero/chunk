@@ -11,7 +11,7 @@ use chunk_proto::{
     control::v1 as control,
     sync::v1::{
         AbandonMoveArguments, ActivateResult, CallRequest, ClaimArguments, ClaimAssignment, ClaimRefusal, ClaimResult,
-        DepartResult, Error, GatewayLogin, Position, WithdrawResult, claim_result::Outcome, error::Code,
+        DepartResult, Error, GatewayLogin, Position, SessionDemand, WithdrawResult, claim_result::Outcome, error::Code,
     },
 };
 use prost::Message;
@@ -73,6 +73,7 @@ async fn claim(
     if arguments.login.is_some() {
         app::reject_operator(operation)?;
     }
+    let approved = arguments.deployment;
     let request = match (arguments.login, held(service, gateway, operation)?) {
         (Some(_), Some(stored)) if stored.request.source.is_some() => {
             return Err(errors::error(Code::OperationMismatch, "the operation ID names a move"));
@@ -83,7 +84,8 @@ async fn claim(
         (None, None) => return Err(errors::invalid("no move is queued under this operation ID")),
     };
     let control = service.control.clone();
-    let outcome = match service.operations.admit(async move { control.claim(request).await }).await {
+    let outcome = match service.operations.admit(async move { control.claim_approved(request, &approved).await }).await
+    {
         Ok(assignment) => Outcome::Assignment(assigned(assignment)?),
         Err(Failure::Unresolved(ROUTE_AGAIN)) => Outcome::Refusal(ClaimRefusal::RouteAgain.into()),
         Err(Failure::Invalid(ALREADY_OWNED)) => Outcome::Refusal(ClaimRefusal::AlreadyConnected.into()),
@@ -171,6 +173,7 @@ fn login_request(gateway: &str, operation: &str, login: GatewayLogin) -> control
         demand,
         source: None,
         deployment: login.deployment,
+        decline_reconnect: login.decline_reconnect,
     }
 }
 
@@ -190,5 +193,10 @@ fn assigned(assignment: control::Assignment) -> Result<ClaimAssignment, Error> {
         endpoint: preparation.endpoint,
         capability: preparation.capability,
         deployment,
+        destination: assignment.destination.map(|demand| SessionDemand {
+            key: demand.key,
+            session_type: demand.session_type,
+            machine_profile: demand.machine_profile,
+        }),
     })
 }

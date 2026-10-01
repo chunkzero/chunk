@@ -176,7 +176,7 @@ async fn a_session_keeps_its_own_release_creation_configuration_while_a_newer_re
     next.deployment.deployment = "next".into();
     let small = next.contracts.destinations.as_mut().unwrap().entries.get_mut("apps/bridge/destinations/small");
     small.unwrap().creation.as_mut().unwrap().configuration = json!({"map":"desert"});
-    control.activate_release(next).unwrap();
+    control.activate_release(next, crate::DrainPolicy::default()).unwrap();
     let after = ClaimRequest { deployment: "next".into(), ..demand("after", "small") };
     control.claim(after).await.unwrap();
     let state = control.state().unwrap();

@@ -93,7 +93,7 @@ async fn a_retained_release_launches_new_jvms_after_a_restart_without_being_acti
     eventually(|| !control.state().unwrap().hosts.is_empty()).await;
     claim.abort();
     _ = claim.await;
-    control.activate_release(fixture.release.clone()).unwrap();
+    control.activate_release(fixture.release.clone(), crate::DrainPolicy::default()).unwrap();
     drop(control);
 
     // Control restarts with `build` current; `previous` is never activated again.

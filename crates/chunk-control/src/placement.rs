@@ -1,7 +1,8 @@
 mod select;
 
 use chunk_proto::control::v1::{
-    Assignment, ClaimPhase, ClaimRequest, ConfigurationResponse, DeploymentRef, PlayerDelivery, PlayerRef, SessionRef,
+    Assignment, ClaimPhase, ClaimRequest, ConfigurationResponse, DeploymentRef, PlayerDelivery, PlayerRef,
+    SessionDemand, SessionRef,
 };
 use prost::Message;
 use std::time::Duration;
@@ -19,6 +20,15 @@ impl Control {
     /// Rejects duplicate membership, changed operations, unknown session types and unresolved hosts. Reports `Busy`
     /// until recovery has fenced surviving JVMs, even for a restored claim: the log may have lost its cancellation.
     pub async fn claim(&self, request: ClaimRequest) -> Result<Assignment> {
+        self.claim_approved(request, "").await
+    }
+
+    /// Reserves `request` as [`Self::claim`] does, in `approved`, the deployment whose hooks admitted it, only while that
+    /// is the current release. Otherwise it is rejected as unavailable, so its proxy admits it again. A move names its
+    /// approval here; a login, in its request. Empty places it with the current release.
+    /// # Errors
+    /// As [`Self::claim`], and a release that is no longer current.
+    pub async fn claim_approved(&self, request: ClaimRequest, approved: &str) -> Result<Assignment> {
         validate(&request)?;
         let operation = self.operation(&request.operation_id)?;
         // Checked before recovery's JVM calls, and again where the reservation commits.
@@ -31,7 +41,7 @@ impl Control {
             if self.draining.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(Error::Invalid("control draining"));
             }
-            reserve(state, &request, &unavailable)
+            reserve(state, &request, approved, &unavailable)
         })?;
         if inserted && request.source.is_none() {
             self.logins.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -48,9 +58,11 @@ impl Control {
         let deployment = &state.host_release(&session.host)?.deployment;
         let runtime = self.runtime(&session.host).await?;
         let config = self.jvm_configuration(deployment, &runtime)?;
+        let destination = destination(&state, claim, &session.host);
         if let Some(bytes) = &claim.assignment {
             let mut assignment = Assignment::decode(bytes.as_slice())?;
             assignment.configuration = Some(config);
+            assignment.destination = Some(destination);
             return Ok(assignment);
         }
         // Control's desired state already asks the JVM for this session, and its topic for this delivery.
@@ -64,6 +76,7 @@ impl Control {
             delivery: Some(delivery),
             configuration: Some(config),
             preparation: Some(preparation),
+            destination: Some(destination),
         };
         self.update(|state| {
             // A host released while preparing never gets a new prepared claim, which only its release would end.
@@ -76,6 +89,7 @@ impl Control {
             }
             let mut persisted = assignment.clone();
             persisted.configuration = None;
+            persisted.destination = None;
             claim.assignment = Some(persisted.encode_to_vec());
             Ok(())
         })?;
@@ -151,6 +165,17 @@ fn delivery(
     }
 }
 
+/// The destination `claim`'s session on `host` serves.
+fn destination(state: &State, claim: &Claim, host: &str) -> SessionDemand {
+    let session = &state.sessions[&claim.session];
+    let profile = state.hosts.get(host).map(|host| host.profile.clone()).unwrap_or_default();
+    SessionDemand {
+        key: session.demand_key.clone(),
+        session_type: session.session_type.clone(),
+        machine_profile: profile,
+    }
+}
+
 fn validate(request: &ClaimRequest) -> Result<()> {
     let identity = request.identity.as_ref().ok_or(Error::Invalid("missing authenticated identity"))?;
     let demand = request.demand.as_ref().ok_or(Error::Invalid("missing demand"))?;
@@ -178,17 +203,19 @@ fn validate(request: &ClaimRequest) -> Result<()> {
 fn reserve(
     state: &mut State,
     request: &ClaimRequest,
+    approved: &str,
     unavailable: &std::collections::BTreeSet<String>,
 ) -> Result<bool> {
     if reserved(state, request)? {
         return Ok(false);
     }
     let owner = owner(state, request)?;
-    let rejoined = request.source.is_none().then(|| crate::draining::rejoin(state, &owner.player, unavailable));
+    let rejoined = (request.source.is_none() && !request.decline_reconnect)
+        .then(|| crate::draining::rejoin(state, &owner.player, unavailable));
     let session = if let Some(session) = rejoined.flatten() {
         session
     } else {
-        let (name, release) = state.placing(request)?;
+        let (name, release) = state.placing(request, approved)?;
         let demand = request.demand.as_ref().ok_or(Error::Invalid("demand"))?;
         select_session(state, &name, &release, demand, unavailable)?
     };

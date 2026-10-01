@@ -292,7 +292,7 @@ async fn claiming(
     fixture: &Fixture,
     launches: &Launches,
 ) -> (tokio::task::JoinHandle<chunk_control::Result<Assignment>>, String) {
-    fixture.control.activate_release(release()).unwrap();
+    fixture.control.activate_release(release(), chunk_control::DrainPolicy::default()).unwrap();
     let control = fixture.control.clone();
     let claim = tokio::spawn(async move { control.claim(runtime::login()).await });
     let host = loop {

@@ -184,6 +184,19 @@ impl Watches {
         self.groups.values().any(|group| group.calls.iter().any(|call| &call.deployment == deployment))
     }
 
+    /// Closes the groups that subscribe to `deployment`, sending `error` to their subscribers.
+    pub fn retire(&mut self, deployment: &DeploymentId, error: &Error) {
+        let ids: Vec<_> = self
+            .groups
+            .iter()
+            .filter(|(_, group)| group.calls.iter().any(|call| &call.deployment == deployment))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            self.close(id, Some(error));
+        }
+    }
+
     /// Registers a group. The reply completes once every query has a result.
     pub fn subscribe(&mut self, calls: Vec<Call>, reply: Request<GroupSubscription>) {
         let group = self.id();

@@ -47,15 +47,24 @@ impl Service {
         let operation = call.operation_id.clone();
         Ok(Ok(match call.method.as_str() {
             "chunk:claim" => {
-                let Some(login) = ClaimArguments::decode(call.arguments.as_slice()).unwrap().login else {
-                    return Ok(self.claim_move(&operation).await);
+                let arguments = ClaimArguments::decode(call.arguments.as_slice()).unwrap();
+                let Some(login) = arguments.login else {
+                    return Ok(self.claim_move(&operation, &arguments.deployment).await);
                 };
                 let mut logins = self.logins.lock().unwrap();
                 logins.claims.push((operation, login.clone()));
-                let outcome = if logins.retired.as_ref() == Some(&login.deployment) {
+                let placement = self.placement.lock().unwrap();
+                let returned = placement.returns.clone().filter(|_| !login.decline_reconnect);
+                let outcome = if let Some((deployment, destination)) = returned {
+                    claim_result::Outcome::Assignment(ClaimAssignment {
+                        deployment,
+                        destination: Some(destination),
+                        ..reservation()
+                    })
+                } else if logins.retired.as_ref() == Some(&login.deployment) || placement.refuses(&login.deployment) {
                     claim_result::Outcome::Refusal(ClaimRefusal::RouteAgain.into())
                 } else {
-                    claim_result::Outcome::Assignment(reservation())
+                    claim_result::Outcome::Assignment(placed(&login.deployment))
                 };
                 ClaimResult { outcome: Some(outcome) }.encode_to_vec()
             }
@@ -95,34 +104,52 @@ impl Service {
     /// Runs a call that names no stream: the manifest, or its routing hook under a prepared operation ID.
     async fn unfenced(&self, call: &CallRequest) -> Result<Vec<u8>, sync::Error> {
         match call.method.as_str() {
-            "chunk:manifest" => Ok(ManifestResult {
-                deployment: call.deployment.clone(),
-                manifest_json: serde_json::to_vec(&serde_json::json!({
-                    "version":1, "apps":{"lobby":""}, "scopes":{"":{"parent":null}},
-                    "hooks":{"shared/domains/hooks/route":{"domain":"","event":"player.route","export":"route"}}
-                }))
-                .unwrap(),
+            "chunk:manifest" => {
+                let manifest = self.placement.lock().unwrap().manifests.get(&call.deployment).cloned();
+                let manifest = manifest.unwrap_or_else(|| {
+                    serde_json::json!({
+                        "version":1, "apps":{"lobby":""}, "scopes":{"":{"parent":null}},
+                        "hooks":{"shared/domains/hooks/route":{"domain":"","event":"player.route","export":"route"}}
+                    })
+                });
+                let manifest_json = serde_json::to_vec(&manifest).unwrap();
+                Ok(ManifestResult { deployment: call.deployment.clone(), manifest_json }.encode_to_vec())
             }
-            .encode_to_vec()),
             "chunk:prepare" => {
                 let operation_id = format!("prep:{}", self.prepared.fetch_add(1, Ordering::SeqCst));
                 Ok(PrepareResult { operation_id }.encode_to_vec())
             }
+            hook if hook.starts_with("shared/domains/hooks/") && hook != "shared/domains/hooks/route" => {
+                let mut placement = self.placement.lock().unwrap();
+                let arguments = serde_json::from_slice(&call.arguments).unwrap();
+                placement.hooks.push((call.deployment.clone(), hook.into(), arguments));
+                Ok(serde_json::to_vec(&serde_json::json!({"allow": !placement.denying.contains(&call.deployment)}))
+                    .unwrap())
+            }
             "shared/domains/hooks/route" => {
                 assert!(call.operation_id.starts_with("prep:"));
+                let arguments = serde_json::from_slice(&call.arguments).unwrap();
+                let app = {
+                    let mut placement = self.placement.lock().unwrap();
+                    placement.hooks.push((call.deployment.clone(), call.method.clone(), arguments));
+                    let manifest = placement.manifests.get(&call.deployment);
+                    let apps = manifest.and_then(|manifest| manifest["apps"].as_object());
+                    apps.and_then(|apps| apps.keys().next().cloned()).unwrap_or_else(|| "lobby".into())
+                };
                 let unroutable = self.logins.lock().unwrap().unroutable.take();
                 if let Some(unroutable) = unroutable {
                     let _ = unroutable.await;
                     return Err(sync::Error { code: Code::Unavailable.into(), message: "routing failed".into() });
                 }
-                let route = serde_json::json!({"key":"lobby","session_type":"lobby/default","machine_profile":"local"});
+                let route =
+                    serde_json::json!({"key":app,"session_type":format!("{app}/default"),"machine_profile":"local"});
                 Ok(serde_json::to_vec(&route).unwrap())
             }
             _ => Err(sync::Error { code: Code::Invalid.into(), message: "unused".into() }),
         }
     }
 
-    async fn claim_move(&self, operation: &str) -> Result<Vec<u8>, sync::Error> {
+    async fn claim_move(&self, operation: &str, approved: &str) -> Result<Vec<u8>, sync::Error> {
         let (error, stall) = {
             let mut movement = self.movement.lock().unwrap();
             assert_eq!(movement.pending.as_ref().map(|pending| pending.operation_id.as_str()), Some(operation));
@@ -132,8 +159,29 @@ impl Service {
         if stall {
             tokio::time::sleep(crate::server::managed::WAIT_TIMEOUT).await;
         }
-        Err(error.unwrap_or_else(|| sync::Error { code: Code::Invalid.into(), message: "unused".into() }))
+        if let Some(error) = error {
+            return Err(error);
+        }
+        let outcome = if self.placement.lock().unwrap().refuses(approved) {
+            claim_result::Outcome::Refusal(ClaimRefusal::RouteAgain.into())
+        } else {
+            claim_result::Outcome::Assignment(placed(approved))
+        };
+        Ok(ClaimResult { outcome: Some(outcome) }.encode_to_vec())
     }
+}
+
+impl super::Placement {
+    /// Whether a claim admitted in `deployment` is refused, because another is current.
+    fn refuses(&self, deployment: &str) -> bool {
+        !deployment.is_empty() && self.current.as_ref().is_some_and(|current| current != deployment)
+    }
+}
+
+/// A reservation in `deployment`, or in the fixture's own when it is empty.
+fn placed(deployment: &str) -> ClaimAssignment {
+    let deployment = if deployment.is_empty() { "deployment" } else { deployment };
+    ClaimAssignment { deployment: deployment.into(), ..reservation() }
 }
 
 /// The claim the gateway's topic holds.
@@ -230,5 +278,6 @@ fn reservation() -> ClaimAssignment {
         endpoint: "127.0.0.1:1".into(),
         capability: vec![0; 32],
         deployment: "deployment".into(),
+        destination: None,
     }
 }

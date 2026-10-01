@@ -50,7 +50,9 @@ pub(super) fn login(connection: &str) -> ClaimArguments {
                 machine_profile: "small".into(),
             }),
             deployment: String::new(),
+            decline_reconnect: false,
         }),
+        deployment: String::new(),
     }
 }
 

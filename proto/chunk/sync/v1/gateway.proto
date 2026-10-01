@@ -112,6 +112,10 @@ message ClaimArguments {
   // The player a login admits. Unset to claim the destination of the move control queued under the operation ID,
   // which the gateway saw as a GatewayMove.
   GatewayLogin login = 1;
+  // The deployment whose hooks admitted the claim, which core places it in only while it is the current one, and
+  // otherwise refuses it as CLAIM_REFUSAL_ROUTE_AGAIN. Empty places it with the current one. A login names the same one
+  // in GatewayLogin.
+  string deployment = 2;
 }
 
 // A player the gateway authenticated and routed. The claim control makes from it, with the gateway's ID, the operation
@@ -125,6 +129,9 @@ message GatewayLogin {
   SessionDemand demand = 3;
   // The deployment whose routing chose `demand`. Empty places the login with the current one.
   string deployment = 4;
+  // Places the login in a new session of the current deployment, even when its player may return to the session they
+  // left on an earlier one.
+  bool decline_reconnect = 5;
 }
 
 // A player as their login authenticated them.
@@ -171,12 +178,16 @@ message ClaimAssignment {
   bytes capability = 5;
   // The deployment of the release the session runs, which the gateway's hooks and commands for the player follow.
   string deployment = 6;
+  // The session's destination, which a login whose player returned to a session of another deployment than the one
+  // that routed it is admitted to there.
+  SessionDemand destination = 7;
 }
 
 // Why control refused a claim.
 enum ClaimRefusal {
   CLAIM_REFUSAL_UNSPECIFIED = 0;
-  // The login's deployment no longer accepts logins. Route it again and claim again under the same operation ID.
+  // The deployment the claim was admitted in no longer accepts it. Admit it again in the current deployment, routing a
+  // login again, and claim again under the same operation ID.
   CLAIM_REFUSAL_ROUTE_AGAIN = 1;
   // The player already holds a claim, such as through another connection.
   CLAIM_REFUSAL_ALREADY_CONNECTED = 2;

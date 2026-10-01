@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     Control, Error, Generation, Result,
-    state::{Capacity, Claim, Phase, ReleaseDrain, State},
+    state::{Capacity, Claim, Phase, ReleaseDrain, ReleaseState, State},
 };
 
 /// How long after leaving a session of a draining release a player who logs in again returns to it.
@@ -18,7 +18,8 @@ pub const RECONNECT_GRACE: Duration = Duration::from_secs(120);
 /// How long a draining release stays without players before it retires, so players on their way in arrive first.
 const SETTLE_MS: u64 = 10_000;
 
-/// How a release drains once another replaces it. Both limits count from when it started draining, even when set later; an unset one never passes.
+/// How a release drains once another replaces it. Both limits are durations counted from when it started draining, even
+/// when set later; an unset one never passes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrainPolicy {
     /// After this, its sessions take no reconnects and its arrived players move to the current release where they can.
@@ -27,9 +28,22 @@ pub struct DrainPolicy {
     pub deadline: Option<Duration>,
 }
 
+impl ReleaseState {
+    /// Starts draining at `now` unless it drains already, and keeps the earlier of each limit.
+    pub(crate) fn start_draining(&mut self, now: u64, policy: DrainPolicy) {
+        let drain = self.drain.get_or_insert(ReleaseDrain { since: now, reconnects_until: None, stops_at: None });
+        let after = |limit: Option<Duration>| {
+            limit.map(|limit| drain.since.saturating_add(u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)))
+        };
+        drain.reconnects_until = earliest(drain.reconnects_until, after(policy.max_age));
+        drain.stops_at = earliest(drain.stops_at, after(policy.deadline));
+    }
+}
+
 impl Control {
-    /// Drains `deployment`'s release under `policy`, keeping the earlier of each limit when it already drains. Returns
-    /// whether it has retired and every one of its hosts has stopped, as for an unknown release.
+    /// Drains `deployment`'s release under `policy`, whose limits count from when it started draining, keeping the
+    /// earlier of each limit when it already drains. Returns whether it has retired and every one of its hosts has
+    /// stopped, as for an unknown release.
     /// # Errors
     /// Rejects the current release and reports a stopped store.
     pub fn drain_release(&self, deployment: &str, policy: DrainPolicy) -> Result<bool> {
@@ -41,62 +55,39 @@ impl Control {
             let Some(release) = state.releases.get_mut(deployment).filter(|release| !release.retired) else {
                 return Ok(());
             };
-            let drain =
-                release.drain.get_or_insert(ReleaseDrain { since: now, reconnects_until: None, stops_at: None });
-            let after = |limit: Option<Duration>| {
-                limit.map(|limit| drain.since.saturating_add(u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)))
-            };
-            drain.reconnects_until = earliest(drain.reconnects_until, after(policy.max_age));
-            drain.stops_at = earliest(drain.stops_at, after(policy.deadline));
+            release.start_draining(now, policy);
             Ok(())
         })?;
         self.release_stopped(deployment)
     }
 
-    /// Retires the longest-draining release of `deployments`, unless one of them retired already. Returns the one that
-    /// is retired.
-    /// # Errors
-    /// Reports a stopped store.
-    pub fn retire_longest_draining(&self, deployments: &[String]) -> Result<Option<String>> {
-        let state = self.state()?;
-        let releases = || deployments.iter().filter_map(|name| Some((name, state.releases.get(name)?)));
-        if let Some((retired, _)) = releases().find(|(_, release)| release.retired) {
-            return Ok(Some(retired.clone()));
-        }
-        let oldest = releases().filter_map(|(name, release)| Some((release.drain.as_ref()?.since, name))).min();
-        let Some((_, oldest)) = oldest else { return Ok(None) };
-        self.retire_release(oldest)?;
-        Ok(Some(oldest.clone()))
+    /// Makes the caller, instead of control, retire drained releases: control only moves arrived players away from
+    /// releases past their maximum age, and [`Self::due_releases`] names the releases to retire.
+    pub fn defer_retirement(&self) {
+        self.defers_retirement.store(true, std::sync::atomic::Ordering::Release);
     }
 
-    /// Retires each draining release that is due, and moves the arrived players of those past their maximum age to the
-    /// current release.
+    /// The draining releases that are due: those past their deadline, and those with no players, no player who may
+    /// still return, and nothing joining.
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn due_releases(&self) -> Result<Vec<String>> {
+        let state = self.state()?;
+        Ok(Self::releases_due(&state).0)
+    }
+
+    /// Moves the arrived players of releases past their maximum age to the current release, and retires the releases
+    /// that are due unless the caller does.
     pub(crate) fn progress_releases(&self) -> Result<()> {
         let state = self.state()?;
-        let now = crate::now_ms();
-        let latest = latest_claims(&state);
-        let (mut due, mut moving) = (Vec::new(), Vec::new());
-        for (name, drain) in
-            state.releases.iter().filter(|(_, release)| !release.retired).filter_map(|(name, release)| {
-                (state.current.as_ref() != Some(name)).then_some((name, release.drain.as_ref()?))
-            })
-        {
-            let claims: Vec<_> = state.claims.iter().filter(|(_, claim)| on_release(&state, claim, name)).collect();
-            let kept = |(operation, claim): &(&String, &Claim)| {
-                claim.phase != Phase::Released
-                    || claim.released_at_ms.is_some_and(|at| now.saturating_sub(at) < SETTLE_MS)
-                    || returns(&state, &latest, operation, now).is_some()
-            };
-            if drain.stops_at.is_some_and(|at| now >= at) || !claims.iter().any(kept) {
-                due.push(name.clone());
-            } else if drain.reconnects_until.is_some_and(|at| now >= at) {
-                moving.extend(claims.into_iter().filter(|(_, claim)| claim.phase == Phase::Arrived));
-            }
-        }
+        let (due, moving) = Self::releases_due(&state);
         for (operation, claim) in moving {
             if let Err(error) = self.move_player(crate::moves::evacuation(operation, claim)?) {
                 tracing::debug!(%error, player = claim.player, "draining release keeps its player");
             }
+        }
+        if self.defers_retirement.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(());
         }
         for name in due {
             if let Err(error) = self.retire_release(&name) {
@@ -104,6 +95,31 @@ impl Control {
             }
         }
         Ok(())
+    }
+
+    /// The releases of `state` that are due, and the claims of those past their maximum age that should move.
+    fn releases_due(state: &State) -> (Vec<String>, Vec<(&String, &Claim)>) {
+        let now = crate::now_ms();
+        let latest = latest_claims(state);
+        let (mut due, mut moving) = (Vec::new(), Vec::new());
+        for (name, drain) in
+            state.releases.iter().filter(|(_, release)| !release.retired).filter_map(|(name, release)| {
+                (state.current.as_ref() != Some(name)).then_some((name, release.drain.as_ref()?))
+            })
+        {
+            let claims: Vec<_> = state.claims.iter().filter(|(_, claim)| on_release(state, claim, name)).collect();
+            let kept = |(operation, claim): &(&String, &Claim)| {
+                claim.phase != Phase::Released
+                    || claim.released_at_ms.is_some_and(|at| now.saturating_sub(at) < SETTLE_MS)
+                    || returns(state, &latest, operation, now).is_some()
+            };
+            if drain.stops_at.is_some_and(|at| now >= at) || !claims.iter().any(kept) {
+                due.push(name.clone());
+            } else if drain.reconnects_until.is_some_and(|at| now >= at) {
+                moving.extend(claims.into_iter().filter(|(_, claim)| claim.phase == Phase::Arrived));
+            }
+        }
+        (due, moving)
     }
 }
 

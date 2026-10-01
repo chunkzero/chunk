@@ -13,8 +13,10 @@ pub(super) struct Claim {
     pub demand: SessionDemand,
     /// The arrived claim a move leaves; `None` for a login.
     pub source: Option<ClaimIdentity>,
-    /// The deployment whose routing chose a login's demand. Empty places it with the current one.
+    /// The deployment whose hooks admitted the claim. Empty places it with the current one.
     pub deployment: String,
+    /// Places a login in a new session even when its player may return to the one they left.
+    pub decline_reconnect: bool,
 }
 
 /// A claim as this gateway's claim view names it: its operation at the generation that delivered it.

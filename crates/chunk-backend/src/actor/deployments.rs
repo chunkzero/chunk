@@ -20,7 +20,7 @@ impl Actor {
     /// Installs `deployment`, unless it is resident and ready. Returns whether it started.
     pub(super) fn start_install(&mut self, deployment: &Arc<Deployment>) -> Result<bool> {
         let id = DeploymentId::new(&deployment.id)?;
-        if self.releasing.as_ref().is_some_and(|(retiring, _)| retiring == &id) {
+        if self.retired.contains(&id) || self.releasing.as_ref().is_some_and(|(retiring, _)| retiring == &id) {
             return Err(Error::Busy);
         }
         let resident = match self.versions.get(&id) {
@@ -68,7 +68,9 @@ impl Actor {
                 self.view = Arc::new(View::new(snapshot));
                 self.work.pending = pending;
                 self.work.failed.clear();
-                self.versions.insert(id.clone(), Some(deployment));
+                if self.versions.insert(id.clone(), Some(deployment)).is_none() {
+                    self.installed.push(id.clone());
+                }
                 if ready {
                     self.unready.remove(&id);
                 } else {
@@ -95,6 +97,15 @@ impl Actor {
                 reply.finish(Err(error));
             }
         }
+    }
+
+    /// Refuses new work for `id` and closes its subscriptions, so only work already running keeps it resident.
+    pub(super) fn fence(&mut self, id: &DeploymentId, reply: Request<()>) {
+        if self.versions.contains_key(id) {
+            self.retired.insert(id.clone());
+            self.watches.retire(id, &Error::Retired);
+        }
+        reply.finish(Ok(()));
     }
 
     pub(super) fn start_release(&mut self, id: DeploymentId, reply: Request<bool>) {
@@ -137,6 +148,8 @@ impl Actor {
                 self.unready.remove(&id);
                 self.work.finish(|waiting, _| (waiting == &id).then_some(Err(Error::Unknown)));
                 self.versions.remove(&id);
+                self.installed.retain(|installed| installed != &id);
+                self.retired.remove(&id);
                 self.sources.remove(&id);
                 self.readers.release(&id);
                 reply.finish(Ok(self.js.release(&id)));

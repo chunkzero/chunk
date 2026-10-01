@@ -215,6 +215,10 @@ pub(crate) enum Command {
         id: DeploymentId,
         reply: Request<bool>,
     },
+    Fence {
+        id: DeploymentId,
+        reply: Request<()>,
+    },
     CheckDeployment {
         id: DeploymentId,
         reply: Request<()>,
@@ -260,6 +264,7 @@ impl Command {
             #[cfg(test)]
             Self::Register { reply, .. } => reply.finish(Err(error)),
             Self::Release { reply, .. } => reply.finish(Err(error)),
+            Self::Fence { reply, .. } => reply.finish(Err(error)),
             Self::Deployments { reply } => reply.finish(Err(error)),
             Self::Query { reply, .. } | Self::Mutate { reply, .. } => reply.finish(Err(error)),
             Self::Subscribe { reply, .. } => reply.finish(Err(error)),
@@ -647,7 +652,29 @@ impl Backend {
         self.submit(|reply| Command::Release { id, reply }).await
     }
 
-    /// The deployments resident beside each other, including one being released.
+    /// Retires `id`: refuses its new calls, reads and subscriptions with [`Error::Retired`], closes its subscriptions,
+    /// cancels its jobs, waits for its running mutations and actions, then releases its version. Returns whether it was
+    /// resident.
+    /// # Errors
+    /// Reports an unavailable service or a failure to release.
+    pub async fn retire(&self, id: DeploymentId) -> Result<bool> {
+        self.submit(|reply| Command::Fence { id: id.clone(), reply }).await?;
+        loop {
+            match self.release(id.clone()).await {
+                Err(Error::Busy) => {
+                    // Work admitted before the fence may have scheduled more jobs.
+                    match self.cancel_deployment_jobs(id.clone()).await {
+                        Ok(()) | Err(Error::Busy) => {}
+                        Err(error) => return Err(error),
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// The deployments resident beside each other, oldest install first, including one being released.
     /// # Errors
     /// Reports an unavailable service.
     pub async fn deployments(&self) -> Result<Vec<DeploymentId>> {

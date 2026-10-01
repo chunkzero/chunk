@@ -1,42 +1,32 @@
 //! Retiring what the environment no longer serves, derived each time from the backend's and control's durable state so
-//! that a restart at any point converges.
+//! that a restart at any point converges. Control starts a replaced deployment's drain at its activation.
 
-use super::{Deployments, Managed, lock, release};
+use super::{Managed, activation, activation::Stopping, lock};
 use chunk_control::{Control, DrainPolicy};
 use chunk_management::v1;
-use std::{convert::Infallible, time::Duration};
+use std::{collections::BTreeSet, convert::Infallible, io, time::Duration};
 
-/// How the deployments the desired one replaces retire.
-#[derive(Default)]
-pub(super) struct Retiring {
-    drain: DrainPolicy,
-    /// Stop them at once, once the desired deployment is current.
+/// How replaced deployments drain, from `desired`'s settings; unset, they stop at once.
+pub(super) fn drain_policy(desired: &v1::AttachResponse) -> DrainPolicy {
+    let settings = desired.drain.unwrap_or_default();
+    let seconds = |seconds: u32| Some(Duration::from_secs(seconds.into()));
+    DrainPolicy { max_age: seconds(settings.max_age_seconds), deadline: seconds(settings.deadline_seconds) }
+}
+
+/// The deployments that stop at once once `activated` is current: those that already did and, when `stop_previous`,
+/// every other resident one.
+pub(super) fn stopping_after(
+    stopping: &BTreeSet<String>,
+    resident: &[chunk_js::DeploymentId],
+    activated: &str,
     stop_previous: bool,
-}
-
-impl From<&v1::AttachResponse> for Retiring {
-    /// Without drain settings, replaced deployments stop at once.
-    fn from(desired: &v1::AttachResponse) -> Self {
-        let settings = desired.drain.unwrap_or_default();
-        let seconds = |seconds: u32| Some(Duration::from_secs(seconds.into()));
-        let drain =
-            DrainPolicy { max_age: seconds(settings.max_age_seconds), deadline: seconds(settings.deadline_seconds) };
-        Self { drain, stop_previous: desired.stop_previous }
+) -> BTreeSet<String> {
+    let mut stopping = stopping.clone();
+    if stop_previous {
+        stopping.extend(resident.iter().map(|id| id.as_str().to_owned()));
     }
-}
-
-impl Deployments {
-    /// Records that a deployment replaced `predecessor`, which it stops at once when `stop_previous`.
-    pub(super) fn replaced(&mut self, predecessor: Option<&str>, stop_previous: bool) {
-        if let (Some(predecessor), true) = (predecessor, stop_previous) {
-            self.stop_replaced.insert(predecessor.to_owned());
-        }
-    }
-
-    /// Whether `deployment`, which control's `current` release no longer is, stops at once instead of draining.
-    fn stops_at_once(&self, deployment: &str, current: Option<&str>) -> bool {
-        self.stop_replaced.contains(deployment) || (self.retiring.stop_previous && current == self.desired.as_deref())
-    }
+    stopping.remove(activated);
+    stopping
 }
 
 impl Managed<'_> {
@@ -50,73 +40,106 @@ impl Managed<'_> {
         }
     }
 
-    /// Drains every deployment the backend holds that is neither control's current one nor kept for management, or stops
-    /// it at once when the desired deployment asked so, then releases its backend version once its JVMs have all exited.
-    /// A deployment loading while the backend holds as many as it can retires the longest-draining one to make room.
+    /// Records `stopping` as of control's `current` deployment, durably.
+    pub(super) fn record_stopping(&self, current: Option<&str>, stopping: &BTreeSet<String>) -> io::Result<()> {
+        match current {
+            Some(current) => activation::write(
+                &self.stop_record,
+                &Stopping { current: current.to_owned(), deployments: stopping.clone() },
+            ),
+            None => activation::clear(&self.stop_record),
+        }
+    }
+
+    /// Retires every deployment the backend holds that is neither control's current one nor kept for management and
+    /// that is due or was asked to stop, then releases the backend version of each whose JVMs have all exited. A
+    /// deployment loading while the backend holds as many as it can retires the oldest one to make room.
     async fn retire(&self) {
         let (Ok(control), Some(backend)) = (self.core.control(), self.core.backend()) else { return };
         let resident = match backend.deployments().await {
             Ok(resident) => resident,
             Err(error) => return tracing::warn!(%error, "resident deployments unknown"),
         };
-        let resident_names: Vec<_> = resident.iter().map(|id| id.as_str().to_owned()).collect();
-        let loading = {
-            let mut deployments = lock(&self.deployments);
-            deployments.stop_replaced.retain(|name| resident_names.contains(name));
-            deployments.loading.clone()
-        };
-        if loading.is_some_and(|loading| !resident_names.contains(&loading))
-            && resident.len() >= chunk_backend::MAX_DEPLOYMENTS
-        {
-            self.make_room(&control, &backend, &resident_names).await;
-        }
-        for id in resident {
-            let deployment = id.as_str();
-            // Checked and retired without an await in between, so management cannot ask for it meanwhile.
-            let stopped = {
-                let deployments = lock(&self.deployments);
-                if deployments.kept(deployment) {
-                    continue;
-                }
-                match control.current_release() {
-                    Ok(current) if current.as_deref() == Some(deployment) => continue,
-                    Ok(current) if deployments.stops_at_once(deployment, current.as_deref()) => {
-                        control.retire_release(deployment)
-                    }
-                    Ok(_) => control.drain_release(deployment, deployments.retiring.drain),
-                    Err(error) => Err(error),
-                }
-            };
-            match stopped {
-                Ok(true) => match backend.release(id.clone()).await {
-                    Ok(_) | Err(chunk_backend::Error::Busy) => {}
-                    Err(error) => tracing::warn!(%error, deployment, "backend version not released"),
-                },
-                Ok(false) => {}
-                Err(error) => tracing::warn!(%error, deployment, "release not yet retired"),
+        let stopped = self.retire_resident(&control, &resident);
+        for id in &stopped {
+            match backend.release(id.clone()).await {
+                Ok(_) | Err(chunk_backend::Error::Busy) => {}
+                Err(error) => tracing::warn!(%error, deployment = id.as_str(), "backend version not released"),
             }
         }
+        self.make_room(&control, &backend, &resident).await;
     }
 
-    /// Stops the longest-draining resident deployment that management no longer asks for, unless one is stopping
-    /// already, and cancels the jobs that would keep it resident.
-    async fn make_room(&self, control: &Control, backend: &chunk_backend::Backend, resident: &[String]) {
-        let candidates: Vec<_> = {
+    /// Retires the resident deployments that are due or asked to stop, and returns those whose JVMs have all exited.
+    /// Checked and retired without an await in between, so management cannot ask for one meanwhile.
+    fn retire_resident(&self, control: &Control, resident: &[chunk_js::DeploymentId]) -> Vec<chunk_js::DeploymentId> {
+        let mut deployments = lock(&self.deployments);
+        let names: BTreeSet<_> = resident.iter().map(|id| id.as_str().to_owned()).collect();
+        let current = match control.current_release() {
+            Ok(current) => current,
+            Err(error) => {
+                tracing::warn!(%error, "current release unknown");
+                return Vec::new();
+            }
+        };
+        if deployments.stopping.iter().any(|name| !names.contains(name)) {
+            deployments.stopping.retain(|name| names.contains(name));
+            if let Err(error) = self.record_stopping(current.as_deref(), &deployments.stopping) {
+                tracing::warn!(%error, "deployments to stop not recorded");
+            }
+        }
+        let due = control.due_releases().unwrap_or_default();
+        let mut stopped = Vec::new();
+        for id in resident {
+            let name = id.as_str();
+            if deployments.kept(name) || current.as_deref() == Some(name) {
+                continue;
+            }
+            let outcome = if deployments.stopping.contains(name) || due.iter().any(|due| due == name) {
+                control.retire_release(name)
+            } else {
+                control.release_stopped(name)
+            };
+            match outcome {
+                Ok(true) => stopped.push(id.clone()),
+                Ok(false) => {}
+                Err(error) => tracing::warn!(%error, deployment = name, "release not yet retired"),
+            }
+        }
+        stopped
+    }
+
+    /// While a deployment loads and the backend holds as many as it can, retires the oldest resident deployment that
+    /// management no longer asks for, and fences it in the backend once its JVMs have exited, wherever its jobs and
+    /// subscriptions stand.
+    async fn make_room(
+        &self,
+        control: &Control,
+        backend: &chunk_backend::Backend,
+        resident: &[chunk_js::DeploymentId],
+    ) {
+        if resident.len() < chunk_backend::MAX_DEPLOYMENTS {
+            return;
+        }
+        let oldest = {
             let deployments = lock(&self.deployments);
-            resident.iter().filter(|name| !deployments.kept(name)).cloned().collect()
+            let Some(loading) = deployments.loading.as_deref() else { return };
+            if resident.iter().any(|id| id.as_str() == loading) {
+                return;
+            }
+            let current = control.current_release().ok().flatten();
+            let candidate =
+                resident.iter().find(|id| !deployments.kept(id.as_str()) && current.as_deref() != Some(id.as_str()));
+            let Some(candidate) = candidate else { return };
+            match control.retire_release(candidate.as_str()) {
+                Ok(true) => candidate.clone(),
+                Ok(false) => return,
+                Err(error) => return tracing::warn!(%error, "no deployment retired to make room"),
+            }
         };
-        let stopping = match control.retire_longest_draining(&candidates) {
-            Ok(Some(stopping)) => stopping,
-            Ok(None) => return,
-            Err(error) => return tracing::warn!(%error, "no draining deployment stopped to make room"),
-        };
-        tracing::debug!(deployment = stopping, "longest-draining deployment stopping to make room");
-        let cancelled = match chunk_js::DeploymentId::new(&stopping) {
-            Ok(id) => backend.cancel_deployment_jobs(id).await.map_err(|error| error.to_string()),
-            Err(error) => Err(error.to_string()),
-        };
-        if let Err(error) = cancelled {
-            tracing::debug!(%error, deployment = stopping, "jobs of the deployment stopping for room remain");
+        tracing::debug!(deployment = oldest.as_str(), "oldest deployment retiring to make room");
+        if let Err(error) = backend.retire(oldest.clone()).await {
+            tracing::warn!(%error, deployment = oldest.as_str(), "backend version not retired");
         }
     }
 
@@ -129,8 +152,8 @@ impl Managed<'_> {
             Err(error) => return tracing::warn!(%error, "releases in use unknown"),
         };
         // Set aside without an await in between, so no loaded release activates and drops its claim meanwhile.
-        let unused = release::set_aside(&self.releases, used);
-        if let Err(error) = release::remove(unused).await {
+        let unused = super::release::set_aside(&self.releases, used);
+        if let Err(error) = super::release::remove(unused).await {
             tracing::warn!(%error, "unused releases not removed");
         }
     }
@@ -140,21 +163,21 @@ impl Managed<'_> {
 mod tests {
     use super::*;
 
-    fn desired(deployment: &str, stop_previous: bool) -> v1::AttachResponse {
-        v1::AttachResponse { deployment_id: deployment.into(), stop_previous, ..Default::default() }
+    fn resident(names: &[&str]) -> Vec<chunk_js::DeploymentId> {
+        names.iter().map(|name| chunk_js::DeploymentId::new(*name).unwrap()).collect()
     }
 
     #[test]
-    fn a_later_deployment_does_not_lose_the_stop_its_predecessor_came_with() {
-        let mut deployments = Deployments::default();
-        let (b, c) = (desired("b", true), desired("c", false));
-        deployments.desired = Some(b.deployment_id.clone());
-        deployments.retiring = Retiring::from(&b);
-        deployments.replaced(Some("a"), b.stop_previous);
-        // The next deployment arrives before the reclaim tick.
-        deployments.desired = Some(c.deployment_id.clone());
-        deployments.retiring = Retiring::from(&c);
-        assert!(deployments.stops_at_once("a", Some("b")));
-        assert!(!deployments.stops_at_once("b", Some("b")));
+    fn a_stop_previous_activation_keeps_stopping_every_predecessor_as_later_deployments_activate() {
+        let none = BTreeSet::new();
+        // A drains, B is current, C replaces it asking to stop what it replaces, and ordinary D follows.
+        let after_b = stopping_after(&none, &resident(&["a", "b"]), "b", false);
+        assert!(after_b.is_empty());
+        let after_c = stopping_after(&after_b, &resident(&["a", "b", "c"]), "c", true);
+        assert_eq!(after_c, BTreeSet::from(["a".to_owned(), "b".to_owned()]));
+        let after_d = stopping_after(&after_c, &resident(&["a", "b", "c", "d"]), "d", false);
+        assert_eq!(after_d, after_c);
+        // Management rolls back to a deployment that was to stop, which becomes current again.
+        assert!(!stopping_after(&after_d, &resident(&["b", "c", "d"]), "b", false).contains("b"));
     }
 }

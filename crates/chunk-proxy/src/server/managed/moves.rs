@@ -50,7 +50,12 @@ pub(super) async fn next_move(
         };
         let mut guard = ClaimGuard { platform, claim, armed: true, failure: None };
         match prepare(source, &guard, protocol).await {
-            Ok(assignment) => return Ok((guard, assignment)),
+            Ok(Some(assignment)) => return Ok((guard, assignment)),
+            // The deployment that approved the move is no longer current, so a newer one approves it again.
+            Ok(None) => {
+                guard.armed = false;
+                sleep(RETRY_INTERVAL).await;
+            }
             Err(error) => {
                 let reason = failure_reason(&error);
                 let reason = if reason.is_empty() { "move preparation failed".into() } else { reason };
@@ -62,7 +67,8 @@ pub(super) async fn next_move(
     }
 }
 
-async fn prepare(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Assignment> {
+/// Prepares `destination` under its deployment's approval, or returns `None` when core no longer places moves there.
+async fn prepare(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Option<Assignment>> {
     let deadline = Instant::now() + WAIT_TIMEOUT;
     let mut last_error = None;
     loop {
@@ -100,17 +106,17 @@ fn preparation_timeout(last_error: Option<&io::Error>) -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, reason)
 }
 
-async fn attempt(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Assignment> {
+async fn attempt(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Option<Assignment>> {
     let platform = &destination.platform;
     check_move(platform, &destination.claim).await?;
-    platform.approve_move(&source.claim, &destination.claim).await?;
+    platform.approve_move(&source.platform, &source.claim, &destination.claim).await?;
     check_move(platform, &destination.claim).await?;
-    let assignment = claim(destination).await?.ok_or_else(|| invalid_data("core refused the move"))?;
+    let Some(assignment) = claim(destination).await? else { return Ok(None) };
     if assignment.protocol != protocol {
         return Err(invalid_data("destination protocol differs from client"));
     }
     check_move(platform, &destination.claim).await?;
-    Ok(assignment)
+    Ok(Some(assignment))
 }
 
 /// Whether `error` may pass on a retry under the same operation ID.

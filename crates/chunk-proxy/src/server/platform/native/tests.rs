@@ -172,11 +172,11 @@ async fn real_native_dispatch_orders_admission_rechecks_moves_and_pings_without_
         },
         ..claim("move")
     };
-    fixture.platform.approve_move(&source, &destination).await.unwrap();
+    fixture.platform.approve_move(&fixture.platform, &source, &destination).await.unwrap();
     assert_eq!(fixture.trace().await, "root,route,parent,lobby,root,parent,arena,before,");
     fixture.hooks.backend.mutate("ban-operation".into(), Fixture::call("ban")).await.unwrap();
     assert_eq!(
-        fixture.platform.approve_move(&source, &destination).await.unwrap_err().kind(),
+        fixture.platform.approve_move(&fixture.platform, &source, &destination).await.unwrap_err().kind(),
         io::ErrorKind::PermissionDenied
     );
     assert_eq!(fixture.trace().await, "root,route,parent,lobby,root,parent,arena,before,root,");
@@ -213,10 +213,10 @@ async fn a_platform_bound_to_another_deployment_runs_its_admission_rules() {
         },
         ..claim("move")
     };
-    fixture.platform.approve_move(&source, &destination).await.unwrap();
+    fixture.platform.approve_move(&fixture.platform, &source, &destination).await.unwrap();
     let replacement = fixture.platform.bind("replacement");
     assert_eq!(
-        replacement.approve_move(&source, &destination).await.unwrap_err().kind(),
+        replacement.approve_move(&fixture.platform, &source, &destination).await.unwrap_err().kind(),
         io::ErrorKind::PermissionDenied
     );
     fixture.close().await;

@@ -49,7 +49,7 @@ async fn a_draining_release_retires_once_its_sessions_have_no_players() {
     let player = uuid::Uuid::new_v4().to_string();
     let first = arrived(&fixture, &control, "first", &player, "").await;
     let evacuation = crate::moves::evacuation("first", &control.state().unwrap().claims["first"]).unwrap();
-    control.activate_release(next(&fixture, "next")).unwrap();
+    control.activate_release(next(&fixture, "next"), crate::DrainPolicy::default()).unwrap();
     assert!(!control.drain_release("build", DrainPolicy::default()).unwrap());
     control.progress_releases().unwrap();
     assert!(!control.state().unwrap().releases["build"].retired);
@@ -71,7 +71,7 @@ async fn a_draining_release_stops_at_its_deadline_with_players_remaining() {
     let fixture = Fixture::new();
     let control = fixture.control().await;
     arrived(&fixture, &control, "first", &uuid::Uuid::new_v4().to_string(), "").await;
-    control.activate_release(next(&fixture, "next")).unwrap();
+    control.activate_release(next(&fixture, "next"), crate::DrainPolicy::default()).unwrap();
     let policy = DrainPolicy { max_age: None, deadline: Some(Duration::ZERO) };
     assert!(!control.drain_release("build", policy).unwrap());
     control.progress_releases().unwrap();
@@ -85,7 +85,7 @@ async fn a_draining_release_stops_at_its_deadline_with_players_remaining() {
 async fn shortened_limits_count_from_when_the_release_started_draining() {
     let fixture = Fixture::new();
     let control = fixture.control().await;
-    control.activate_release(next(&fixture, "next")).unwrap();
+    control.activate_release(next(&fixture, "next"), crate::DrainPolicy::default()).unwrap();
     let hour = Duration::from_secs(3600);
     control.drain_release("build", DrainPolicy { max_age: Some(3 * hour), deadline: Some(4 * hour) }).unwrap();
     let since = crate::now_ms() - 2 * 3_600_000;
@@ -114,7 +114,7 @@ async fn a_release_deadline_passes_while_withdrawals_are_stuck() {
             Ok(())
         })
         .unwrap();
-    control.activate_release(next(&fixture, "next")).unwrap();
+    control.activate_release(next(&fixture, "next"), crate::DrainPolicy::default()).unwrap();
     control.drain_release("build", DrainPolicy { max_age: None, deadline: Some(Duration::ZERO) }).unwrap();
     // Reconciliation's withdrawal of the expired reservation waits on this lock.
     let lock = control.operation("stuck").unwrap();
@@ -145,8 +145,7 @@ async fn a_player_reconnects_to_the_session_they_left_on_a_draining_release() {
     let control = fixture.control().await;
     let player = uuid::Uuid::new_v4().to_string();
     let first = arrived(&fixture, &control, "first", &player, "").await;
-    control.activate_release(next(&fixture, "next")).unwrap();
-    control.drain_release("build", DrainPolicy::default()).unwrap();
+    control.activate_release(next(&fixture, "next"), crate::DrainPolicy::default()).unwrap();
     let left = control.state().unwrap().claims["first"].session.clone();
     disconnect(&control, first).await;
     // A failed reconnect attempt, which never activated, is not the claim the player left.
@@ -174,19 +173,21 @@ async fn a_player_reconnects_to_the_session_they_left_on_a_draining_release() {
 }
 
 #[tokio::test]
-async fn the_longest_draining_release_retires_to_make_room() {
+async fn activation_starts_every_other_drain_and_a_rollback_ends_it() {
     let fixture = Fixture::new();
     let control = fixture.control().await;
-    for name in ["second", "third"] {
-        control.activate_release(next(&fixture, name)).unwrap();
-    }
-    for name in ["build", "second"] {
-        control.drain_release(name, DrainPolicy::default()).unwrap();
-    }
-    let draining = ["second".to_owned(), "build".to_owned(), "third".to_owned()];
-    assert_eq!(control.retire_longest_draining(&draining).unwrap().as_deref(), Some("build"));
-    // Nothing more retires while one is stopping for room.
-    assert_eq!(control.retire_longest_draining(&draining).unwrap().as_deref(), Some("build"));
-    assert!(!control.state().unwrap().releases["second"].retired);
+    let policy = DrainPolicy { max_age: Some(Duration::from_secs(60)), deadline: Some(Duration::from_secs(120)) };
+    control.activate_release(next(&fixture, "second"), policy).unwrap();
+    control.activate_release(next(&fixture, "third"), DrainPolicy::default()).unwrap();
+    let state = control.state().unwrap();
+    let drain = |name: &str| state.releases[name].drain.clone();
+    assert!(drain("third").is_none());
+    let (build, second) = (drain("build").unwrap(), drain("second").unwrap());
+    // The first drain keeps its limits, and the release drained by the second activation has none.
+    assert_eq!(build.stops_at, Some(build.since + 120_000));
+    assert_eq!((second.stops_at, second.reconnects_until), (None, None));
+    control.activate_release(next(&fixture, "second"), DrainPolicy::default()).unwrap();
+    let state = control.state().unwrap();
+    assert!(state.releases["second"].drain.is_none() && state.releases["third"].drain.is_some());
     fixture.close().await;
 }

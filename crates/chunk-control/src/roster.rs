@@ -93,7 +93,7 @@ impl Control {
                     Ok(destination)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let (name, release) = state.placing(destinations.first().ok_or(Error::Invalid("invalid roster"))?)?;
+            let (name, release) = state.placing(destinations.first().ok_or(Error::Invalid("invalid roster"))?, "")?;
             let session = select_room(state, &name, &release, &request.demand, &unavailable, destinations.len())?;
             for destination in &destinations {
                 let owner = owner(state, destination)?;

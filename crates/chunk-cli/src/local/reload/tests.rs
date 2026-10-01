@@ -67,3 +67,21 @@ fn top_level_directories_created_after_startup_are_watched() {
     std::fs::write(assets.join("example.txt"), "").unwrap();
     assert!(std::iter::from_fn(|| next(&mut changes)).any(|path| path == assets.join("example.txt")));
 }
+
+#[test]
+fn a_drain_asks_control_for_the_same_deadline_however_long_it_has_run() {
+    let mut drain = Drain::until(Some(Duration::from_secs(30)));
+    drain.since = Instant::now().checked_sub(Duration::from_secs(20)).unwrap();
+    assert_eq!(drain.policy().deadline, Some(Duration::from_secs(30)));
+}
+
+#[test]
+fn superseding_a_pinned_release_counts_the_deadline_from_its_drain_start() {
+    let mut pinned = Drain::until(None);
+    pinned.since = Instant::now().checked_sub(Duration::from_secs(3600)).unwrap();
+    pinned.drain_within(Duration::from_secs(30));
+    let deadline = pinned.policy().deadline.unwrap();
+    assert!(deadline >= Duration::from_secs(3630) && deadline < Duration::from_secs(3640));
+    pinned.drain_within(Duration::from_secs(300));
+    assert_eq!(pinned.policy().deadline, Some(deadline));
+}

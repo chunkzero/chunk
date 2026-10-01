@@ -507,3 +507,5 @@ async fn a_login_routed_again_keeps_its_operation_until_the_connection_deadline_
     assert_eq!(cancels, std::slice::from_ref(&reserved.0));
     fixture.close().await;
 }
+
+mod placement;

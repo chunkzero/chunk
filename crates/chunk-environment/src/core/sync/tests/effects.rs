@@ -177,7 +177,7 @@ async fn a_gateway_without_the_players_claim_runs_a_hook_as_itself() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chunk_manifest_returns_the_current_releases_domain_manifest() {
     let mut fixture = Fixture::start().await;
-    fixture.control.activate_release(runtime::release()).unwrap();
+    fixture.control.activate_release(runtime::release(), chunk_control::DrainPolicy::default()).unwrap();
     let gateway = fixture.gateway.clone();
     let response = fixture.platform_call(&gateway, "chunk:manifest", "").await;
     let Some(Outcome::Result(result)) = response.outcome else { panic!("expected a result, got {response:?}") };

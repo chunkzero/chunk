@@ -178,7 +178,7 @@ pub(crate) fn queue(state: &mut State, request: MoveRequest) -> Result<ClaimRequ
     destination.operation_id = request.operation_id;
     destination.demand = Some(request.demand);
     destination.source = Some(claim.identity(source));
-    let (name, release) = state.placing(&destination)?;
+    let (name, release) = state.placing(&destination, "")?;
     let demand = destination.demand.as_ref().ok_or(Error::Invalid("missing destination"))?;
     crate::placement::admit_move(state, &name, &release, demand)?;
     let sequence = Generation::PENDING.wire();

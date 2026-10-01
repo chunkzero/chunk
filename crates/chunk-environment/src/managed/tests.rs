@@ -1,9 +1,9 @@
-use super::release;
+use super::{activation, release};
 use crate::{CoreConfig, GatewayConfig, ManagementConfig, core::Archives};
 use bytes::Bytes;
 use chunk_contract::ControlConnection;
 use chunk_management::v1::{
-    AttachRequest, AttachResponse, DeploymentProgress, DeploymentState, ObjectStore, ReleaseArtifact,
+    AttachRequest, AttachResponse, DeploymentProgress, DeploymentState, DrainSettings, ObjectStore, ReleaseArtifact,
     ReportStatusRequest,
 };
 use chunk_proto::sync::v1::{CallRequest, call_response::Outcome, core_client::CoreClient, error::Code};
@@ -66,6 +66,8 @@ struct Management {
 struct Records {
     revision: u64,
     deployments: Vec<(String, ReleaseArtifact, DeploymentState)>,
+    /// The deployments whose desired state asks to stop the ones they replace.
+    stopping: BTreeSet<String>,
 }
 
 impl Management {
@@ -133,6 +135,9 @@ impl Management {
             deployment_id: served.map(|(id, _, _)| id.clone()).unwrap_or_default(),
             release: served.map(|(_, release, _)| release.clone()),
             log_store: self.log_store.lock().unwrap().clone(),
+            stop_previous: served.is_some_and(|(id, _, _)| records.stopping.contains(id)),
+            // The settings management applies unless the environment sets its own.
+            drain: Some(DrainSettings { max_age_seconds: 3 * 3600, deadline_seconds: 4 * 3600 }),
             ..Default::default()
         });
     }
@@ -402,6 +407,12 @@ impl Harness {
         self.management.deploy(deployment, release);
     }
 
+    /// Like [`Harness::deploy`], with a desired state that stops the deployments it replaces.
+    fn deploy_stopping(&self, deployment: &str, release: ReleaseArtifact) {
+        self.management.records.lock().unwrap().stopping.insert(deployment.into());
+        self.management.deploy(deployment, release);
+    }
+
     fn management_config(&self) -> ManagementConfig {
         ManagementConfig { url: self.url.clone(), token: "secret".into(), suspend_after: None }
     }
@@ -555,6 +566,54 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
     assert!(harness.serves("dep_b").await);
     assert!(!harness.state().join("releases/rejected").exists() && !harness.archive("rejected").exists());
     assert!(!running.is_finished());
+
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_previous_activation_stops_every_resident_deployment_even_across_a_restart() {
+    let mut harness = Harness::new().await;
+    harness.deploy("dep_a", harness.valid());
+    let (stop, running) = harness.start();
+    harness.expect(1, "dep_a", DeploymentState::InProgress).await;
+    harness.expect(1, "dep_a", DeploymentState::Active).await;
+    harness.deploy("dep_b", harness.valid());
+    harness.expect(2, "dep_b", DeploymentState::InProgress).await;
+    harness.expect(2, "dep_b", DeploymentState::Active).await;
+
+    // dep_c stops dep_a and dep_b, but management doesn't accept it, so dep_b stays as its fallback. Then dep_d
+    // arrives before dep_b stops.
+    *harness.management.refused.lock().unwrap() = Some("dep_c".into());
+    harness.deploy_stopping("dep_c", harness.valid());
+    harness.expect(3, "dep_c", DeploymentState::InProgress).await;
+    harness.refused().await;
+    harness.deploy("dep_d", artifact(&harness.management, &harness.url, "rejected", invalid()));
+    harness.released("dep_a").await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(harness.serves("dep_b").await);
+    let record = harness.state().join("stopping.json");
+    let stopping = || -> BTreeSet<String> {
+        let record = fs::read(&record).unwrap();
+        serde_json::from_slice::<activation::Stopping>(&record).unwrap().deployments
+    };
+    assert_eq!(stopping(), BTreeSet::from(["dep_b".to_owned()]));
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+
+    // Restarted, the core still stops dep_b once management accepts dep_c.
+    let (stop, running) = harness.start();
+    harness.refused().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(harness.serves("dep_b").await);
+    *harness.management.refused.lock().unwrap() = None;
+    harness.expect(4, "dep_c", DeploymentState::Active).await;
+    harness.expect(4, "dep_d", DeploymentState::InProgress).await;
+    harness.expect(4, "dep_d", DeploymentState::Failed).await;
+    harness.expect(5, "dep_c", DeploymentState::Active).await;
+    harness.released("dep_b").await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(stopping().is_empty());
 
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();

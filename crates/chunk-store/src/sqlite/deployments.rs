@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{Error, Result};
 
 pub(super) fn load(connection: &Connection) -> Result<Vec<Deployment>> {
-    let mut statement = connection.prepare("SELECT contract FROM _chunk_deployments ORDER BY id")?;
+    let mut statement = connection.prepare("SELECT contract FROM _chunk_deployments ORDER BY rowid")?;
     let contracts = statement.query_map([], |row| row.get::<_, String>(0))?;
     let mut deployments = Vec::new();
     for contract in contracts {
