@@ -70,7 +70,7 @@ pub fn migration_number(id: &str) -> Option<(&str, u32)> {
 
 /// # Errors
 /// Rejects invalid IDs, misordered or duplicate entries, finishes without an open expand, invalid snapshots and
-/// snapshots that differ from the previous one by more than the entry declares.
+/// snapshots that drop a table or differ from the previous one by more than the entry declares.
 pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str> {
     if migrations.len() > MAX_MIGRATIONS {
         return Err("too many migrations");
@@ -94,6 +94,9 @@ pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str>
             changes.added.iter().chain(&changes.removed).try_for_each(|field| crate::validate_name(field))?;
         }
         let before = previous.insert(namespace, &migration.schema).unwrap_or(&empty);
+        if before.keys().any(|table| !migration.schema.contains_key(table)) {
+            return Err("a migration's snapshot keeps every table of the previous one");
+        }
         match migration.kind {
             MigrationKind::Expand => {
                 if migration.finishes.is_some() || migration.tables.is_empty() {

@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::{project::Inventory, quote};
+use crate::{migrations::Journal, project::Inventory, quote};
 
 const SOURCES: &[(&str, &str)] = &[
     ("apps.ts", include_str!("../sdk/src/apps.ts")),
@@ -32,10 +32,11 @@ const SOURCES: &[(&str, &str)] = &[
 /// Reports a missing schema, invalid package configuration, or filesystem errors.
 pub fn generate_sdk(project: &Path) -> io::Result<()> {
     let project = project.canonicalize()?;
-    generate(&project, &crate::project::load(&project)?)
+    generate(&project, &crate::project::load(&project)?, &Journal::read(&project)?)
 }
 
-pub(crate) fn generate(project: &Path, inventory: &Inventory) -> io::Result<()> {
+/// Writes the SDK and generated declarations, typing migrations from `journal`.
+pub(crate) fn generate(project: &Path, inventory: &Inventory, journal: &Journal) -> io::Result<()> {
     if !project.join("server/schema/index.ts").is_file() {
         return Err(io::Error::other("missing explicitly composed server/schema/index.ts"));
     }
@@ -62,7 +63,7 @@ pub(crate) fn generate(project: &Path, inventory: &Inventory) -> io::Result<()> 
     write_changed(&project.join(".chunk/generated/env.ts"), env_types(&inventory.env).as_bytes())?;
     write_changed(
         &project.join(".chunk/generated/migrations.ts"),
-        crate::migrations::declarations(project)?.as_bytes(),
+        crate::migrations::declarations(journal).as_bytes(),
     )?;
     if original != package {
         let mut bytes = serde_json::to_vec_pretty(&package).map_err(io::Error::other)?;

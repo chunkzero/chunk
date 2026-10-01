@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use chunk_contract::{DatabaseSchema, MigrationTable};
 
 /// Tables whose change from `previous` to `current` needs a migration, with every added and removed field.
-/// New tables, dropped tables, new optional fields and index changes apply without one.
+/// New tables, new optional fields and index changes apply without one. A table missing from `current` is
+/// retained: snapshots keep its last shape, so reintroducing it differently is a change.
 pub(crate) fn changes(previous: &DatabaseSchema, current: &DatabaseSchema) -> BTreeMap<String, MigrationTable> {
     let mut changes = BTreeMap::new();
     for (name, table) in current {

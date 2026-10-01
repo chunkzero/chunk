@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -125,25 +125,98 @@ impl Journal {
         Ok(id)
     }
 
-    /// Appends an entry, writing its snapshot and, for an expand, its source. The entry isn't committed until
-    /// `save` writes the journal.
-    pub fn append(&mut self, mut entry: Entry, snapshot: DatabaseSchema, source: Option<&str>) -> io::Result<()> {
-        if let Some(source) = source {
-            write(&self.source_path(&entry.id), source.as_bytes())?;
-        }
+    /// Appends an entry in memory; `push` and the commands that stage several entries write it.
+    pub fn append(&mut self, mut entry: Entry, snapshot: DatabaseSchema, source: Option<&str>) {
         entry.prev = self.entries.last().map(|last| last.hash.clone()).unwrap_or_default();
         entry.hash = hash(&entry, &snapshot, source.unwrap_or_default());
-        write(&snapshot_path(&self.directory, &entry.id), &pretty(&snapshot)?)?;
         self.entries.push(entry);
         self.snapshots.push(snapshot);
         self.sources.push(source.unwrap_or_default().to_owned());
-        Ok(())
     }
 
-    /// Appends an entry and commits it.
+    /// Appends an entry, validating the resulting journal before writing its files and then the journal.
     pub fn push(&mut self, entry: Entry, snapshot: DatabaseSchema, source: Option<&str>) -> io::Result<()> {
-        self.append(entry, snapshot, source)?;
+        self.append(entry, snapshot, source);
+        self.verify()?;
+        let index = self.entries.len() - 1;
+        for path in self.paths(index) {
+            if path.exists() {
+                return Err(io::Error::other(format!("{} exists but the journal doesn't list it", path.display())));
+            }
+        }
+        self.write_entry(index)?;
         self.save()
+    }
+
+    /// Writes the files of entry `index`: its snapshot and, for an expand, its source.
+    pub fn write_entry(&self, index: usize) -> io::Result<()> {
+        let entry = &self.entries[index];
+        if entry.kind == MigrationKind::Expand {
+            write(&self.source_path(&entry.id), self.sources[index].as_bytes())?;
+        }
+        write(&snapshot_path(&self.directory, &entry.id), &pretty(&self.snapshots[index])?)
+    }
+
+    fn paths(&self, index: usize) -> Vec<PathBuf> {
+        let entry = &self.entries[index];
+        let mut paths = vec![snapshot_path(&self.directory, &entry.id)];
+        if entry.kind == MigrationKind::Expand {
+            paths.push(self.source_path(&entry.id));
+        }
+        paths
+    }
+
+    /// Fails on a `package.json` under the migrations directory and on migration sources and snapshots the journal
+    /// doesn't list. Files numbered at or below a leading baseline are leftovers of an interrupted squash; they are
+    /// deleted when `delete_leftovers` and reported otherwise.
+    pub fn require_listed(&self, delete_leftovers: bool) -> io::Result<()> {
+        reject_package_json(&self.directory)?;
+        let listed: BTreeSet<PathBuf> = (0..self.entries.len()).flat_map(|index| self.paths(index)).collect();
+        let floor = self
+            .entries
+            .first()
+            .filter(|entry| entry.kind == MigrationKind::Baseline)
+            .and_then(|entry| number(&entry.id).parse::<u64>().ok());
+        let (mut conflicts, mut leftovers) = (Vec::new(), Vec::new());
+        for (directory, snapshot) in [(self.directory.clone(), false), (self.directory.join("meta"), true)] {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
+                let path = entry?.path();
+                let file = path.file_name().and_then(|name| name.to_str()).and_then(|name| file_number(name, snapshot));
+                if let Some(file) = file.filter(|_| !listed.contains(&path)) {
+                    if floor.is_some_and(|floor| file <= floor) {
+                        leftovers.push(path);
+                    } else {
+                        conflicts.push(path);
+                    }
+                }
+            }
+        }
+        if delete_leftovers {
+            for path in &leftovers {
+                fs::remove_file(path)?;
+            }
+            leftovers.clear();
+        }
+        if !conflicts.is_empty() {
+            return Err(io::Error::other(format!(
+                "the journal doesn't list {}, likely from a merge of different branches. Delete the files of the \
+                 migration you don't keep, or add the migration to meta/journal.json",
+                names(&conflicts)
+            )));
+        }
+        if !leftovers.is_empty() {
+            return Err(io::Error::other(format!(
+                "{} are left from an interrupted `chunk migrate squash`. Run any `chunk migrate` command to delete \
+                 them, or delete them yourself",
+                names(&leftovers)
+            )));
+        }
+        Ok(())
     }
 
     /// Fails unless the journal on disk is the one this was read as.
@@ -247,6 +320,40 @@ impl Journal {
         }
         migrations
     }
+}
+
+fn names(paths: &[PathBuf]) -> String {
+    paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
+}
+
+/// The number of a `NNNN_name.ts` source, or of a `NNNN.snapshot.json` when `snapshot`.
+fn file_number(name: &str, snapshot: bool) -> Option<u64> {
+    let digits =
+        if snapshot { name.strip_suffix(".snapshot.json")? } else { name.strip_suffix(".ts")?.split_once('_')?.0 };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn reject_package_json(directory: &Path) -> io::Result<()> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            reject_package_json(&entry.path())?;
+        } else if entry.file_name() == "package.json" {
+            return Err(io::Error::other(format!(
+                "{} would change how migrations resolve imports; migrations may import only from #chunk",
+                entry.path().display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn number(id: &str) -> &str {

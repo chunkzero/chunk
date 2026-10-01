@@ -29,33 +29,28 @@ impl ReadHost for Declarations {
 /// Reports compiler diagnostics, unsupported imports, impure declarations or invalid contracts.
 pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
     let project = project.canonicalize()?;
-    let inventory = crate::project::load(&project)?;
-    crate::sdk::generate(&project, &inventory)?;
+    let journal = crate::migrations::verified(&project, false)?;
+    compile_journal(&project, output, &journal)
+}
+
+/// Compiles from `journal`, which was verified when it was read: migrations are type-checked and bundled from
+/// copies of its sources under `.chunk/migrations/`, never from `server/migrations/`.
+pub(crate) fn compile_journal(project: &Path, output: &Path, journal: &crate::migrations::Journal) -> io::Result<()> {
+    let inventory = crate::project::load(project)?;
+    crate::sdk::generate(project, &inventory, journal)?;
     fs::create_dir_all(output)?;
     let output = output.canonicalize()?;
     let staging = tempfile::Builder::new().prefix(".compile-").tempdir_in(&output)?;
-    let journal = crate::migrations::Journal::read(&project)?;
-    journal.verify()?;
-    let migrations: Vec<_> = journal
-        .entries
-        .iter()
-        .zip(&journal.sources)
-        .filter(|(entry, _)| entry.kind == MigrationKind::Expand)
-        .map(|(entry, source)| bundle::MigrationSource {
-            id: entry.id.clone(),
-            path: journal.source_path(&entry.id),
-            code: source.clone(),
-        })
-        .collect();
-    let files = sources::discover(&project, &inventory)?;
+    let migrations = pin_migrations(project, journal)?;
+    let files = sources::discover(project, &inventory)?;
     let paths: Vec<_> = files
         .iter()
         .map(|file| file.path.as_path())
         .chain(migrations.iter().map(|migration| migration.path.as_path()))
         .collect();
     typecheck::check(&paths, staging.path())?;
-    let (mut contract, backs) = bundle_and_extract(&project, staging.path(), &files, &migrations, &inventory)?;
-    crate::migrations::require_replayed(&journal, &contract.tables)?;
+    let (mut contract, backs) = bundle_and_extract(project, staging.path(), &files, &migrations, &inventory)?;
+    crate::migrations::require_replayed(journal, &contract.tables)?;
     contract.contracts.migrations = journal.contract(&backs);
     for migration in contract.contracts.migrations.iter().filter(|migration| migration.kind == MigrationKind::Expand) {
         if !backs.get(&migration.id).is_some_and(|tables| tables.keys().eq(migration.tables.keys())) {
@@ -95,10 +90,28 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn pin_migrations(project: &Path, journal: &crate::migrations::Journal) -> io::Result<Vec<bundle::MigrationSource>> {
+    let directory = project.join(".chunk/migrations");
+    match fs::remove_dir_all(&directory) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+        _ => {}
+    }
+    fs::create_dir_all(&directory)?;
+    let mut migrations = Vec::new();
+    for (entry, code) in journal.entries.iter().zip(&journal.sources) {
+        if entry.kind == MigrationKind::Expand {
+            let path = directory.join(format!("{}.ts", entry.id));
+            fs::write(&path, code)?;
+            migrations.push(bundle::MigrationSource { id: entry.id.clone(), path, code: code.clone() });
+        }
+    }
+    Ok(migrations)
+}
+
 /// Evaluates only `server/schema/`, without type-checking or migration checks, for diffing it.
 pub(crate) fn schema(project: &Path) -> io::Result<DatabaseSchema> {
     let inventory = crate::project::load(project)?;
-    crate::sdk::generate(project, &inventory)?;
+    crate::sdk::generate(project, &inventory, &crate::migrations::Journal::read(project)?)?;
     let staging = tempfile::Builder::new().prefix(".schema-").tempdir_in(project.join(".chunk"))?;
     let files = [sources::Source {
         path: project.join("server/schema/index.ts"),

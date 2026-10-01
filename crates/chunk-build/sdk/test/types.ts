@@ -449,6 +449,14 @@ declare module "../src/migrations.ts" {
         removed: { name: string };
       };
     };
+    "0003_title": {
+      fighters: {
+        old: { readonly _id: Id<"fighters">; name: string };
+        row: { readonly _id: Id<"fighters">; name: string; title: string };
+        added: { title: string };
+        removed: {};
+      };
+    };
   }
 }
 defineMigration("0002_display_name", {
@@ -471,3 +479,16 @@ defineMigration("0002_display_name", {
 });
 // @ts-expect-error migrations transform the tables their snapshots change
 defineMigration("0002_display_name", { players: { to: () => ({}) } });
+defineMigration("0002_display_name", {
+  fighters: {
+    // @ts-expect-error every member of a union return has only the new fields
+    to: (old): { displayName: string } | { displayName: string; extra: number } => ({ displayName: old.name }),
+  },
+});
+defineMigration("0003_title", {
+  fighters: {
+    to: () => ({ title: "" }),
+    // @ts-expect-error every member of a union return has only the removed fields
+    back: (): {} | { extra: number } => ({}),
+  },
+});

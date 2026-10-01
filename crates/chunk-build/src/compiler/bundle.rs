@@ -29,8 +29,9 @@ pub(super) struct MigrationSource {
 #[derive(Debug)]
 struct Boundary {
     entry: Option<String>,
-    /// Migration code by path. Migrations may import only `#chunk`.
+    /// Migration code by path. Migrations may import only `#chunk`, which resolves to `chunk`.
     migrations: BTreeMap<String, String>,
+    chunk: String,
     exports: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
 }
 impl Plugin for Boundary {
@@ -69,8 +70,10 @@ impl Plugin for Boundary {
             }
             if let Some(importer) = args.importer
                 && self.migrations.contains_key(importer)
-                && source != "#chunk"
             {
+                if source == "#chunk" {
+                    return Ok(Some(HookResolveIdOutput::from_id(self.chunk.as_str())));
+                }
                 anyhow::bail!("{importer} imports {source}; migrations may import only from #chunk");
             }
             let scheme = source
@@ -123,7 +126,12 @@ pub(super) async fn build(
     let discovered_exports = Arc::new(Mutex::new(BTreeMap::new()));
     let mut discovery = Bundler::with_plugins(
         options(root, entries.iter().map(|source| source.path.to_string_lossy().into_owned()).collect()),
-        vec![Arc::new(Boundary { entry: None, migrations: BTreeMap::new(), exports: discovered_exports.clone() })],
+        vec![Arc::new(Boundary {
+            entry: None,
+            migrations: BTreeMap::new(),
+            chunk: String::new(),
+            exports: discovered_exports.clone(),
+        })],
     )
     .map_err(error)?;
     let discovered = discovery.generate().await;
@@ -148,7 +156,9 @@ pub(super) async fn build(
     }));
     let migration_code =
         migrations.iter().map(|migration| (migration.path.to_string_lossy().into_owned(), migration.code.clone()));
-    let boundary = Boundary { entry: Some(source), migrations: migration_code.collect(), exports: Arc::default() };
+    let chunk = root.join(".chunk/generated/index.ts").to_string_lossy().into_owned();
+    let boundary =
+        Boundary { entry: Some(source), migrations: migration_code.collect(), chunk, exports: Arc::default() };
     let mut bundler = Bundler::with_plugins(config, vec![Arc::new(boundary)]).map_err(error)?;
     let result = bundler.generate().await;
     bundler.close().await.map_err(error)?;

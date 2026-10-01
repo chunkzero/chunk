@@ -12,7 +12,8 @@ interface TableTypes {
   added: object;
   removed: object;
 }
-type Exact<R, A> = R & { [K in Exclude<keyof R, keyof A>]: never };
+type KeysOfEach<R> = R extends unknown ? keyof R : never;
+type Exact<R, A> = R & { [K in Exclude<KeysOfEach<R>, keyof A>]: never };
 type Returned<F> = F extends (...args: never[]) => infer R ? R : never;
 type Transforms<S> = {
   [T in keyof S]: S[T] extends TableTypes

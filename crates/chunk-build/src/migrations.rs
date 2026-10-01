@@ -38,7 +38,8 @@ impl Pending {
 /// Reports an invalid journal or schema.
 pub fn pending(project: &Path) -> io::Result<Pending> {
     let project = project.canonicalize()?;
-    let journal = verified(&project)?;
+    let journal = Journal::read(&project)?;
+    journal.verify()?;
     let schema = crate::compiler::schema(&project)?;
     Ok(pending_from(project, journal, schema))
 }
@@ -57,6 +58,7 @@ pub fn create(pending: Pending, name: &str, renames: &Renames) -> io::Result<Str
     journal::require_name(name)?;
     let _lock = Lock::acquire(&project)?;
     journal.require_unchanged(&project)?;
+    journal.require_listed(true)?;
     let id = journal.next_id(name)?;
     for (table, fields) in renames {
         let change = changes.get(table).ok_or_else(|| io::Error::other(format!("{table} has no fields to rename")))?;
@@ -77,7 +79,11 @@ pub fn create(pending: Pending, name: &str, renames: &Renames) -> io::Result<Str
     };
     let source = (kind == MigrationKind::Expand).then(|| source::migration(&id, &schema, &changes, renames));
     let entry = Entry { id: id.clone(), kind, finishes: None, prev: String::new(), hash: String::new() };
-    journal.push(entry, schema, source.as_deref())?;
+    let mut snapshot = schema;
+    for (table, shape) in journal.schema() {
+        snapshot.entry(table).or_insert(shape);
+    }
+    journal.push(entry, snapshot, source.as_deref())?;
     Ok(id)
 }
 
@@ -86,7 +92,7 @@ pub fn create(pending: Pending, name: &str, renames: &Renames) -> io::Result<Str
 /// Rejects an invalid journal and a migration that isn't an unfinished expand.
 pub fn finish(project: &Path, number: &str) -> io::Result<String> {
     let _lock = Lock::acquire(project)?;
-    let mut journal = verified(project)?;
+    let mut journal = verified(project, true)?;
     let target = journal.entries[journal.find(number)?].clone();
     if target.kind != MigrationKind::Expand
         || journal.entries.iter().any(|entry| entry.finishes.as_ref() == Some(&target.id))
@@ -111,7 +117,7 @@ pub fn finish(project: &Path, number: &str) -> io::Result<String> {
 /// # Errors
 /// Describes the first conflict found.
 pub fn check(project: &Path) -> io::Result<()> {
-    verified(project).map(drop)
+    verified(project, false).map(drop)
 }
 
 /// Records the current hash of migration `number`, after it was edited before being deployed.
@@ -120,6 +126,7 @@ pub fn check(project: &Path) -> io::Result<()> {
 pub fn rehash(project: &Path, number: &str) -> io::Result<String> {
     let _lock = Lock::acquire(project)?;
     let mut journal = Journal::read(project)?;
+    journal.require_listed(true)?;
     let index = journal.find(number)?;
     let hash = journal.current_hash(index);
     if let Some(next) = journal.entries.get_mut(index + 1) {
@@ -136,7 +143,7 @@ pub fn rehash(project: &Path, number: &str) -> io::Result<String> {
 /// Rejects an invalid journal and history with nothing finished.
 pub fn squash(project: &Path) -> io::Result<String> {
     let _lock = Lock::acquire(project)?;
-    let mut journal = verified(project)?;
+    let mut journal = verified(project, true)?;
     let mut open = 0_usize;
     let mut end = None;
     for (index, entry) in journal.entries.iter().enumerate() {
@@ -166,7 +173,7 @@ pub fn squash(project: &Path) -> io::Result<String> {
         prev: String::new(),
         hash: String::new(),
     };
-    journal.append(entry, schema, None)?;
+    journal.append(entry, schema, None);
     for mut entry in rest {
         entry.prev = journal.entries.last().map(|last| last.hash.clone()).unwrap_or_default();
         journal.entries.push(entry);
@@ -174,6 +181,7 @@ pub fn squash(project: &Path) -> io::Result<String> {
     journal.snapshots.extend(rest_snapshots);
     journal.sources.extend(rest_sources);
     journal.verify()?;
+    journal.write_entry(0)?;
     journal.save()?;
     for entry in &squashed {
         if entry.kind == MigrationKind::Expand {
@@ -206,12 +214,15 @@ pub(crate) fn require_replayed(journal: &Journal, schema: &DatabaseSchema) -> io
     )))
 }
 
-pub(crate) fn declarations(project: &Path) -> io::Result<String> {
-    Ok(source::declarations(&Journal::read(project)?))
+pub(crate) fn declarations(journal: &Journal) -> String {
+    source::declarations(journal)
 }
 
-fn verified(project: &Path) -> io::Result<Journal> {
+/// Reads the journal and checks its files and hashes. `repair` deletes a squash's leftovers, which only commands
+/// holding the lock may do.
+pub(crate) fn verified(project: &Path, repair: bool) -> io::Result<Journal> {
     let journal = Journal::read(project)?;
+    journal.require_listed(repair)?;
     journal.verify()?;
     Ok(journal)
 }
