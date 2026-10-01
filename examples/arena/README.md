@@ -72,15 +72,15 @@ Both worlds are 100 by 100 blocks of medieval build, stored in [Polar](https://g
 `shared/` reads them with Polar's reader and loads them through
 [`PolarLoader`](shared/src/main/java/example/world/PolarLoader.java). That class is Polar 1.16.0's loader, adapted to
 chunk's Minestom, which runs a `ServerProcess` instead of a global server, and trimmed to loading. It is MIT licensed;
-see [`shared/POLAR-LICENSE`](shared/POLAR-LICENSE). Every session loads its own copy of its app's world, which it
-discards when it ends.
+see [`POLAR-LICENSE`](shared/src/main/resources/META-INF/POLAR-LICENSE), which both app JARs carry under `META-INF/`.
+Every session loads its own copy of its app's world, which it discards when it ends.
 
 ## Tests
 
-`examples/arena/gradlew test` runs [`MatchTest`](apps/arena/src/test/java/example/arena/MatchTest.java), which covers
-the capture rule, both ways to win, and the countdown. `just consumers` builds this project from a source-only scratch
-copy as the Java consumer fixture. It checks the release archive, the session registries and that no Kotlin classes
-reach the apps.
+`examples/arena/gradlew test`, part of `just test`, runs the arena's tests: the capture rule, both ways to win and the
+countdown, a returning player keeping their team and tallies, kill credit ending with a life, and retrying a move that
+never landed. `just consumers` builds this project from a source-only scratch copy as the Java consumer fixture. It
+checks the release archive, the session registries and that no Kotlin classes reach the apps.
 
 ## Local state
 

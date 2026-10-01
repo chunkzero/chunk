@@ -30,10 +30,13 @@ import java.util.concurrent.CompletionStage;
  */
 public final class ArenaSession extends Session implements SessionMethods.Arena.Koth.Status {
     private static final int SECONDS_BEFORE_LOBBY = 6;
+    private static final int MOVE_EXPIRY_SECONDS = 10;
 
     private final Match.Rules rules;
+    private final Roster roster = new Roster();
+    // The fighters of the players here now.
     private final Map<Player, Fighter> fighters = new LinkedHashMap<>();
-    private final Set<Player> leaving = new HashSet<>();
+    private final PendingMoves<Player> leaving = new PendingMoves<>(MOVE_EXPIRY_SECONDS);
     private final Hud hud = new Hud();
     private SessionScope scope;
     private Combat combat;
@@ -41,6 +44,7 @@ public final class ArenaSession extends Session implements SessionMethods.Arena.
     private int matchesPlayed;
     private CompletableFuture<Void> recorded;
     private int secondsSinceEnd;
+    private int clock;
 
     ArenaSession(Match.Rules rules) {
         this.rules = rules;
@@ -61,8 +65,7 @@ public final class ArenaSession extends Session implements SessionMethods.Arena.
 
     @Override
     public CompletionStage<Void> onJoin(Player player) {
-        var red = fighters.values().stream().filter(fighter -> fighter.team == Team.RED).count();
-        var fighter = new Fighter(red * 2 <= fighters.size() ? Team.RED : Team.BLUE);
+        var fighter = roster.join(player.getUuid(), player.getUsername(), fighters.values());
         fighters.put(player, fighter);
         hud.show(player);
         if (match.phase() == Match.Phase.ENDED) {
@@ -86,7 +89,10 @@ public final class ArenaSession extends Session implements SessionMethods.Arena.
     @Override
     public CompletionStage<Void> onLeave(Player player) {
         fighters.remove(player);
-        leaving.remove(player);
+        if (match.phase() == Match.Phase.WAITING || match.phase() == Match.Phase.COUNTDOWN) {
+            roster.remove(player.getUuid());
+        }
+        leaving.forget(player);
         hud.hide(player);
         return CompletableFuture.completedFuture(null);
     }
@@ -105,6 +111,7 @@ public final class ArenaSession extends Session implements SessionMethods.Arena.
     }
 
     private void second() {
+        clock++;
         var before = match.phase();
         var heldBefore = match.holder();
         var contestedBefore = match.contested();
@@ -138,7 +145,7 @@ public final class ArenaSession extends Session implements SessionMethods.Arena.
                     Results.record(
                             scope.component(BackendClient.class),
                             operation,
-                            fighters,
+                            roster.all(),
                             match.winner());
         }
         if (phase == Match.Phase.ENDED) sendHome();
@@ -151,13 +158,14 @@ public final class ArenaSession extends Session implements SessionMethods.Arena.
      */
     private void sendHome() {
         if (fighters.isEmpty()) {
+            roster.clear();
             match = new Match(rules);
             secondsSinceEnd = 0;
             return;
         }
         if (!recorded.isDone() || ++secondsSinceEnd < SECONDS_BEFORE_LOBBY) return;
         for (var player : fighters.keySet()) {
-            if (leaving.add(player)) {
+            if (leaving.start(player, clock)) {
                 scope.move(player, Destinations.Lobby.main)
                         .whenComplete((result, error) -> scope.onTick(() -> moved(player, result)));
             }
@@ -166,7 +174,7 @@ public final class ArenaSession extends Session implements SessionMethods.Arena.
 
     /** A refused or failed move leaves the player here, to try again next second. */
     private void moved(Player player, MoveResult result) {
-        if (result != MoveResult.ACCEPTED) leaving.remove(player);
+        if (result != MoveResult.ACCEPTED) leaving.refused(player);
     }
 
     private Match.Headcount headcount(Set<Player> players) {

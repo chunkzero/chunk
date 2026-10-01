@@ -1,4 +1,4 @@
-// Adapted from Hollow Cube Polar 1.16.0 (MIT); see shared/POLAR-LICENSE.
+// Adapted from Hollow Cube Polar 1.16.0 (MIT); see META-INF/POLAR-LICENSE.
 // Scoped Minestom API bindings, public light setters, and loading only; codec and file layout
 // unchanged.
 package example.world;

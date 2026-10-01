@@ -5,10 +5,8 @@ import dev.chunkzero.backend.client.OperationId;
 import dev.chunkzero.generated.BackendClient;
 import dev.chunkzero.generated.BackendTypes.Shared.Stats.RecordMatchArgs;
 
-import net.minestom.server.entity.Player;
-
+import java.util.List;
 import java.util.Locale;
-import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -27,12 +25,9 @@ final class Results {
     static CompletableFuture<Void> record(
             BackendClient backend,
             OperationId operation,
-            Map<Player, Fighter> fighters,
+            List<Fighter> fighters,
             Optional<Team> winner) {
-        var players =
-                fighters.entrySet().stream()
-                        .map(entry -> player(entry.getKey(), entry.getValue()))
-                        .toList();
+        var players = fighters.stream().map(Results::player).toList();
         var args =
                 new RecordMatchArgs(
                         players,
@@ -60,13 +55,13 @@ final class Results {
                         });
     }
 
-    private static RecordMatchArgs.PlayersItem player(Player player, Fighter fighter) {
+    private static RecordMatchArgs.PlayersItem player(Fighter fighter) {
         return new RecordMatchArgs.PlayersItem(
                 (long) fighter.captures,
                 (long) fighter.deaths,
                 (long) fighter.kills,
-                player.getUsername(),
-                new PlayerId(player.getUuid().toString()),
+                fighter.name,
+                new PlayerId(fighter.id.toString()),
                 RecordMatchArgs.PlayersItem.Team.valueOf(wire(fighter.team)));
     }
 

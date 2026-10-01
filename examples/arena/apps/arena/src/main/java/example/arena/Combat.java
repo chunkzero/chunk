@@ -25,7 +25,6 @@ final class Combat {
     private static final float SWORD_DAMAGE = 5;
     private static final float FIST_DAMAGE = 1;
     private static final long SWING_COOLDOWN_MILLIS = 500;
-    private static final long VOID_CREDIT_MILLIS = 10_000;
     private static final Duration RESPAWN = Duration.ofSeconds(3);
     private static final double VOID_Y = 40;
 
@@ -47,7 +46,7 @@ final class Combat {
 
     /** Heals and equips a fighter at their team's spawn. */
     CompletableFuture<Void> spawn(Player player, Fighter fighter) {
-        fighter.alive = true;
+        fighter.respawn();
         player.setGameMode(GameMode.ADVENTURE);
         player.heal();
         player.setFood(20);
@@ -77,14 +76,13 @@ final class Combat {
         var now = System.currentTimeMillis();
         if (now - hitter.lastSwing < SWING_COOLDOWN_MILLIS) return;
         hitter.lastSwing = now;
-        victim.lastAttacker = attacker;
-        victim.lastHit = now;
+        victim.hitBy(hitter, now);
         var damage =
                 attacker.getItemInMainHand().material() == Material.IRON_SWORD
                         ? SWORD_DAMAGE
                         : FIST_DAMAGE;
         if (target.getHealth() <= damage) {
-            die(target, victim, attacker);
+            die(target, victim, hitter);
             return;
         }
         target.damage(Damage.fromPlayer(attacker, damage));
@@ -100,21 +98,23 @@ final class Combat {
             event.setNewPosition(fighter.team.spawn);
             return;
         }
-        var recentlyHit = System.currentTimeMillis() - fighter.lastHit < VOID_CREDIT_MILLIS;
-        die(player, fighter, recentlyHit ? fighter.lastAttacker : null);
+        die(player, fighter, fighter.killer(System.currentTimeMillis()).orElse(null));
     }
 
-    private void die(Player player, Fighter fighter, Player killer) {
+    /** Credits {@code killer}, if any, even if they have left since landing the blow. */
+    private void die(Player player, Fighter fighter, Fighter killer) {
         fighter.alive = false;
         fighter.deaths++;
-        var credited = killer == null ? null : fighters.get(killer);
         Component cause;
-        if (credited != null) {
-            credited.kills++;
-            hud.scored(killer);
+        if (killer != null) {
+            killer.kills++;
+            fighters.forEach(
+                    (present, candidate) -> {
+                        if (candidate == killer) hud.scored(present);
+                    });
             cause =
                     Component.text("Slain by ")
-                            .append(Component.text(killer.getUsername(), credited.team.color));
+                            .append(Component.text(killer.name, killer.team.color));
         } else {
             cause = Component.text("Fell into the void");
         }
