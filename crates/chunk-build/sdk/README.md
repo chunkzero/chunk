@@ -176,12 +176,56 @@ export const myCoins = playerQuery({
 A provider returns a plain object of new fields; it cannot replace `caller`, `db` or earlier fields. Added fields are
 not arguments or results, and nothing is cached between invocations.
 
+## Variables and secrets
+
+`chunk.toml` declares plain variables and the secrets a project needs:
+
+```toml
+[vars]
+MOTD = "Welcome"
+
+[env.prod.vars]
+MOTD = "Welcome to the live server"
+
+[secrets]
+required = ["STORE_API_KEY"]
+```
+
+Every function reads them as `ctx.env`. `[env.<name>.vars]` overrides `[vars]` in the environment with that name;
+values are plain configuration that lands in the release, so never put secrets there. Secret values are set per
+environment with `chunk secrets put NAME --env ENV`, and `chunk dev` reads them from a gitignored `.dev.vars` in the
+project root, one `NAME=value` per line. Queries, mutations and hooks see the variables only; actions and commands also
+see every secret of their environment. A secret set while an action runs reaches the actions that start afterwards.
+Names are letters, digits and underscores, not starting with a digit, and values are at most 64 KiB.
+
+`codegen` types `ctx.env` from `chunk.toml` in `.chunk/generated/env.ts`: variables every environment has are strings,
+those only some environments set may be missing, and required secrets are strings in actions.
+
+```ts
+export const checkout = action({
+  args: { item: v.string() },
+  returns: v.boolean(),
+  handler: async (ctx, { item }) => {
+    const response = await ctx.fetch("https://store.example.com/v1/checkout", {
+      method: "POST",
+      headers: { authorization: `Bearer ${ctx.env.STORE_API_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify({ item }),
+    });
+    return response.ok;
+  },
+});
+```
+
 ## Actions and function references
 
-`action` and `internalAction` run outside a transaction. Their context has `caller`, `runQuery`, `runMutation`,
-`sleep(ms)`, `invocationId`, `http(binding, request)`, `secret(name)` and `routing`. `http` and `secret` are
-deny-by-default: they only reach bindings and secrets the host grants the deployment, and neither `chunk dev` nor
-management grants any, so they currently reject.
+`action` and `internalAction` run outside a transaction. Their context has `caller`, `env`, `fetch`, `runQuery`,
+`runMutation`, `sleep(ms)`, `invocationId` and `routing`.
+
+`ctx.fetch(url, init)` sends one HTTP request to a public URL, much like the web's `fetch`. `init` takes `method`,
+`headers` and a string `body`; the response has `url`, `status`, `ok`, lowercase `headers`, `text()` and `json()`.
+Loopback, private and link-local addresses, cloud metadata endpoints included, are refused after DNS resolution and on
+every redirect. Bodies are UTF-8 text of up to 64 KiB out and 128 KiB back, and a fetch has ten seconds. A fetch that
+was refused, or whose result was lost once it was sent, throws; a lost result may still have taken effect.
 
 `ctx.routing.move(player, destination)` sends any online player to a destination, through its capacity and overflow
 policy like a command's `ctx.routing.enter`:

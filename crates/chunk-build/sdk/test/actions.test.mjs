@@ -56,35 +56,40 @@ test("action references validate kind, arguments and results before application 
   await assert.rejects(invoke(reference, { count: 1 }, 12));
 });
 
-test("actions forward named HTTP and secret capabilities without adding authority fields", async () => {
-  const calls = [];
+test("actions read env and fetch through the raw capability, failing on refused or uncertain effects", async () => {
+  const requests = [];
+  const outcomes = [
+    { state: "completed", url: "https://example.com/paid", status: 200, headers: { a: "b" }, body: '{"paid":true}' },
+    { state: "rejected", reason: "HTTP destination address refused" },
+  ];
   const work = action({
     args: {},
     returns: v.string(),
     handler: async (ctx) => {
-      const token = await ctx.secret("token");
-      const result = await ctx.http("payments", { path: "status", headers: { authorization: token } });
-      if (result.state !== "completed") return result.state;
-      return result.body;
+      const response = await ctx.fetch(new URL("https://example.com/status"), {
+        method: "POST",
+        headers: { authorization: ctx.env.TOKEN },
+      });
+      assert.deepEqual([response.url, response.ok, response.headers], ["https://example.com/paid", true, { a: "b" }]);
+      assert.deepEqual(await response.json(), { paid: true });
+      await assert.rejects(ctx.fetch("http://10.0.0.1/"), /refused/);
+      return ctx.env.GREETING;
     },
   });
-  const result = await work.handler(
-    {
-      caller: null,
-      invocationId: "one",
-      secret: async (name) => {
-        calls.push(name);
-        return "fixture-token";
-      },
-      http: async (binding, request) => {
-        calls.push([binding, request]);
-        return { state: "completed", effectId: "one/http/2", status: 200, headers: {}, body: "paid" };
-      },
+  const raw = {
+    caller: null,
+    invocationId: "one",
+    env: { GREETING: "hello", TOKEN: "fixture-token" },
+    fetch: async (request) => {
+      requests.push(request);
+      return outcomes.shift();
     },
-    {},
-  );
-  assert.equal(result, "paid");
-  assert.deepEqual(calls, ["token", ["payments", { path: "status", headers: { authorization: "fixture-token" } }]]);
+  };
+  assert.equal(await work.handler(raw, {}), "hello");
+  assert.deepEqual(requests, [
+    { method: "POST", headers: { authorization: "fixture-token" }, url: "https://example.com/status" },
+    { url: "http://10.0.0.1/" },
+  ]);
 });
 
 test("actions move players through the platform, and queries and mutations cannot", async () => {

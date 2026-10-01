@@ -28,6 +28,11 @@ pub struct CoreConfig {
     /// The backend deployment served first. Without one, the backend serves only the deployments it retained.
     pub bundle: Option<PathBuf>,
     pub environment: String,
+    /// The environment's name, which selects the `[env.<name>.vars]` deployments read; unset, they read their
+    /// top-level `[vars]` only.
+    pub environment_name: Option<String>,
+    /// The secrets actions read from the start, until [`Core::set_secrets`] replaces them.
+    pub secrets: chunk_backend::Secrets,
     /// Holds the backend's store under `backend/`, control's credential and JVM files under `control/`, and the
     /// in-process gateway's ID.
     pub state: PathBuf,
@@ -137,6 +142,8 @@ impl Core {
         let backend = chunk_backend::server::Config {
             bundle: config.bundle.clone(),
             environment: config.environment.clone(),
+            vars: config.environment_name.clone(),
+            secrets: config.secrets.clone(),
             state: config.state.join("backend"),
             replication: config.replication.clone(),
         };
@@ -390,6 +397,13 @@ impl Core {
             gateway,
             deployment: self.deployment.clone().ok_or_else(|| io::Error::other("backend is not running"))?,
         })
+    }
+
+    /// Replaces the secrets of actions that start from now on.
+    pub fn set_secrets(&self, secrets: chunk_backend::Secrets) {
+        if let Some(backend) = &self.handle {
+            backend.set_secrets(secrets);
+        }
     }
 
     /// Makes `bundle` resident beside earlier versions, retrying while the backend is busy.

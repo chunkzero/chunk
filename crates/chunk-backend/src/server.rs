@@ -18,6 +18,10 @@ pub struct Config {
     /// The deployment served first. Without one, the backend serves only the deployments it retained.
     pub bundle: Option<PathBuf>,
     pub environment: String,
+    /// Selects `[env.<name>.vars]`; unset, deployments read their top-level variables only.
+    pub vars: Option<String>,
+    /// The secrets actions read until [`Backend::set_secrets`] replaces them.
+    pub secrets: crate::Secrets,
     pub state: PathBuf,
     /// Where the log replicates; unset keeps it local only.
     pub replication: Option<chunk_store::Replication>,
@@ -46,7 +50,10 @@ pub async fn run(config: Config, ready: oneshot::Sender<Ready>, stop: Cancellati
             }
             None => (chunk_store::SqliteStore::open(database, &config.environment).map_err(io::Error::other)?, None),
         };
-        let backend = Backend::new(config.environment, Box::new(store)).map_err(io::Error::other)?;
+        let effects = crate::ActionEffects::new(config.environment.clone()).map_err(io::Error::other)?;
+        let backend = Backend::with_action_effects(config.environment, Box::new(store), effects.with_vars(config.vars))
+            .map_err(io::Error::other)?;
+        backend.set_secrets(config.secrets);
         Ok((backend, bundle, replicator))
     })
     .await

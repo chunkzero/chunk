@@ -89,6 +89,12 @@ impl Json {
     pub fn parse(text: &str) -> Result<Self, serde_json::Error> {
         serde_json::from_str::<Value>(text).map(Self::from)
     }
+
+    /// The empty object.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self("{}".into())
+    }
 }
 
 impl From<Value> for Json {

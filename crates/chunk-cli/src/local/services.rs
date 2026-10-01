@@ -114,6 +114,8 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
     let config = CoreConfig {
         bundle: Some(bundle),
         environment: staged.control.deployment.environment.clone(),
+        environment_name: None,
+        secrets: chunk_backend::Secrets::default(),
         state: settings.state.clone(),
         control_record: settings.state.join("control").join("connection.json"),
         control_bind: settings.control_bind,

@@ -20,6 +20,8 @@ use crate::{
 pub(crate) struct Source {
     pub code: String,
     pub limits: Limits,
+    /// What `ctx.env` reads.
+    pub env: chunk_js::Json,
 }
 
 pub(crate) enum Ticket {
@@ -177,7 +179,10 @@ fn work(index: usize, incoming: &mpsc::Receiver<Work>, events: &tokio::sync::mps
 fn run(engine: &mut Engine, loaded: &mut BTreeSet<DeploymentId>, read: &Read) -> (Result<String>, Dependencies) {
     let deployment = &read.call.deployment;
     if !loaded.contains(deployment) {
-        if let Err(error) = engine.register(deployment.clone(), read.source.code.clone(), read.source.limits) {
+        let source = &read.source;
+        if let Err(error) =
+            engine.register_with_env(deployment.clone(), source.code.clone(), source.limits, source.env.clone())
+        {
             return (Err(error.into()), Dependencies::default());
         }
         loaded.insert(deployment.clone());

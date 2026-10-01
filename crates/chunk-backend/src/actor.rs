@@ -106,8 +106,9 @@ impl Actor {
             deployment.validate().map_err(Error::Invalid)?;
             Self::schema_ready(&deployment, snapshot.schema())?;
             let id = DeploymentId::new(&deployment.id)?;
-            js.register(id.clone(), deployment.source.clone(), Limits::default())?;
-            let source = readers::Source { code: deployment.source.clone(), limits: Limits::default() };
+            let env = effects.env(&deployment, None);
+            js.register_with_env(id.clone(), deployment.source.clone(), Limits::default(), env.clone())?;
+            let source = readers::Source { code: deployment.source.clone(), limits: Limits::default(), env };
             sources.insert(id.clone(), Arc::new(source));
             versions.insert(id, Some(Arc::new(deployment)));
         }
@@ -291,7 +292,8 @@ impl Actor {
                     Err(Error::Busy)
                 } else {
                     self.js.register(id.clone(), source.clone(), limits).map_err(Error::from).map(|()| {
-                        self.sources.insert(id.clone(), Arc::new(readers::Source { code: source, limits }));
+                        let env = chunk_js::Json::empty();
+                        self.sources.insert(id.clone(), Arc::new(readers::Source { code: source, limits, env }));
                         self.versions.insert(id, None);
                     })
                 };

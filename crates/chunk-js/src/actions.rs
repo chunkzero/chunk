@@ -23,18 +23,12 @@ pub trait ActionHost: 'static {
         arguments: Json,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>>>>;
 
-    fn http(
+    fn fetch(
         &self,
         _sequence: u32,
         _request: crate::HttpRequest,
     ) -> Pin<Box<dyn Future<Output = Result<crate::HttpOutcome, String>>>> {
         Box::pin(async { Err("HTTP effects unavailable".into()) })
-    }
-
-    /// # Errors
-    /// Rejects secret names outside the invocation's host-supplied grants.
-    fn secret(&self, _name: &str) -> Result<String, String> {
-        Err("Secret capability unavailable".into())
     }
 
     fn platform(&self, _sequence: u32, _request: Json) -> Pin<Box<dyn Future<Output = Result<String, String>>>> {
@@ -50,6 +44,8 @@ pub struct ActionInvocation {
     pub timestamp: i64,
     pub seed: u64,
     pub deadline: Instant,
+    /// The JSON object `ctx.env` reads, with string values.
+    pub env: Json,
 }
 
 pub(crate) struct ActionCapabilities {
@@ -71,8 +67,7 @@ impl ActionCapabilities {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Effect {
     Sleep { milliseconds: u64 },
-    Http { request: crate::HttpRequest },
-    Secret { name: String },
+    Fetch { request: crate::HttpRequest },
     Platform { request: serde_json::Value },
     Query { function: String, arguments: serde_json::Value },
     Mutation { function: String, arguments: serde_json::Value },
@@ -119,11 +114,8 @@ async fn op_chunk_action(state: Rc<RefCell<OpState>>, #[string] request: String)
     let _pending = Pending(state);
     let effect = async {
         match effect {
-            Effect::Http { request } => {
-                serde_json::to_string(&host.http(sequence, request).await?).map_err(|_| "Invalid HTTP outcome".into())
-            }
-            Effect::Secret { name } => {
-                serde_json::to_string(&host.secret(&name)?).map_err(|_| "Invalid secret value".into())
+            Effect::Fetch { request } => {
+                serde_json::to_string(&host.fetch(sequence, request).await?).map_err(|_| "Invalid HTTP outcome".into())
             }
             Effect::Platform { request } => host.platform(sequence, request.into()).await,
             Effect::Sleep { milliseconds } => {
@@ -150,7 +142,16 @@ async fn op_chunk_action(state: Rc<RefCell<OpState>>, #[string] request: String)
     }
 }
 
-deno_core::extension!(chunk_actions, ops = [op_chunk_action, op_chunk_action_id]);
+/// The JSON object `ctx.env` reads during the current invocation.
+pub(crate) struct Env(pub Json);
+
+#[op2]
+#[string]
+fn op_chunk_env(state: &mut OpState) -> String {
+    state.borrow::<Env>().0.as_str().to_owned()
+}
+
+deno_core::extension!(chunk_actions, ops = [op_chunk_action, op_chunk_action_id, op_chunk_env]);
 
 #[cfg(test)]
 mod tests;

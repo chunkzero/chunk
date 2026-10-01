@@ -48,6 +48,8 @@ fn core_config(directory: &Path) -> CoreConfig {
     CoreConfig {
         bundle: Some(path),
         environment: "test".into(),
+        environment_name: None,
+        secrets: chunk_backend::Secrets::default(),
         control_record: state.join("control.json"),
         state,
         control_bind: "127.0.0.1:0".parse().unwrap(),

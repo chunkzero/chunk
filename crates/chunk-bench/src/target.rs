@@ -180,6 +180,8 @@ pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
     let config = chunk_environment::CoreConfig {
         bundle: init.config.scenario.is_backend().then(|| init.backend.clone().into()),
         environment: backend::ENVIRONMENT.into(),
+        environment_name: None,
+        secrets: chunk_backend::Secrets::default(),
         control_record: state.join("control.json"),
         state,
         control_bind: "127.0.0.1:0".parse()?,

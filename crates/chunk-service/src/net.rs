@@ -1,6 +1,6 @@
-//! Address policy for traffic between chunk processes.
+//! Address policy for traffic between chunk processes, and for traffic backend code sends out.
 
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 /// AWS's and GCP's IPv6 instance metadata services, which sit inside `fc00::/7`.
 const METADATA: [Ipv6Addr; 2] =
@@ -18,6 +18,52 @@ pub fn private(address: IpAddr) -> bool {
         }
         IpAddr::V6(address) => address.is_loopback() || (address.is_unique_local() && !METADATA.contains(&address)),
     }
+}
+
+/// Whether `address` may be reached from backend code: not loopback, unspecified, private, CGNAT, link-local
+/// (cloud metadata included), unique-local, multicast, broadcast or reserved. IPv6 addresses that embed an IPv4 address
+/// (mapped, NAT64 and 6to4) classify like it.
+#[must_use]
+pub fn public(address: IpAddr) -> bool {
+    match address.to_canonical() {
+        IpAddr::V4(address) => public_v4(address),
+        IpAddr::V6(address) => {
+            let segments = address.segments();
+            let embedded = |high: usize| {
+                let [a, b] = segments[high].to_be_bytes();
+                let [c, d] = segments[high + 1].to_be_bytes();
+                Ipv4Addr::new(a, b, c, d)
+            };
+            match segments {
+                // NAT64, well-known and local-use prefixes.
+                [0x64, 0xff9b, 0, 0, 0, 0, ..] => public_v4(embedded(6)),
+                [0x64, 0xff9b, 1, ..] => false,
+                // 6to4.
+                [0x2002, ..] => public_v4(embedded(1)),
+                _ => {
+                    !(address.is_loopback()
+                        || address.is_unspecified()
+                        || address.is_multicast()
+                        || address.is_unique_local()
+                        || address.is_unicast_link_local()
+                        // Deprecated site-local.
+                        || segments[0] & 0xffc0 == 0xfec0)
+                }
+            }
+        }
+    }
+}
+
+fn public_v4(address: Ipv4Addr) -> bool {
+    let [a, b, c, _] = address.octets();
+    !(a == 0
+        || address.is_loopback()
+        || address.is_private()
+        || address.is_link_local()
+        || (a == 100 && b & 0xc0 == 64)
+        || (a == 192 && b == 0 && c == 0)
+        || (a == 198 && b & 0xfe == 18)
+        || a >= 224)
 }
 
 #[cfg(test)]

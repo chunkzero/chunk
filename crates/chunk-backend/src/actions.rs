@@ -154,20 +154,13 @@ impl chunk_js::ActionHost for Host {
         })
     }
 
-    fn http(
+    fn fetch(
         &self,
         sequence: u32,
         request: chunk_js::HttpRequest,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<chunk_js::HttpOutcome, String>>>> {
         let effects = self.effects.clone();
-        Box::pin(async move { Ok(effects.http(sequence, request).await) })
-    }
-
-    fn secret(&self, name: &str) -> std::result::Result<String, String> {
-        if self.cancellation.is_cancelled() || std::time::Instant::now() >= self.effects.deadline {
-            return Err("Secret capability expired".into());
-        }
-        self.effects.grants.secret(name)
+        Box::pin(async move { Ok(effects.fetch(sequence, request).await) })
     }
 
     fn call(

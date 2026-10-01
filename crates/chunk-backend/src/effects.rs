@@ -1,121 +1,41 @@
-//! Host-supplied action grants. Values are deliberately neither serializable nor Debug.
+//! What backend code reaches beyond the store: its environment's variables and secrets through `ctx.env`, and public
+//! HTTP endpoints through `ctx.fetch`.
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    sync::Arc,
-    time::Duration,
+    collections::BTreeMap,
+    sync::{Arc, PoisonError, RwLock},
 };
 
-use chunk_js::{DeploymentId, HttpMethod};
-use reqwest::{Client, Url};
+use chunk_contract::Deployment;
+use chunk_js::Json;
 
 use crate::{Error, Result};
 
 mod http;
-pub(crate) use http::ScopedEffects;
+pub(crate) use http::{Fetcher, ScopedEffects};
 
-pub struct HttpBinding {
-    pub(crate) base: Url,
-    pub(crate) methods: BTreeSet<HttpMethod>,
-    pub(crate) timeout: Duration,
-    pub(crate) client: Client,
-}
+/// An environment's secret values by name. Neither `Debug` nor serializable, so values stay out of logs.
+#[derive(Clone, Default)]
+pub struct Secrets(BTreeMap<String, String>);
 
-impl HttpBinding {
-    /// Grants relative paths below a fixed HTTP(S) base ending in `/`.
-    /// # Errors
-    /// Rejects userinfo, query/fragment, invalid origins, and empty method grants.
-    pub fn new(base: &str, methods: impl IntoIterator<Item = HttpMethod>) -> Result<Self> {
-        if base.len() > 2048 {
-            return Err(Error::Invalid("HTTP binding origin length"));
-        }
-        let base = Url::parse(base).map_err(|_| Error::Invalid("HTTP binding origin"))?;
-        let methods: BTreeSet<_> = methods.into_iter().collect();
-        if !matches!(base.scheme(), "http" | "https")
-            || base.host_str().is_none()
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.query().is_some()
-            || base.fragment().is_some()
-            || !base.path().ends_with('/')
-            || methods.is_empty()
-        {
-            return Err(Error::Invalid("HTTP binding origin or method grant"));
-        }
-        let client = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .referer(false)
-            .http1_only()
-            .pool_max_idle_per_host(0)
-            .no_gzip()
-            .no_brotli()
-            .no_deflate()
-            .no_zstd()
-            .build()
-            .map_err(|_| Error::Invalid("HTTP client unavailable"))?;
-        Ok(Self { base, methods, timeout: Duration::from_secs(10), client })
+impl Secrets {
+    pub fn insert(&mut self, name: String, value: String) {
+        self.0.insert(name, value);
     }
 
-    /// # Errors
-    /// Rejects zero or more than ten seconds. The action deadline also applies.
-    pub fn with_timeout(mut self, timeout: Duration) -> Result<Self> {
-        if timeout.is_zero() || timeout > Duration::from_secs(10) {
-            return Err(Error::Invalid("HTTP timeout"));
-        }
-        self.timeout = timeout;
-        Ok(self)
-    }
-}
-
-#[derive(Default)]
-pub struct ActionGrants {
-    pub(crate) http: BTreeMap<String, HttpBinding>,
-    secrets: BTreeMap<String, String>,
-}
-
-fn name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
-}
-
-impl ActionGrants {
-    /// # Errors
-    /// Rejects duplicate/invalid names and more than 16 bindings.
-    pub fn with_http(mut self, name: String, binding: HttpBinding) -> Result<Self> {
-        if !self::name(&name) || self.http.len() >= 16 || self.http.contains_key(&name) {
-            return Err(Error::Invalid("HTTP binding name or capacity"));
-        }
-        self.http.insert(name, binding);
-        Ok(self)
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.0.get(name).map(String::as_str)
     }
 
-    /// Install a value supplied by the host, such as an environment variable read
-    /// by the embedding application. The backend never serializes these grants.
-    /// # Errors
-    /// Rejects duplicate/invalid names, empty or >8KiB values, and more than 16 secrets.
-    pub fn with_secret(mut self, name: String, value: String) -> Result<Self> {
-        if !self::name(&name)
-            || self.secrets.len() >= 16
-            || self.secrets.contains_key(&name)
-            || value.is_empty()
-            || value.len() > 8 * 1024
-        {
-            return Err(Error::Invalid("secret binding name or capacity"));
-        }
-        self.secrets.insert(name, value);
-        Ok(self)
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
     }
 
-    pub(crate) fn secret(&self, name: &str) -> std::result::Result<String, String> {
-        self.secrets.get(name).cloned().ok_or_else(|| "Secret capability denied".into())
-    }
-
+    /// Hides `text` if it holds any secret value, raw or JSON-escaped.
     pub(crate) fn redact(&self, text: String) -> String {
-        for secret in self.secrets.values() {
+        for secret in self.0.values() {
             let encoded = serde_json::to_string(secret).expect("serializable secret");
-            if text.contains(secret) || text.contains(&encoded[1..encoded.len() - 1]) {
+            if text.contains(secret.as_str()) || text.contains(&encoded[1..encoded.len() - 1]) {
                 return "[redacted action diagnostic]".into();
             }
         }
@@ -123,31 +43,53 @@ impl ActionGrants {
     }
 }
 
+impl FromIterator<(String, String)> for Secrets {
+    fn from_iter<T: IntoIterator<Item = (String, String)>>(iter: T) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+/// The environment's current secrets, which [`crate::Backend::set_secrets`] replaces.
+pub(crate) type SecretSlot = Arc<RwLock<Arc<Secrets>>>;
+
 pub struct ActionEffects {
     environment: String,
-    grants: BTreeMap<DeploymentId, Arc<ActionGrants>>,
+    /// Selects `[env.<name>.vars]`; unset, deployments read their top-level variables only.
+    vars: Option<String>,
+    pub(crate) secrets: SecretSlot,
+    pub(crate) fetcher: Arc<Fetcher>,
     pub(crate) moves: crate::moves::Slot,
 }
 
 impl ActionEffects {
-    /// Creates deny-by-default grants bound to exactly one environment.
+    /// Effects bound to exactly one environment, with no secrets until [`crate::Backend::set_secrets`].
     /// # Errors
-    /// Rejects invalid environment identities.
+    /// Rejects invalid environment identities, and reports an HTTP client that can't be built.
     pub fn new(environment: String) -> Result<Self> {
         if environment.is_empty() || environment.len() > 128 {
             return Err(Error::Invalid("effect environment"));
         }
-        Ok(Self { environment, grants: BTreeMap::new(), moves: Arc::default() })
+        Ok(Self {
+            environment,
+            vars: None,
+            secrets: Arc::default(),
+            fetcher: Arc::new(Fetcher::new(chunk_service::net::public)?),
+            moves: Arc::default(),
+        })
     }
 
-    /// # Errors
-    /// Rejects duplicate deployment bindings and more than 16 deployments.
-    pub fn with_deployment(mut self, id: DeploymentId, grants: ActionGrants) -> Result<Self> {
-        if self.grants.len() >= 16 || self.grants.contains_key(&id) {
-            return Err(Error::Invalid("effect deployment grant"));
-        }
-        self.grants.insert(id, Arc::new(grants));
-        Ok(self)
+    /// Deployments read the variables `[env.<name>.vars]` overrides for the environment named `name`.
+    #[must_use]
+    pub fn with_vars(mut self, name: Option<String>) -> Self {
+        self.vars = name;
+        self
+    }
+
+    /// Fetches only reach addresses `policy` admits, such as a test's loopback server.
+    #[cfg(test)]
+    pub(crate) fn with_policy(mut self, policy: fn(std::net::IpAddr) -> bool) -> Self {
+        self.fetcher = Arc::new(Fetcher::new(policy).expect("HTTP client"));
+        self
     }
 
     pub(crate) fn validate_environment(&self, environment: &str) -> Result<()> {
@@ -157,7 +99,17 @@ impl ActionEffects {
         Ok(())
     }
 
-    pub(crate) fn grants(&self, id: &DeploymentId) -> Arc<ActionGrants> {
-        self.grants.get(id).cloned().unwrap_or_default()
+    /// The secrets an invocation starting now keeps until it ends.
+    pub(crate) fn secrets(&self) -> Arc<Secrets> {
+        self.secrets.read().unwrap_or_else(PoisonError::into_inner).clone()
+    }
+
+    /// `deployment`'s variables in this environment, with `secrets` over them, as the JSON object `ctx.env` reads.
+    pub(crate) fn env(&self, deployment: &Deployment, secrets: Option<&Secrets>) -> Json {
+        let mut env = deployment.contracts.env.resolve(self.vars.as_deref());
+        if let Some(secrets) = secrets {
+            env.extend(secrets.0.iter().map(|(name, value)| (name.clone(), value.clone())));
+        }
+        serde_json::to_value(env).expect("string map").into()
     }
 }

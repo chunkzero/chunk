@@ -306,6 +306,7 @@ pub(crate) enum Event {
 struct Owner {
     environment: String,
     moves: crate::moves::Slot,
+    secrets: crate::effects::SecretSlot,
     events: queue::Sender<Event>,
     memory: Arc<Semaphore>,
     send: SendBudget,
@@ -354,6 +355,7 @@ impl Backend {
         let backend = Self(Arc::new(Owner {
             environment: "test".into(),
             moves: Arc::default(),
+            secrets: Arc::default(),
             events,
             memory: memory.clone(),
             send: SendBudget::new(send_bytes()),
@@ -373,8 +375,7 @@ impl Backend {
         Self::with_action_effects(environment.clone(), store, ActionEffects::new(environment)?)
     }
 
-    /// Construct with immutable host-provided action grants. Grants bind the exact
-    /// environment and deployment; queries and mutations gain no external effects.
+    /// Construct with `effects`, which bind the exact environment and select the variables deployments read.
     /// # Errors
     /// Reports invalid scope, thread, snapshot or JS initialization failures.
     pub fn with_action_effects(environment: String, store: Box<dyn Storage>, effects: ActionEffects) -> Result<Self> {
@@ -419,6 +420,7 @@ impl Backend {
         }
         chunk_js::Engine::init_platform();
         let moves = effects.moves.clone();
+        let secrets = effects.secrets.clone();
         let (events, incoming) = queue::channel(EVENTS);
         let engine_queue = Arc::new(EngineQueue::default());
         let dequeued = engine_queue.clone();
@@ -450,6 +452,7 @@ impl Backend {
         Ok(Self(Arc::new(Owner {
             environment,
             moves,
+            secrets,
             events,
             memory,
             send: SendBudget::new(send_bytes()),
@@ -464,6 +467,12 @@ impl Backend {
     /// Serves the moves actions ask for with `moves`, instead of any served before. Until then, an action's move fails.
     pub fn serve_moves(&self, moves: Arc<dyn crate::PlayerMoves>) {
         *self.0.moves.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(moves);
+    }
+
+    /// Replaces the environment's secrets. Actions and commands that start afterwards read `secrets` in `ctx.env`;
+    /// running ones keep the secrets they started with.
+    pub fn set_secrets(&self, secrets: crate::Secrets) {
+        *self.0.secrets.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(secrets);
     }
 
     /// Stops admitting requests, drains accepted commits and joins both threads,

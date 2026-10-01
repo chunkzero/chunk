@@ -4,6 +4,7 @@ import type { Document } from "../sdk/documents.ts";
 import { defineFunctions } from "../sdk/functions.ts";
 import type { QueryContext as SchemaQueryContext, MutationContext as SchemaMutationContext } from "../sdk/functions.ts";
 import type { Id as TableId } from "../sdk/validators.ts";
+import type {} from "./env.ts";
 
 export {
   defineApp,
@@ -60,8 +61,10 @@ export type {
   HookDefinition,
   AsyncContext,
   ActionContext,
-  HttpRequest,
-  HttpOutcome,
+  FetchInit,
+  FetchResponse,
+  Vars,
+  Secrets,
   FunctionDefinition,
   FunctionBuilder,
   FunctionReference,
