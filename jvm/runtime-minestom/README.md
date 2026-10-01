@@ -94,6 +94,7 @@ that thread; continue asynchronous work on it with `scope.onTick(...)`.
 | `component(type)`                                 | A declared [component](#components)                                                            |
 | `getBackend()`                                    | The session's backend client                                                                   |
 | `operationId(player, action)`                     | A stable mutation ID for one action on this player's current delivery                          |
+| `move(player, destination)`                       | Send an admitted player to a destination; see [Moving players](#moving-players)                |
 | `finish()`                                        | Ask for the session to end                                                                     |
 | `getProcess()`                                    | The Minestom process shared by the app's sessions                                              |
 
@@ -116,6 +117,26 @@ var playerBackend =
 Mutations need an `OperationId`. `scope.operationId(player, "coin-" + sequence)` gives one that stays the same for that
 action during the player's current delivery; retry an uncertain mutation with the same ID and arguments, within the 24
 hours the backend retains its outcome.
+
+### Moving players
+
+`scope.move(player, destination)` asks core to send a player this JVM hosts to a destination, through the destination's
+capacity and overflow policy like a command's `ctx.routing.enter`. The generated `Destinations` class names each app's
+destinations as declared in `app.ts`:
+
+```java
+scope.move(player, Destinations.Arena.large)
+        .thenAccept(result -> {
+            if (result != MoveResult.ACCEPTED) player.sendMessage("Can't go there: " + result);
+        });
+```
+
+Core fences the move to the player's current delivery here: it moves only a player whose arrived claim is on this JVM,
+at the generation this JVM admitted them with. `MoveResult` is `ACCEPTED` once the move is queued, and the player's
+gateway then carries it out, so the player leaves this session; the destination's login and `player.beforeMove` hooks
+may still turn them away. Otherwise it says why core queued nothing: `OFFLINE`, `STALE` (the player already left this
+delivery, is still arriving, or is already moving), `FULL` (a `"reject"` destination whose one session is full) or
+`UNKNOWN_DESTINATION`. The stage fails if core can't be reached.
 
 ## Components
 

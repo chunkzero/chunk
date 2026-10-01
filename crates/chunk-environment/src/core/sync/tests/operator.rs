@@ -34,7 +34,7 @@ impl Fixture {
     }
 
     /// Admits the fake player, returning the host serving them once they arrived.
-    async fn arrive(&self) -> String {
+    pub(super) async fn arrive(&self) -> String {
         let control = self.control.clone();
         let assignment = control.claim(runtime::login()).await.unwrap();
         control.activate(assignment.claim.unwrap()).await.unwrap();

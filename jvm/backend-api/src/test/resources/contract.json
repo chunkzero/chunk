@@ -548,5 +548,15 @@
         }
       }
     ]
+  },
+  "destinations": {
+    "version": 1,
+    "entries": {
+      "apps/lobby/destinations/main": {
+        "destination": { "key": "main", "session_type": "lobby/default", "machine_profile": "small" },
+        "overflow": "replicate",
+        "empty_timeout_seconds": 60
+      }
+    }
   }
 }

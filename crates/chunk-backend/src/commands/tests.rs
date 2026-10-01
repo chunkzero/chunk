@@ -188,7 +188,7 @@ async fn regular_actions_do_not_inherit_platform_capabilities() {
         )
         .await
         .unwrap();
-    assert!(action.outcome().await.unwrap_err().to_string().contains("platform capability unavailable"));
+    assert!(action.outcome().await.unwrap_err().to_string().contains("Invalid platform request"));
 }
 
 #[tokio::test]

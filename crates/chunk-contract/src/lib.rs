@@ -18,7 +18,7 @@ pub use destinations::{Destination, DestinationManifest, DestinationOverflow, De
 mod domains;
 mod effects;
 pub use domains::{DOMAIN_MANIFEST_VERSION, DomainManifest, DomainScope, Hook, HookEvent, domain_path};
-pub use effects::{Effect, EffectDestination, EffectMethod};
+pub use effects::{Effect, EffectDestination, EffectMethod, MoveRefusal};
 mod index;
 mod schema;
 mod session_configurations;

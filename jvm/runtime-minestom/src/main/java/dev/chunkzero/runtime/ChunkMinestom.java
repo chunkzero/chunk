@@ -49,6 +49,7 @@ public final class ChunkMinestom implements AutoCloseable {
                         factories,
                         (session, appId) -> chunk.backend(session),
                         components);
+        sessions.setMover(chunk::move);
         server.setCompressionThreshold(0);
         server.connectionManager().setPlayerProvider(ManagedPlayer::new);
         gameplay = new GameplayService(sessions, System::nanoTime, chunk::isReady);

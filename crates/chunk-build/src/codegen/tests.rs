@@ -212,6 +212,10 @@ fn session_configuration_providers_are_scoped_to_their_app_and_detect_java_colli
     assert!(provider.contains("return SessionConfigs.Duels.Default.TYPE;"));
     let models = fs::read_to_string(output.join("java/example/SessionConfigs.java")).unwrap();
     assert!(!models.contains("dev.chunkzero.runtime"));
+    let destinations = fs::read_to_string(output.join("java/example/Destinations.java")).unwrap();
+    assert!(destinations.contains(
+        "public static final class Lobby {\nprivate Lobby() {}\npublic static final Destination main = new Destination(\"main\", \"lobby/default\", \"small\");"
+    ));
     let mut contract: serde_json::Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
     let mut other = contract["session_configurations"]["configurations"][0].clone();
     other["session"] = json!("some_name");

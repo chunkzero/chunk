@@ -1,8 +1,12 @@
 package dev.chunkzero.runtime;
 
+import chunk.sync.v1.CoreOuterClass.Position;
+import chunk.sync.v1.Gateway.SessionDemand;
 import chunk.sync.v1.Jvm.JvmMethodResult;
+import chunk.sync.v1.Jvm.JvmMove;
 import chunk.sync.v1.Jvm.JvmRegistration;
 
+import dev.chunkzero.backend.api.Destination;
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.runtime.bootstrap.RuntimeEnvironment;
 import dev.chunkzero.runtime.bootstrap.SessionBackend;
@@ -12,6 +16,7 @@ import dev.chunkzero.runtime.control.ProcessState;
 import org.jetbrains.annotations.Nullable;
 
 import java.net.InetAddress;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicLong;
@@ -67,6 +72,36 @@ public final class ChunkProcess implements AutoCloseable {
 
     BackendSession backend(String session) {
         return backend.client(session, environment.appId());
+    }
+
+    /**
+     * Asks core to move the player of {@code delivery}, at {@code generation}, to a destination.
+     */
+    CompletionStage<MoveResult> move(
+            String delivery, Position generation, Destination destination) {
+        var move =
+                JvmMove.newBuilder()
+                        .setDelivery(delivery)
+                        .setGeneration(generation)
+                        .setDestination(
+                                SessionDemand.newBuilder()
+                                        .setKey(destination.key())
+                                        .setSessionType(destination.sessionType())
+                                        .setMachineProfile(destination.machineProfile()))
+                        .build();
+        return backend.move(UUID.randomUUID().toString(), move)
+                .thenApply(
+                        result ->
+                                switch (result.getRefusal()) {
+                                    case MOVE_REFUSAL_UNSPECIFIED -> MoveResult.ACCEPTED;
+                                    case MOVE_REFUSAL_OFFLINE -> MoveResult.OFFLINE;
+                                    case MOVE_REFUSAL_STALE -> MoveResult.STALE;
+                                    case MOVE_REFUSAL_FULL -> MoveResult.FULL;
+                                    case MOVE_REFUSAL_UNKNOWN_DESTINATION ->
+                                            MoveResult.UNKNOWN_DESTINATION;
+                                    case UNRECOGNIZED ->
+                                            throw new IllegalStateException("Unknown move refusal");
+                                });
     }
 
     void progress(int sessions, int players) {

@@ -11,7 +11,7 @@ use crate::{
     state::{Capacity, Claim, Generation, HostState, Phase, State},
 };
 use select::select_session;
-pub(crate) use select::{select_room, validate_demand};
+pub(crate) use select::{admit_move, select_room};
 
 impl Control {
     /// Reserves capacity durably, coalesces demand, and prepares a non-active delivery.

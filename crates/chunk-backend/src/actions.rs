@@ -104,6 +104,8 @@ pub(crate) struct Host {
     pub slots: Arc<Semaphore>,
     pub cancellation: Cancellation,
     pub effects: Arc<crate::effects::ScopedEffects>,
+    /// Set for an action, whose platform effects are moves; a command's go to its runner, and a hook has none.
+    pub moves: Option<crate::moves::Slot>,
 }
 
 struct CancelEffect(Cancellation);
@@ -119,6 +121,15 @@ impl chunk_js::ActionHost for Host {
         sequence: u32,
         request: Json,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<String, String>>>> {
+        if let Some(moves) = &self.moves {
+            let result = if self.cancellation.is_cancelled() {
+                Err(Error::Cancelled.to_string())
+            } else {
+                let operation = crate::commands::effect_operation(&self.effects.invocation, sequence);
+                crate::moves::perform(moves, &operation, &request)
+            };
+            return Box::pin(async move { result });
+        }
         let id = self.id.clone();
         let events = self.events.clone();
         let cancellation = self.cancellation.clone();

@@ -71,7 +71,10 @@ async fn simultaneous_group_and_single_demand_never_split_a_roster_or_overfill_a
         });
     }
     while let Some(result) = tasks.join_next().await {
-        assert!(matches!(result.unwrap(), Ok(()) | Err(Error::Capacity)));
+        assert!(matches!(
+            result.unwrap(),
+            Ok(()) | Err(Error::Capacity | Error::Refused(chunk_contract::MoveRefusal::Full))
+        ));
     }
     let state = control.state().unwrap();
     let arena: Vec<_> =

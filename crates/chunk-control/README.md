@@ -40,10 +40,13 @@ Each claim carries a generation, the `(epoch, revision)` of the commit that crea
 because a restore starts a new epoch and may reuse revisions. They fence stale work: an old cancellation can't release a
 newer connection, and a JVM's deliveries are checked against them.
 
-**Moves.** A move (`chunk:move_player` from the operator, or a player command) reserves the destination without creating
-a second player; the gateway withdraws the source claim before activating the destination, so a player is never
-delivered twice. `Control::move_roster` moves a group into one session: it reserves every slot and queues every member's
-move in one commit, or changes nothing, and admits the members together once all have asked to activate.
+**Moves.** A move (`chunk:move_player` from the operator, a player command, an action, or `chunk:move` from the JVM
+hosting the player) reserves the destination without creating a second player. Operator and JVM moves name the player's
+current arrived claim, and a JVM may name only a claim on its own host. Each goes through the destination's admission
+policy, and a refused move reports why: the player is offline, the claim is stale, the destination is full, or it is
+unknown. The gateway withdraws the source claim before activating the destination, so a player is never delivered twice.
+`Control::move_roster` moves a group into one session: it reserves every slot and queues every member's move in one
+commit, or changes nothing, and admits the members together once all have asked to activate.
 
 **Nodes and drains.** The operator's `nodes` topic reports each host as starting, online, unhealthy, unreachable,
 draining, stopping or stopped, with the JVM's last health report. Health is checked every five seconds: a stalled tick

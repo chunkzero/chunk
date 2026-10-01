@@ -1,5 +1,8 @@
 package dev.chunkzero.runtime;
 
+import chunk.sync.v1.CoreOuterClass.Position;
+
+import dev.chunkzero.backend.api.Destination;
 import dev.chunkzero.backend.client.BackendSession;
 import dev.chunkzero.backend.client.OperationId;
 import dev.chunkzero.runtime.minestom.event.SessionDestroyEvent;
@@ -33,6 +36,7 @@ import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -56,6 +60,7 @@ public final class SessionScope {
     private final Supplier<CompletionStage<Void>> requestFinish;
     private final @Nullable BackendSession backend;
     private final ComponentRegistry components;
+    private final Mover mover;
     private final List<InstanceContainer> ownedInstances = new CopyOnWriteArrayList<>();
     private final List<AutoCloseable> resources = new ArrayList<>();
     private final Map<Player, List<AutoCloseable>> playerResources = new IdentityHashMap<>();
@@ -82,12 +87,24 @@ public final class SessionScope {
             Supplier<CompletionStage<Void>> requestFinish,
             @Nullable BackendSession backend,
             ComponentRegistry components) {
+        this(process, id, ticks, requestFinish, backend, components, Mover.UNAVAILABLE);
+    }
+
+    SessionScope(
+            ServerProcess process,
+            String id,
+            TickExecutor ticks,
+            Supplier<CompletionStage<Void>> requestFinish,
+            @Nullable BackendSession backend,
+            ComponentRegistry components,
+            Mover mover) {
         this.process = process;
         this.id = id;
         this.ticks = ticks;
         this.requestFinish = requestFinish;
         this.backend = backend;
         this.components = components;
+        this.mover = mover;
         events = EventNode.event("session-" + id, EventFilter.ALL, this::owns);
         try {
             var schedulers = process.schedulerManager();
@@ -251,6 +268,19 @@ public final class SessionScope {
                         + action);
     }
 
+    /**
+     * Asks core to move an admitted player to {@code destination}, through its admission policy.
+     * Once core accepts, the player's gateway carries the move out and the player leaves this
+     * session. Fails if core can't be reached.
+     */
+    public CompletionStage<MoveResult> move(Player player, Destination destination) {
+        Objects.requireNonNull(destination);
+        if (!players.contains(player)) throw new IllegalArgumentException("Player is not admitted");
+        var managed = (ManagedPlayer) player;
+        return mover.move(
+                managed.getOperation(), managed.getBinding().getGeneration(), destination);
+    }
+
     public CompletionStage<Void> finish() {
         return requestFinish.get();
     }
@@ -317,6 +347,17 @@ public final class SessionScope {
 
     private void checkActive() {
         if (disposed) throw new IllegalStateException("Session disposed");
+    }
+
+    /** Asks core to move the player of a delivery, as {@code ChunkProcess} does. */
+    interface Mover {
+        Mover UNAVAILABLE =
+                (delivery, generation, destination) ->
+                        CompletableFuture.failedFuture(
+                                new IllegalStateException("Moves unavailable"));
+
+        CompletionStage<MoveResult> move(
+                String delivery, Position generation, Destination destination);
     }
 
     private static void reject(AutoCloseable resource, String message) {

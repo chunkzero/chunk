@@ -707,6 +707,7 @@ mod destinations;
 mod gateway;
 mod launch;
 mod log;
+mod moves;
 mod recovery;
 mod releases;
 mod retention;

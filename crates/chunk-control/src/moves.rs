@@ -1,3 +1,4 @@
+use chunk_contract::MoveRefusal;
 use chunk_proto::control::v1::{ClaimIdentity, ClaimRequest, SessionDemand};
 use prost::Message;
 
@@ -26,10 +27,43 @@ pub struct MoveSource {
 impl Control {
     /// Queues one move for the proxy that owns the player's public connection.
     /// # Errors
-    /// Rejects changed operations, concurrent moves and players without an arrived delivery.
+    /// Rejects changed operations, and refuses with [`Error::Refused`] a player who is offline, still arriving or
+    /// already moving, and a destination the player's release doesn't offer or that is full.
     pub fn move_player(&self, request: MoveRequest) -> Result<ClaimRequest> {
         validate(&request)?;
         self.update(|state| queue(state, request))
+    }
+
+    /// Queues a move of the player that `host`'s JVM holds under `delivery`, whose claim the JVM knows by `generation`,
+    /// like [`Self::move_player`] fenced to that claim and its connection. The destination claim takes `operation`.
+    /// # Errors
+    /// Rejects a delivery another host serves with [`crate::NOT_HOSTED`], and refuses a claim that is no longer the
+    /// player's arrived one, or whose generation differs, as stale.
+    pub fn move_hosted(
+        &self,
+        host: &str,
+        operation: &str,
+        delivery: &str,
+        generation: Generation,
+        demand: SessionDemand,
+    ) -> Result<()> {
+        self.update(|state| {
+            let claim = state.claims.get(delivery).ok_or(Error::Refused(MoveRefusal::Stale))?;
+            let session = state.sessions.get(&claim.session).ok_or(Error::Refused(MoveRefusal::Stale))?;
+            if session.host != host {
+                return Err(Error::Invalid(crate::NOT_HOSTED));
+            }
+            let named = ClaimIdentity { delivery_generation: generation.wire(), ..claim.identity(delivery) };
+            let connection_id = ClaimRequest::decode(claim.request.as_slice())?.connection_id;
+            let request = MoveRequest {
+                operation_id: operation.to_owned(),
+                player_id: claim.player.clone(),
+                demand,
+                source: Some(MoveSource { claim: named, connection_id }),
+            };
+            validate(&request)?;
+            queue(state, request).map(drop)
+        })
     }
 
     /// Records `reason` as why the move to `claim` ended before activation, leaving fenced withdrawal to
@@ -82,13 +116,16 @@ pub(crate) fn validate(request: &MoveRequest) -> Result<()> {
 }
 
 /// Queues `request`'s move within its source's release in the current update, returning the destination claim request.
+/// Refuses a player without a current claim as offline, and a source or player that can't move now as stale.
 pub(crate) fn queue(state: &mut State, request: MoveRequest) -> Result<ClaimRequest> {
+    let online = state.players.get(&request.player_id).is_some_and(|owner| owner.current.is_some());
+    let refused = |refusal| Error::Refused(if online { refusal } else { MoveRefusal::Offline });
     if let Some(expected) = &request.source {
-        let claim = state.arrived_claim(&expected.claim).ok_or(Error::Invalid("stale captured move source"))?;
+        let claim = state.arrived_claim(&expected.claim).ok_or_else(|| refused(MoveRefusal::Stale))?;
         if claim.player != request.player_id
             || ClaimRequest::decode(claim.request.as_slice())?.connection_id != expected.connection_id
         {
-            return Err(Error::Invalid("stale captured move source"));
+            return Err(refused(MoveRefusal::Stale));
         }
     }
     // Trusted unbound retries can recover the source after arrival in the destination.
@@ -107,29 +144,27 @@ pub(crate) fn queue(state: &mut State, request: MoveRequest) -> Result<ClaimRequ
     if state.claims.contains_key(&request.operation_id) {
         return Err(Error::Invalid(crate::MOVE_NAMES_CLAIM));
     }
-    let owner = state.players.get(&request.player_id).ok_or(Error::Invalid("unknown player"))?;
-    let source = owner.current.as_ref().ok_or(Error::Invalid("player has no current delivery"))?;
+    let owner = state.players.get(&request.player_id).ok_or(Error::Refused(MoveRefusal::Offline))?;
+    let source = owner.current.as_ref().ok_or(Error::Refused(MoveRefusal::Offline))?;
     let claim = &state.claims[source];
     if claim.phase != Phase::Arrived || owner.pending.is_some() {
-        return Err(Error::Invalid("player already transitioning"));
+        return Err(Error::Refused(MoveRefusal::Stale));
     }
     for intent in state.moves.values().filter(|intent| !intent.canceled) {
         let queued = ClaimRequest::decode(intent.request.as_slice())?;
         if queued.source.as_ref().map(|s| &s.operation_id) == Some(source)
             && state.claims.get(&queued.operation_id).is_none_or(|c| c.phase != Phase::Released)
         {
-            return Err(Error::Invalid("move already queued"));
+            return Err(Error::Refused(MoveRefusal::Stale));
         }
     }
     let mut destination = ClaimRequest::decode(claim.request.as_slice())?;
     destination.operation_id = request.operation_id;
     destination.demand = Some(request.demand);
     destination.source = Some(claim.identity(source));
-    let (_, release) = state.placing(&destination)?;
-    crate::placement::validate_demand(
-        &release,
-        destination.demand.as_ref().ok_or(Error::Invalid("missing destination"))?,
-    )?;
+    let (name, release) = state.placing(&destination)?;
+    let demand = destination.demand.as_ref().ok_or(Error::Invalid("missing destination"))?;
+    crate::placement::admit_move(state, &name, &release, demand)?;
     let sequence = Generation::PENDING.wire();
     state.moves.insert(
         destination.operation_id.clone(),

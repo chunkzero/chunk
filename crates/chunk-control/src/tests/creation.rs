@@ -159,7 +159,7 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
             demand: SessionDemand { key: "undeclared".into(), ..source.demand.clone().unwrap() },
             ..Default::default()
         }),
-        Err(Error::Invalid("session configuration differs from its implementation schema"))
+        Err(Error::Refused(chunk_contract::MoveRefusal::UnknownDestination))
     ));
     assert!(control.state().unwrap().moves.is_empty());
     assert!(pending_move(&control, &source).is_none());

@@ -6,6 +6,7 @@ use super::{BackendMetadata, quote, validate_literals};
 
 mod client;
 mod configurations;
+mod destinations;
 mod names;
 mod schema;
 mod sessions;
@@ -60,6 +61,7 @@ pub(super) struct Bindings {
     declarations: String,
     sessions: Option<chunk_contract::SessionMethods>,
     configurations: Option<chunk_contract::SessionConfigurations>,
+    destinations: Option<chunk_contract::DestinationManifest>,
 }
 
 impl Bindings {
@@ -75,6 +77,7 @@ impl Bindings {
         ]);
         files.extend(sessions::sources(self.sessions.as_ref(), package)?);
         files.extend(configurations::sources(self.configurations.as_ref(), package)?);
+        files.extend([destinations::sources(self.destinations.as_ref(), package)?]);
         Ok(files)
     }
 }
@@ -128,6 +131,7 @@ pub(super) fn bindings(contract: &BackendMetadata) -> io::Result<Bindings> {
         declarations,
         sessions: contract.contracts.session_methods.clone(),
         configurations: contract.contracts.session_configurations.clone(),
+        destinations: contract.contracts.destinations.clone(),
     })
 }
 
