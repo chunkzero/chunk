@@ -36,6 +36,12 @@ covers the packaged SDK.
 | `chunk secrets put NAME --env E`    | Sets a secret from a hidden prompt, or from stdin without a terminal.                       |
 | `chunk secrets list --env E`        | Lists an environment's secret names and versions, never their values.                       |
 | `chunk secrets delete NAME --env E` | Deletes a secret.                                                                           |
+| `chunk promote --from E1 --env E2`  | Deploys the release active in `E1` to `E2`, and waits until it is active.                   |
+| `chunk rollback --env E`            | Deploys the release of an earlier deployment again; `--to ID` picks it.                     |
+| `chunk domains add HOST --env E`    | Claims a custom hostname and prints the DNS records to create.                              |
+| `chunk domains verify HOST --env E` | Checks the domain's DNS records now, verifying it when they match.                          |
+| `chunk domains list --env E`        | Lists an environment's custom domains.                                                      |
+| `chunk domains remove HOST --env E` | Removes a domain and its route.                                                             |
 
 `PROJECT` defaults to the current directory. The commands that take `PROJECT`, except `create` and `codegen`, need its
 `chunk.toml`. The commands from `auth` down call a platform's management API.
@@ -143,7 +149,7 @@ Two variables override the saved login, for scripts and CI. `CHUNK_API_URL` sele
 saved token unless it is the saved platform's. `CHUNK_TOKEN` is the token to use instead, sent to `CHUNK_API_URL` or
 else the saved platform; `chunk auth logout` never revokes it.
 
-### `deploy`, `projects`, `environments`, `deployments`, `apps`, `logs` and `secrets`
+### `deploy`, `promote`, `rollback`, `projects`, `environments`, `deployments`, `apps`, `logs`, `secrets` and `domains`
 
 ```sh
 chunk projects create my-server
@@ -162,6 +168,11 @@ fails or a later one supersedes it first. Ctrl-C stops waiting but not the deplo
 ends (`--limit`, default 20, lists up to 200). Before uploading, it warns about secrets `chunk.toml` requires that the
 environment has no value for.
 
+`chunk promote --from SOURCE --env TARGET` deploys the release active in `SOURCE` to `TARGET`, an environment of the
+same project, and follows the deployment as `deploy` does. Only the release moves, never data or secrets.
+`chunk rollback --env E` deploys the release of the deployment active before the current one again, or of the one
+`--to DEPLOYMENT_ID` names, which `chunk deployments` lists.
+
 `chunk environments delete NAME_OR_ID` asks for confirmation on a terminal, and needs `--yes` without one, since it
 destroys the environment's machines and data. Deleting finishes in the background; `--wait` polls until the platform
 reports the environment gone, for up to five minutes, and Ctrl-C stops waiting but not the deletion.
@@ -176,6 +187,12 @@ without its final line break, as in `printf %s "$TOKEN" | chunk secrets put API_
 version, and running deployments receive it without a redeploy. Values are non-empty UTF-8 up to 64 KiB, and an
 environment holds up to 256 secrets. `chunk secrets list` shows names and versions only; no command prints a value.
 `chunk secrets delete NAME` asks for confirmation on a terminal and needs `--yes` without one.
+
+`chunk domains add HOSTNAME --env E` claims a custom hostname and prints its state and the DNS records to create: a TXT
+ownership proof and an SRV record that routes players to the environment. A hostname routes only once it is verified:
+create the records, then run `chunk domains verify HOSTNAME --env E`, which checks DNS right away. `chunk domains list`
+shows each domain's state, and `chunk domains remove HOSTNAME` removes a domain and its route. Commands that take a
+domain accept its hostname or its ID.
 
 ## Testing
 

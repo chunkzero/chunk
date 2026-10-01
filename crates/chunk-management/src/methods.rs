@@ -64,6 +64,13 @@ unary! {
     list_deployments: "DeploymentService" / "ListDeployments" (ListDeploymentsRequest) -> ListDeploymentsResponse;
     list_apps: "DeploymentService" / "ListApps" (ListAppsRequest) -> ListAppsResponse;
 
+    /// Claims a hostname for an environment and returns the DNS records to create; adding it again returns it.
+    add_domain: "DomainService" / "AddDomain" (AddDomainRequest) -> AddDomainResponse;
+    /// Checks the domain's DNS records now and marks it verified when they match.
+    verify_domain: "DomainService" / "VerifyDomain" (VerifyDomainRequest) -> VerifyDomainResponse;
+    list_domains: "DomainService" / "ListDomains" (ListDomainsRequest) -> ListDomainsResponse;
+    remove_domain: "DomainService" / "RemoveDomain" (RemoveDomainRequest) -> RemoveDomainResponse;
+
     /// Creates or replaces a secret as a new version, which attached environments receive without a redeploy.
     set_secret: "SecretService" / "SetSecret" (SetSecretRequest) -> SetSecretResponse;
     /// Lists secret names and versions; values are write-only.
