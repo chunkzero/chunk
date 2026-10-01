@@ -20,9 +20,9 @@ pub fn private(address: IpAddr) -> bool {
     }
 }
 
-/// Whether `address` may be reached from backend code: not loopback, unspecified, private, CGNAT, link-local
-/// (cloud metadata included), unique-local, multicast, broadcast or reserved. IPv6 addresses that embed an IPv4 address
-/// (mapped, NAT64 and 6to4) classify like it.
+/// Whether `address` may be reached from backend code: not loopback, unspecified, private, CGNAT, link-local, cloud
+/// metadata, unique-local, multicast, broadcast or reserved. IPv6 addresses that embed an IPv4 address (mapped,
+/// compatible, translated, NAT64 and 6to4) classify like it, and Teredo addresses, which obscure theirs, are refused.
 #[must_use]
 pub fn public(address: IpAddr) -> bool {
     match address.to_canonical() {
@@ -35,11 +35,12 @@ pub fn public(address: IpAddr) -> bool {
                 Ipv4Addr::new(a, b, c, d)
             };
             match segments {
-                // NAT64, well-known and local-use prefixes.
-                [0x64, 0xff9b, 0, 0, 0, 0, ..] => public_v4(embedded(6)),
-                [0x64, 0xff9b, 1, ..] => false,
+                // The well-known NAT64 prefix, IPv4-compatible (`::` and `::1` included) and IPv4-translated.
+                [0x64, 0xff9b, 0, 0, 0, 0, ..] | [0, 0, 0, 0, 0 | 0xffff, 0, ..] => public_v4(embedded(6)),
                 // 6to4.
                 [0x2002, ..] => public_v4(embedded(1)),
+                // The local-use NAT64 prefix, and Teredo.
+                [0x64, 0xff9b, 1, ..] | [0x2001, 0, ..] => false,
                 _ => {
                     !(address.is_loopback()
                         || address.is_unspecified()
@@ -56,7 +57,9 @@ pub fn public(address: IpAddr) -> bool {
 
 fn public_v4(address: Ipv4Addr) -> bool {
     let [a, b, c, _] = address.octets();
-    !(a == 0
+    // Azure's WireServer, which serves instance metadata and credentials outside link-local space.
+    !(address == Ipv4Addr::new(168, 63, 129, 16)
+        || a == 0
         || address.is_loopback()
         || address.is_private()
         || address.is_link_local()
@@ -112,6 +115,49 @@ mod tests {
             ("::ffff:8.8.8.8", false),
         ] {
             assert_eq!(private(address.parse().unwrap()), expected, "{address}");
+        }
+    }
+
+    #[test]
+    fn public_refuses_internal_ipv4_ranges_in_every_ipv6_form() {
+        let refused = [
+            "0.0.0.0",
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "100.64.0.1",
+            "169.254.169.254",
+            "168.63.129.16",
+            "192.0.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "255.255.255.255",
+        ];
+        for v4 in refused {
+            let address: Ipv4Addr = v4.parse().unwrap();
+            let [a, b, c, d] = address.octets();
+            let (high, low) = (u16::from_be_bytes([a, b]), u16::from_be_bytes([c, d]));
+            let forms = [
+                IpAddr::V4(address),
+                IpAddr::V6(address.to_ipv6_mapped()),
+                IpAddr::V6(address.to_ipv6_compatible()),
+                IpAddr::V6(Ipv6Addr::new(0, 0, 0, 0, 0xffff, 0, high, low)),
+                IpAddr::V6(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, high, low)),
+                IpAddr::V6(Ipv6Addr::new(0x2002, high, low, 0, 0, 0, 0, 1)),
+            ];
+            for form in forms {
+                assert!(!public(form), "{form} embeds {v4}");
+            }
+        }
+        for address in ["::", "::1", "fe80::1", "fc00::1", "fd00:ec2::254", "ff02::1", "64:ff9b:1::1", "2001:0:4136::1"]
+        {
+            assert!(!public(address.parse().unwrap()), "{address}");
+        }
+        for address in
+            ["8.8.8.8", "168.63.129.17", "::ffff:8.8.8.8", "64:ff9b::808:808", "2002:808:808::1", "2606:4700::1111"]
+        {
+            assert!(public(address.parse().unwrap()), "{address}");
         }
     }
 }
