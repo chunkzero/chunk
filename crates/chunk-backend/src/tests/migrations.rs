@@ -373,12 +373,15 @@ async fn a_batch_cut_at_the_output_budget_commits_its_prefix_and_the_backfill_co
     let backend =
         Backend::new("local".into(), Box::new(SqliteStore::open(directory.path().join("budget.db"), "local").unwrap()))
             .unwrap();
-    backend.deploy(deployment("old", 1)).await.unwrap();
-    for id in ["a", "b", "c"] {
-        write(&backend, "old", "writeLarge", id).await;
+    // Small rows whose outputs fill the budget after two, so each batch is cut and continues from its third row.
+    let grow = "displayName: 'x'.repeat(400000)";
+    backend.deploy(transforming("old", 1, grow)).await.unwrap();
+    let ids = ["a", "b", "c", "d", "e"];
+    for id in ids {
+        write(&backend, "old", "writeOld", id).await;
     }
-    backend.deploy(deployment("new", 2)).await.unwrap();
-    for id in ["a", "b", "c"] {
+    backend.deploy(transforming("new", 2, grow)).await.unwrap();
+    for id in ids {
         let name = read(&backend, "new", id).await["displayName"].as_str().unwrap().len();
         assert_eq!(name, 400_000, "row {id} was transformed");
     }
