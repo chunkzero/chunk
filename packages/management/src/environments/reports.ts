@@ -30,16 +30,31 @@ export function reportServices({ sql }: Deps): Reports {
       const environmentId = environmentOf(context);
       const records = batch(request.records, "records").map((record) => {
         if (!record.id || record.id.length > 128) throw invalid("records[].id must be set, and at most 128 characters");
+        if (!record.instanceId) throw invalid("records[].instance_id is required");
         const start = time(record.startTime, "records[].start_time");
         const end = time(record.endTime, "records[].end_time");
         if (end < start) throw invalid("records[].end_time is before start_time");
-        return { id: record.id, start_time: start, end_time: end, player_seconds: record.playerSeconds.toString() };
+        return {
+          id: record.id,
+          instance_id: record.instanceId,
+          start_time: start,
+          end_time: end,
+          player_seconds: record.playerSeconds.toString(),
+        };
       });
+      // A superseded instance may not have heard of it yet, so its spans end where its successor's ownership began.
       await sql`
         insert into usage_records (environment_id, id, start_time, end_time, player_seconds)
-        select ${environmentId}, id, start_time, end_time, player_seconds
+        select ${environmentId}, r.id, r.start_time, least(r.end_time, s.superseded_time),
+          case when s.superseded_time < r.end_time
+            then floor(r.player_seconds * extract(epoch from s.superseded_time - r.start_time)
+              / extract(epoch from r.end_time - r.start_time))::bigint
+            else r.player_seconds
+          end
         from jsonb_to_recordset(${JSON.stringify(records)}::text::jsonb)
-          as r(id text, start_time timestamptz, end_time timestamptz, player_seconds bigint)
+          as r(id text, instance_id text, start_time timestamptz, end_time timestamptz, player_seconds bigint)
+        left join superseded_instances s on s.environment_id = ${environmentId} and s.instance_id = r.instance_id
+        where s.superseded_time is null or r.start_time < s.superseded_time
         on conflict do nothing`;
       return {};
     },

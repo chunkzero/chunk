@@ -1,7 +1,7 @@
 //! Shipping core's log lines and usage records to management: at least once, since management drops what it already
 //! holds, and before core may be suspended or once it stops.
 
-use super::usage::Usage;
+use super::{Lease, usage::Usage};
 use crate::logs::Lines;
 use chunk_management::{Client, v1};
 use std::{
@@ -9,7 +9,7 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
     time::{Duration, SystemTime},
 };
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 
 /// How often buffered lines and records are shipped.
 const INTERVAL: Duration = Duration::from_secs(1);
@@ -29,23 +29,31 @@ pub(crate) struct Telemetry {
     instance_id: String,
     lines: &'static Lines,
     usage: Mutex<Usage>,
+    /// Core's hold on the environment, which decides whose awake time it is.
+    lease: watch::Receiver<Lease>,
     /// Notified to ship at once.
     ship: Notify,
 }
 
 impl Telemetry {
-    pub(super) fn new(client: Client, instance_id: String, lines: &'static Lines, started: SystemTime) -> Self {
-        let usage = Mutex::new(Usage::new(instance_id.clone(), started));
-        Self { client, instance_id, lines, usage, ship: Notify::new() }
+    pub(super) fn new(
+        client: Client,
+        instance_id: String,
+        lines: &'static Lines,
+        lease: watch::Receiver<Lease>,
+    ) -> Self {
+        let usage = Mutex::new(Usage::new(instance_id.clone()));
+        Self { client, instance_id, lines, usage, lease, ship: Notify::new() }
     }
 
     pub(super) fn lines(&self) -> &'static Lines {
         self.lines
     }
 
-    /// Counts awake time with `players` online.
+    /// Counts awake time with `players` online while core holds the environment.
     pub(super) fn tick(&self, players: u32) {
-        self.usage().tick(SystemTime::now(), players);
+        let lease = *self.lease.borrow();
+        self.usage().count(SystemTime::now(), players, lease);
     }
 
     /// Whether core may be suspended as far as telemetry goes: every usage record reached management, and no log line
@@ -82,7 +90,8 @@ impl Telemetry {
 
     /// Ends the usage span and ships what is buffered, within `bound`.
     pub(crate) async fn finish(&self, bound: Duration) {
-        self.usage().end(SystemTime::now());
+        let lease = *self.lease.borrow();
+        self.usage().finish(SystemTime::now(), lease);
         match tokio::time::timeout(bound, self.ship_all()).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::warn!(%error, "logs and usage not shipped before stopping"),

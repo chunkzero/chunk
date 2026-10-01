@@ -294,6 +294,11 @@ message UsageRecord {
   google.protobuf.Timestamp end_time = 3;
   // Connected player time summed over all players in the span.
   uint64 player_seconds = 4;
+  // The core process that counted the span. Once another core's attach
+  // supersedes that process, the server ends its spans where that happened,
+  // scaling player_seconds to match, so its spans never overlap the next
+  // owner's.
+  string instance_id = 5;
 }
 
 message ReportUsageResponse {}

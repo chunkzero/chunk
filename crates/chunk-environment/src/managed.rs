@@ -29,7 +29,7 @@ use std::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 use telemetry::Telemetry;
 use tokio::{sync::watch, time::MissedTickBehavior};
@@ -173,7 +173,7 @@ impl<'a> Managed<'a> {
     ) -> Self {
         let (client, stopping) = (management.client(), CancellationToken::new());
         let telemetry =
-            Telemetry::new(client.clone(), registration.instance_id.clone(), &crate::logs::LINES, registration.started);
+            Telemetry::new(client.clone(), registration.instance_id.clone(), &crate::logs::LINES, lease.subscribe());
         Self {
             reporter: status::Reporter::new(client.clone(), stopping.clone()),
             alarm: alarm::Alarm::new(client.clone()),
@@ -256,7 +256,7 @@ impl<'a> Managed<'a> {
         }
     }
 
-    /// Counts awake time and the players online every [`usage::TICK`].
+    /// Counts awake time and the players online every [`usage::TICK`] while core holds the environment.
     async fn count_usage(&self) -> std::convert::Infallible {
         let mut tick = tokio::time::interval(usage::TICK);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -423,7 +423,7 @@ impl<'a> Managed<'a> {
                 }
                 Err(error) => {
                     tracing::warn!(%error, deployment, "deployment rejected; the previous one keeps serving");
-                    let message = bounded(error.to_string());
+                    let message = bounded(&error.to_string());
                     lock(&self.deployments).rejected = Some((deployment.into(), message.clone()));
                     (v1::DeploymentState::Failed, message)
                 }
@@ -646,8 +646,6 @@ pub(crate) struct Registration {
     log_store: Arc<LogStore>,
     /// Renews `log_store`'s credentials from the attach that took no lease, until the core attach takes over.
     renewal: Option<Renewal>,
-    /// When this run started, which counts as awake from then on.
-    started: SystemTime,
 }
 
 impl Registration {
@@ -662,7 +660,7 @@ impl Registration {
         core: &mut CoreConfig,
         stop: &CancellationToken,
     ) -> io::Result<Option<Self>> {
-        let (environment, started) = (core.environment.clone(), SystemTime::now());
+        let environment = core.environment.clone();
         let instance_id = uuid::Uuid::new_v4().to_string();
         let client = management.client();
         let request = log_store::request(&instance_id);
@@ -700,7 +698,7 @@ impl Registration {
             log_store: log_store.clone(),
         };
         let renewal = renewer.start(Some(stream));
-        Ok(Some(Self { instance_id, environment, log_store, renewal, started }))
+        Ok(Some(Self { instance_id, environment, log_store, renewal }))
     }
 
     /// A run that replicates nothing management grants.
@@ -712,7 +710,6 @@ impl Registration {
             environment: environment.into(),
             log_store: Arc::new(log_store),
             renewal: None,
-            started: SystemTime::now(),
         }
     }
 }
@@ -758,7 +755,9 @@ fn progress(deployment: &str, state: v1::DeploymentState, message: String) -> v1
     v1::DeploymentProgress { deployment_id: deployment.into(), state: state.into(), message }
 }
 
-fn bounded(mut message: String) -> String {
+/// `message` with each NUL escaped, since management stores none, and cut to [`MAX_MESSAGE_BYTES`].
+fn bounded(message: &str) -> String {
+    let mut message = crate::logs::escape_nul(message).into_owned();
     message.truncate(message.floor_char_boundary(MAX_MESSAGE_BYTES));
     message
 }

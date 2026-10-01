@@ -1,5 +1,6 @@
 //! Awake time and player time, recorded as spans for management's accounting.
 
+use super::Lease;
 use chunk_management::v1;
 use std::{
     collections::VecDeque,
@@ -21,10 +22,11 @@ pub(super) struct Usage {
     instance_id: String,
     /// Numbers the next record.
     index: u64,
+    /// Whether a span is being counted.
+    counting: bool,
     start: SystemTime,
-    /// The latest count, or the start before the first.
+    /// The latest count.
     last: SystemTime,
-    ticked: bool,
     player_millis: u128,
     pending: VecDeque<Record>,
 }
@@ -39,16 +41,48 @@ struct Record {
 }
 
 impl Usage {
-    pub(super) fn new(instance_id: String, start: SystemTime) -> Self {
-        Self { instance_id, index: 0, start, last: start, ticked: false, player_millis: 0, pending: VecDeque::new() }
+    pub(super) fn new(instance_id: String) -> Self {
+        let never = SystemTime::UNIX_EPOCH;
+        Self {
+            instance_id,
+            index: 0,
+            counting: false,
+            start: never,
+            last: never,
+            player_millis: 0,
+            pending: VecDeque::new(),
+        }
     }
 
-    /// Counts the time since the last count, with `players` online, as awake. After a longer gap than [`GAP`], or when
-    /// the clock went back, the span ends at the last count and a new one starts `now`. A span [`SPAN`] long is
-    /// recorded.
-    pub(super) fn tick(&mut self, now: SystemTime, players: u32) {
+    /// Counts awake time with `players` online while core holds `lease`. Other cores' time isn't core's to count: before
+    /// core first holds a lease, another owns the environment, and once superseded, the span ends at the last count.
+    pub(super) fn count(&mut self, now: SystemTime, players: u32, lease: Lease) {
+        match lease {
+            Lease::Held(_) => self.tick(now, players),
+            Lease::Superseded => self.stop(),
+            Lease::Waiting => {}
+        }
+    }
+
+    /// Ends the span as the process stops: at `now` while core holds `lease`, otherwise at the last count.
+    pub(super) fn finish(&mut self, now: SystemTime, lease: Lease) {
+        if matches!(lease, Lease::Held(_)) {
+            self.end(now);
+        } else {
+            self.stop();
+        }
+    }
+
+    /// Counts the time since the last count, with `players` online, as awake, or starts a span `now` if none is being
+    /// counted. After a longer gap than [`GAP`], or when the clock went back, the span ends at the last count and a new
+    /// one starts `now`. A span [`SPAN`] long is recorded.
+    fn tick(&mut self, now: SystemTime, players: u32) {
+        if !self.counting {
+            (self.counting, self.start, self.last) = (true, now, now);
+            return;
+        }
         match now.duration_since(self.last) {
-            Ok(elapsed) if elapsed <= GAP || !self.ticked => {
+            Ok(elapsed) if elapsed <= GAP => {
                 self.player_millis += u128::from(players) * elapsed.as_millis();
                 self.last = now;
                 if now.duration_since(self.start).is_ok_and(|length| length >= SPAN) {
@@ -61,15 +95,20 @@ impl Usage {
                 self.last = self.start;
             }
         }
-        self.ticked = true;
     }
 
-    /// Ends the span at `now`, as when the process stops, or at the last count after a longer gap than [`GAP`].
-    pub(super) fn end(&mut self, now: SystemTime) {
-        if now.duration_since(self.last).is_ok_and(|elapsed| elapsed <= GAP || !self.ticked) {
+    /// Ends the span at `now`, or at the last count after a longer gap than [`GAP`].
+    fn end(&mut self, now: SystemTime) {
+        if self.counting && now.duration_since(self.last).is_ok_and(|elapsed| elapsed <= GAP) {
             self.last = now;
         }
+        self.stop();
+    }
+
+    /// Ends the span at the last count.
+    fn stop(&mut self) {
         self.close();
+        self.counting = false;
     }
 
     /// Records the span up to the last count, carrying partial player seconds over, and starts the next one there.
@@ -112,6 +151,7 @@ impl Usage {
                 record.sent = true;
                 v1::UsageRecord {
                     id: record.id.clone(),
+                    instance_id: self.instance_id.clone(),
                     start_time: Some(record.start.into()),
                     end_time: Some(record.end.into()),
                     player_seconds: record.player_seconds,
@@ -139,11 +179,10 @@ mod tests {
     fn spans_split_at_a_gap_and_count_player_time_only_while_awake() {
         let start = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let at = |seconds| start + Duration::from_secs(seconds);
-        let mut usage = Usage::new("core".into(), start);
-        // A slow start still counts, then two players for a minute fill the first span.
-        usage.tick(at(20), 0);
-        for second in 21..=60 {
-            usage.tick(at(second), 2);
+        let mut usage = Usage::new("core".into());
+        // The first count starts the span, and two players for its last 40 seconds fill it.
+        for second in 0..=60 {
+            usage.tick(at(second), if second > 20 { 2 } else { 0 });
         }
         usage.tick(at(61), 1);
         // Suspended from 61 to 3600: the second span ends at 61.
@@ -169,7 +208,8 @@ mod tests {
         assert!(usage.settled());
 
         // Stopping right after a long pause doesn't count the pause.
-        let mut paused = Usage::new("core".into(), start);
+        let mut paused = Usage::new("core".into());
+        paused.tick(at(0), 1);
         paused.tick(at(5), 1);
         paused.end(at(3_605));
         let records = paused.pending(10);
@@ -181,7 +221,8 @@ mod tests {
     fn unsent_records_past_the_limit_fold_together_without_losing_time() {
         let start = SystemTime::UNIX_EPOCH;
         let at = |seconds| start + Duration::from_secs(seconds);
-        let mut usage = Usage::new("core".into(), start);
+        let mut usage = Usage::new("core".into());
+        usage.tick(start, 0);
         // Two seconds awake with one player, then a gap, again and again.
         let record = |usage: &mut Usage, n: u64| {
             usage.tick(at(n * 100 + 1), 1);
@@ -209,5 +250,35 @@ mod tests {
         let total: u64 = spans.iter().map(seconds).sum();
         let players: u64 = records.iter().map(|record| record.player_seconds).sum();
         assert_eq!((total, players), (2 * (MAX_PENDING as u64 + 5), 2 * (MAX_PENDING as u64 + 5)));
+    }
+
+    #[test]
+    fn a_core_counts_only_while_it_holds_the_environment() {
+        let at = |seconds| SystemTime::UNIX_EPOCH + Duration::from_secs(seconds);
+        let spans = |usage: &mut Usage| -> Vec<_> {
+            let records = usage.pending(10).into_iter();
+            records
+                .map(|record| {
+                    let [from, to] = [record.start_time, record.end_time].map(|time| {
+                        let time = SystemTime::try_from(time.unwrap()).unwrap();
+                        time.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs()
+                    });
+                    (from, to, record.player_seconds)
+                })
+                .collect()
+        };
+        // Core A owns from 0. B starts at 10 and takes over at 20. A hears of it at 21 and stops at 25; B stops at 30.
+        let (mut a, mut b) = (Usage::new("a".into()), Usage::new("b".into()));
+        for second in 0..=20 {
+            a.count(at(second), 1, Lease::Held(1));
+        }
+        a.count(at(21), 1, Lease::Superseded);
+        a.finish(at(25), Lease::Superseded);
+        for second in 10..=30 {
+            b.count(at(second), 1, if second < 20 { Lease::Waiting } else { Lease::Held(2) });
+        }
+        b.finish(at(30), Lease::Held(2));
+        assert_eq!(spans(&mut a), [(0, 20, 20)]);
+        assert_eq!(spans(&mut b), [(20, 30, 10)]);
     }
 }

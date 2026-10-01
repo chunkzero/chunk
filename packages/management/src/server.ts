@@ -36,6 +36,7 @@ import { SecretService } from "./gen/chunk/management/v1/secrets_pb.ts";
 import { logService } from "./logs/service.ts";
 import { projectService } from "./projects/service.ts";
 import { type Authenticator, authorize, methodKey } from "./rpc/caller.ts";
+import { refuseNul } from "./rpc/validate.ts";
 import { secretService } from "./secrets/service.ts";
 
 export interface HandlerOptions {
@@ -65,7 +66,7 @@ export function createHandler(
   options: HandlerOptions = {},
 ): (request: Request, server?: Server) => Promise<Response> {
   const authenticator = options.authenticator ?? tokenAuthenticator(deps.sql);
-  const router = createConnectRouter({ interceptors: [logUnexpectedErrors], readMaxBytes: maxRpcBytes });
+  const router = createConnectRouter({ interceptors: [logUnexpectedErrors, refuseNul], readMaxBytes: maxRpcBytes });
   router
     .service(AuthService, authService(deps))
     .service(ProjectService, projectService(deps))

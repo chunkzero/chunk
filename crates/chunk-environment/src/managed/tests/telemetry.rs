@@ -1,9 +1,11 @@
 //! Log and usage shipments against the fake management.
 
 use super::{launcher::respond, *};
-use crate::{logs::Lines, managed::telemetry::Telemetry};
+use crate::{
+    logs::Lines,
+    managed::{Lease, telemetry::Telemetry},
+};
 use chunk_management::v1::{LogEntry, LogSeverity, LogSource, ReportLogsRequest, ReportUsageRequest, UsageRecord};
-use std::time::SystemTime;
 
 /// What management holds of the environment's reports, deduplicated by the rules of `packages/management`.
 #[derive(Default)]
@@ -44,12 +46,14 @@ async fn lines_are_shipped_again_until_acknowledged_and_the_oldest_drop_once_the
     let harness = Harness::new().await;
     let lines: &'static Lines = Box::leak(Box::new(Lines::new()));
     let client = harness.management_config().client();
-    let telemetry = Telemetry::new(client, "core-1".into(), lines, SystemTime::now());
+    let (_lease, held) = watch::channel(Lease::Held(1));
+    let telemetry = Telemetry::new(client, "core-1".into(), lines, held);
+    telemetry.tick(0);
     for line in ["first", "second"] {
-        lines.push(LogSource::Core, LogSeverity::Info, line.into());
+        lines.push(LogSource::Core, LogSeverity::Info, line.into(), None);
     }
     lines.serving("dep_a");
-    lines.push(LogSource::Gateway, LogSeverity::Warn, "third".into());
+    lines.push(LogSource::Gateway, LogSeverity::Warn, "third".into(), None);
 
     // Management stores the batch but its reply is lost, so the lines stay until the next shipment dedupes them.
     harness.management.telemetry.lock().unwrap().lost = 1;
@@ -83,7 +87,7 @@ async fn lines_are_shipped_again_until_acknowledged_and_the_oldest_drop_once_the
     // accepts.
     let long = "x".repeat(64 * 1024);
     for _ in 0..1_000 {
-        lines.push(LogSource::Core, LogSeverity::Info, long.clone());
+        lines.push(LogSource::Core, LogSeverity::Info, long.clone(), None);
     }
     let dropped = lines.dropped();
     assert!(dropped > 0);

@@ -145,7 +145,13 @@ describe.skipIf(!databaseUrl)("EnvironmentService", () => {
     }));
     await client.reportLogs({ entries });
     await client.reportLogs({ entries });
-    const usage = { id: "u1", startTime: time, endTime: { seconds: 1_700_000_060n, nanos: 0 }, playerSeconds: 60n };
+    const usage = {
+      id: "u1",
+      instanceId: "core-a",
+      startTime: time,
+      endTime: { seconds: 1_700_000_060n, nanos: 0 },
+      playerSeconds: 60n,
+    };
     await client.reportUsage({ records: [usage] });
     await client.reportUsage({ records: [usage] });
     await client.reportFailedAuth({
@@ -160,5 +166,54 @@ describe.skipIf(!databaseUrl)("EnvironmentService", () => {
     const blocked = await h.sql<{ address: string }[]>`
       select address from blocked_addresses where environment_id = ${environmentId} order by address`;
     expect(blocked.map((row) => row.address)).toEqual(["192.0.2.1", "2001:db8:1:2::/64"]);
+  });
+
+  test("a superseded core's usage ends where its successor took over", async () => {
+    const { environmentId, client } = await environment();
+    const a = attach(client, { core: true, epoch: 1n, instanceId: "core-a" });
+    await a.messages.next();
+    const b = attach(client, { core: true, epoch: 1n, instanceId: "core-b" });
+    await b.messages.next();
+    // Pinned, so the expected spans are whole seconds.
+    const takeover = 1_800_000_000n;
+    await h.sql`
+      update superseded_instances set superseded_time = to_timestamp(${takeover})
+      where environment_id = ${environmentId} and instance_id = 'core-a'`;
+    const at = (offset: bigint) => ({ seconds: takeover + offset, nanos: 0 });
+    const span = (id: string, instanceId: string, from: bigint, to: bigint) => ({
+      id,
+      instanceId,
+      startTime: at(from),
+      endTime: at(to),
+      playerSeconds: 2n * (to - from),
+    });
+    // Core A counted on after B took over, as when it had not heard of B yet.
+    await client.reportUsage({
+      records: [span("a/1", "core-a", -30n, 30n), span("a/2", "core-a", 30n, 40n), span("b/1", "core-b", 1n, 30n)],
+    });
+    const stored = await h.sql<{ id: string; start: bigint; end: bigint; player_seconds: bigint }[]>`
+      select id, extract(epoch from start_time)::bigint - ${takeover} as start,
+        extract(epoch from end_time)::bigint - ${takeover} as end, player_seconds
+      from usage_records where environment_id = ${environmentId} order by id`;
+    expect([...stored]).toEqual([
+      { id: "a/1", start: -30n, end: 0n, player_seconds: 60n },
+      { id: "b/1", start: 1n, end: 30n, player_seconds: 58n },
+    ]);
+    a.close();
+    b.close();
+  });
+
+  test("a string holding NUL is refused before it reaches Postgres", async () => {
+    const { client } = await environment();
+    const entry = {
+      time: { seconds: 1_700_000_000n, nanos: 0 },
+      message: "before\0after",
+      instanceId: "core-a",
+      sequence: 1n,
+    };
+    expect(await codeOf(client.reportLogs({ entries: [entry] }))).toBe(Code.InvalidArgument);
+    expect(await codeOf(attach(client, { core: true, epoch: 1n, instanceId: "core\0a" }).messages.next())).toBe(
+      Code.InvalidArgument,
+    );
   });
 });

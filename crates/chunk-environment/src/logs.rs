@@ -2,6 +2,7 @@
 
 use chunk_management::v1::{LogSeverity, LogSource};
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     fmt::{self, Write as _},
     sync::{
@@ -27,10 +28,10 @@ pub(crate) static LINES: Lines = Lines::new();
 /// management once a managed core starts.
 pub fn logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
-    tracing_subscriber::registry().with(filter).with(tracing_subscriber::fmt::layer()).with(Capture).init();
+    tracing_subscriber::registry().with(filter).with(tracing_subscriber::fmt::layer()).with(Capture(&LINES)).init();
 }
 
-struct Capture;
+struct Capture(&'static Lines);
 
 impl<S: Subscriber> Layer<S> for Capture {
     fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
@@ -41,41 +42,67 @@ impl<S: Subscriber> Layer<S> for Capture {
             Level::INFO => LogSeverity::Info,
             _ => return,
         };
-        if !LINES.capturing.load(Ordering::Relaxed) {
+        if !self.0.capturing.load(Ordering::Relaxed) {
             return;
         }
         let source = if metadata.target().starts_with("chunk_proxy") { LogSource::Gateway } else { LogSource::Core };
         let mut text = Text::default();
         event.record(&mut text);
-        LINES.push(source, severity, text.0);
+        self.0.push(source, severity, text.text, text.deployment);
     }
 }
 
-/// An event's message, then its other fields as `name=value`, up to [`MAX_LINE_BYTES`].
+/// `text` with each NUL escaped as `\0`, since management stores none.
+pub(crate) fn escape_nul(text: &str) -> Cow<'_, str> {
+    if text.contains('\0') { text.replace('\0', "\\0").into() } else { text.into() }
+}
+
+/// An event's message, then its other fields as `name=value`, up to [`MAX_LINE_BYTES`], and the deployment the event
+/// names in its `deployment` field.
 #[derive(Default)]
-struct Text(String);
+struct Text {
+    text: String,
+    deployment: Option<String>,
+}
 
 impl fmt::Write for Text {
     /// Fails once the text is full, which stops formatting the rest.
     fn write_str(&mut self, text: &str) -> fmt::Result {
-        let fits = text.floor_char_boundary(MAX_LINE_BYTES - self.0.len());
-        self.0.push_str(&text[..fits]);
+        let text = escape_nul(text);
+        let fits = text.floor_char_boundary(MAX_LINE_BYTES - self.text.len());
+        self.text.push_str(&text[..fits]);
         if fits < text.len() { Err(fmt::Error) } else { Ok(()) }
     }
 }
 
 impl tracing::field::Visit for Text {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "deployment" {
+            self.deployment = Some(value.into());
+        }
+        self.write_field(field, &value);
+    }
+
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        let separator = if self.0.is_empty() { "" } else { " " };
+        if field.name() == "deployment" {
+            self.deployment = Some(format!("{value:?}"));
+        }
+        self.write_field(field, value);
+    }
+
+    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
+        self.write_field(field, &format_args!("{value}"));
+    }
+}
+
+impl Text {
+    fn write_field(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        let separator = if self.text.is_empty() { "" } else { " " };
         _ = if field.name() == "message" {
             write!(self, "{separator}{value:?}")
         } else {
             write!(self, "{separator}{}={value:?}", field.name())
         };
-    }
-
-    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
-        self.record_debug(field, &format_args!("{value}"));
     }
 }
 
@@ -89,7 +116,7 @@ pub(crate) struct Line {
     pub source: LogSource,
     pub severity: LogSeverity,
     pub message: String,
-    /// The deployment the process served then, or empty.
+    /// The deployment the event named, else the one the process served then, or empty.
     pub deployment: Arc<str>,
 }
 
@@ -125,16 +152,26 @@ impl Lines {
         self.lock().deployment = Some(deployment.into());
     }
 
-    /// Keeps `message`, cut to [`MAX_LINE_BYTES`], dropping the oldest lines once the buffer is full. The kept text
-    /// holds no spare capacity, so the buffer's count of its bytes is what it holds.
-    pub(crate) fn push(&self, source: LogSource, severity: LogSeverity, mut message: String) {
+    /// Keeps `message`, cut to [`MAX_LINE_BYTES`], as logged for `deployment`, or else for the one served, dropping the
+    /// oldest lines once the buffer is full. The kept text holds no spare capacity, so the buffer's count of its bytes
+    /// is what it holds.
+    pub(crate) fn push(
+        &self,
+        source: LogSource,
+        severity: LogSeverity,
+        mut message: String,
+        deployment: Option<String>,
+    ) {
         message.truncate(message.floor_char_boundary(MAX_LINE_BYTES));
         message.shrink_to_fit();
         let mut state = self.lock();
         let sequence = state.next;
         state.next += 1;
         state.bytes += message.len() + LINE_OVERHEAD;
-        let deployment = state.deployment.clone().unwrap_or_else(|| "".into());
+        let deployment = match deployment {
+            Some(deployment) => deployment.into(),
+            None => state.deployment.clone().unwrap_or_else(|| "".into()),
+        };
         state.lines.push_back(Line {
             sequence,
             time: SystemTime::now(),
@@ -188,5 +225,39 @@ impl Lines {
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The lines `log` captures, logging for `serving`.
+    fn captured(serving: &str, log: impl FnOnce()) -> Vec<Line> {
+        let lines: &'static Lines = Box::leak(Box::new(Lines::new()));
+        lines.capture();
+        lines.serving(serving);
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(Capture(lines)), log);
+        lines.oldest(usize::MAX, usize::MAX, 0)
+    }
+
+    #[test]
+    fn nul_characters_are_escaped_within_the_line_bound() {
+        let lines = captured("", || {
+            tracing::warn!(error = %std::io::Error::other("bad\0hook"), "hook \0 failed");
+            tracing::info!("{}", "\0".repeat(MAX_LINE_BYTES));
+        });
+        assert_eq!(lines[0].message, "hook \\0 failed error=bad\\0hook");
+        assert_eq!(lines[1].message, "\\0".repeat(MAX_LINE_BYTES / 2));
+    }
+
+    #[test]
+    fn a_line_belongs_to_the_deployment_its_event_names() {
+        let lines = captured("dep_b", || {
+            tracing::info!(deployment = "dep_a", "query on a retained deployment");
+            tracing::info!("query on the current deployment");
+        });
+        let deployments: Vec<_> = lines.iter().map(|line| &*line.deployment).collect();
+        assert_eq!(deployments, ["dep_a", "dep_b"]);
     }
 }
