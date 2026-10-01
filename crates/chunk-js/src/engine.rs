@@ -124,13 +124,27 @@ impl Engine {
         host: Box<dyn ReadHost>,
         cancellation: &Cancellation,
     ) -> Result<Execution, Error> {
+        self.execute_sized(id, invocation, host, cancellation, bounds::JSON_BYTES)
+    }
+
+    /// Like [`Engine::execute`], with `json_bytes` as the limit on the arguments and the result.
+    /// # Errors
+    /// Reports unknown deployments, invalid input, execution errors and budgets.
+    pub fn execute_sized(
+        &mut self,
+        id: &DeploymentId,
+        invocation: Invocation,
+        host: Box<dyn ReadHost>,
+        cancellation: &Cancellation,
+        json_bytes: usize,
+    ) -> Result<Execution, Error> {
         let resident = self.deployments.get_mut(id).ok_or(Error::UnknownDeployment)?;
         if invocation.export.is_empty() || invocation.export.len() > bounds::NAME_BYTES {
             return Err(Error::Invalid("invalid export"));
         }
         let caller = invocation.caller;
         let arguments = invocation.arguments;
-        if caller.as_str().len() > bounds::JSON_BYTES || arguments.as_str().len() > bounds::JSON_BYTES {
+        if caller.as_str().len() > bounds::JSON_BYTES || arguments.as_str().len() > json_bytes {
             return Err(Error::Invalid("input exceeds size limit"));
         }
         if cancellation.is_cancelled() {
@@ -156,6 +170,7 @@ impl Engine {
             arguments,
             timestamp: invocation.timestamp,
             seed: invocation.seed,
+            json_bytes,
             env: resident.env.clone(),
             runner: Runner::Transaction(Capabilities {
                 generation: runtime.calls() + 1,
@@ -217,6 +232,7 @@ impl Engine {
             arguments: invocation.arguments,
             timestamp: invocation.timestamp,
             seed: invocation.seed,
+            json_bytes: bounds::JSON_BYTES,
             env: invocation.env,
             runner: Runner::Action(crate::actions::ActionCapabilities::new(
                 invocation.id,

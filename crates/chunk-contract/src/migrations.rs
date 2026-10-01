@@ -88,7 +88,7 @@ pub fn migration_number(id: &str) -> Option<(&str, u32)> {
 
 /// # Errors
 /// Rejects invalid IDs, misordered or duplicate entries, finishes without an open expand, invalid snapshots and
-/// snapshots that drop a table or differ from the previous one by more than the entry declares.
+/// reserved tables, snapshots that drop a table or differ from the previous one by more than the entry declares.
 pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str> {
     if migrations.len() > MAX_MIGRATIONS {
         return Err("too many migrations");
@@ -107,6 +107,9 @@ pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str>
             return Err("invalid migration hash");
         }
         crate::validate(&migration.schema)?;
+        if migration.schema.keys().chain(migration.tables.keys()).any(|table| crate::is_system_table(table)) {
+            return Err("migrations can't declare a reserved chunk_ table");
+        }
         for (table, changes) in &migration.tables {
             crate::validate_name(table)?;
             changes.added.iter().chain(&changes.removed).try_for_each(|field| crate::validate_name(field))?;

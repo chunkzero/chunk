@@ -251,6 +251,16 @@ fn validate_fields(fields: &BTreeMap<String, Field>, depth: usize, metadata: boo
     Ok(())
 }
 
+/// Tables whose names start with this prefix, in any letter case, belong to the
+/// environment itself. App deployments and migrations may not declare them.
+pub const SYSTEM_TABLE_PREFIX: &str = "chunk_";
+
+/// Whether `table` is reserved for the environment by [`SYSTEM_TABLE_PREFIX`].
+#[must_use]
+pub fn is_system_table(table: &str) -> bool {
+    table.get(..SYSTEM_TABLE_PREFIX.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(SYSTEM_TABLE_PREFIX))
+}
+
 /// Portable SQL identifiers; a leading underscore is reserved for storage metadata.
 /// # Errors
 /// Rejects empty, oversized, reserved or non-ASCII identifiers.

@@ -2,7 +2,6 @@ use chunk_contract::{DatabaseSchema, Deployment, Migration, MigrationKind, Migra
 use serde_json::{Value, json};
 
 use super::*;
-use crate::TransformError;
 
 fn schema(field: &str) -> DatabaseSchema {
     serde_json::from_value(json!({"fighters": {"fields": {field: {"schema": {"type": "string"}}}}})).unwrap()
@@ -61,8 +60,8 @@ fn deployed(id: &str, migrations: &[Migration]) -> Deployment {
     }
 }
 
-fn upper(rows: &[Value]) -> Vec<Value> {
-    rows.iter().map(|row| json!({"displayName": row["name"].as_str().unwrap().to_uppercase()})).collect()
+fn upper(row: &Value) -> Value {
+    json!({"displayName": row["name"].as_str().unwrap().to_uppercase()})
 }
 
 fn fighter(store: &mut SqliteStore, id: &str) -> Value {
@@ -95,7 +94,7 @@ fn a_backfill_resumes_from_its_cursor_after_a_restart() {
     let backfill = Work::Backfill { migration: "0002_rename".into(), table: "fighters".into() };
     let pending = store.pending_work().unwrap();
     assert_eq!((&pending[0].work, pending[0].done, pending[0].total), (&backfill, 0, 300));
-    store.run_work(pending[0].id, &mut |_, _, rows| Ok(upper(&rows))).unwrap();
+    store.run_work(pending[0].id, &mut |_, _, row| Ok(upper(&row))).unwrap();
     assert_eq!(store.pending_work().unwrap()[0].done, 256);
     drop(store);
 
@@ -103,9 +102,9 @@ fn a_backfill_resumes_from_its_cursor_after_a_restart() {
     let mut seen = Vec::new();
     let id = store.pending_work().unwrap()[0].id;
     store
-        .run_work(id, &mut |_, _, rows| {
-            seen.extend(rows.iter().map(|row| row["_id"].clone()));
-            Ok(upper(&rows))
+        .run_work(id, &mut |_, _, row| {
+            seen.push(row["_id"].clone());
+            Ok(upper(&row))
         })
         .unwrap();
     assert_eq!((seen.len(), &seen[0]), (44, &json!("256")));
@@ -119,8 +118,8 @@ fn installs_need_the_applied_journal_and_roll_back_only_until_the_old_shape_is_d
     let directory = tempfile::tempdir().unwrap();
     let mut store = renamed(&directory.path().join("data.db"));
     let id = store.pending_work().unwrap()[0].id;
-    store.run_work(id, &mut |_, _, rows| Ok(upper(&rows))).unwrap();
-    store.run_work(id, &mut |_, _, rows| Ok(upper(&rows))).unwrap();
+    store.run_work(id, &mut |_, _, row| Ok(upper(&row))).unwrap();
+    store.run_work(id, &mut |_, _, row| Ok(upper(&row))).unwrap();
 
     let mut edited = deployment("edited", 3);
     edited.contracts.migrations[1].hash = "1".repeat(64);
@@ -130,7 +129,7 @@ fn installs_need_the_applied_journal_and_roll_back_only_until_the_old_shape_is_d
     store.install_deployment(&deployment("finished", 3)).unwrap();
     assert!(store.pending_work().unwrap().is_empty(), "resident deployments still declare fighters.name");
     let chained = migration_error(store.install_deployment(&deployment("chained", 4)));
-    assert!(chained.contains("0004_title") && chained.contains("wait for 0002_rename"), "{chained}");
+    assert!(chained.contains("0004_title") && chained.contains("intermediate release"), "{chained}");
     let mut baseline = journal(3)[..1].to_vec();
     baseline[0].id = "0003_base".into();
     baseline[0].schema = schema("displayName");
@@ -140,7 +139,7 @@ fn installs_need_the_applied_journal_and_roll_back_only_until_the_old_shape_is_d
     store.release_deployment("rollback").unwrap();
     let pending = store.pending_work().unwrap();
     assert_eq!(pending[0].work, Work::Drop { migration: "0002_rename".into() });
-    store.run_work(pending[0].id, &mut |_, _, rows| Ok(upper(&rows))).unwrap();
+    store.run_work(pending[0].id, &mut |_, _, row| Ok(upper(&row))).unwrap();
     assert!(store.migrations().unwrap().is_empty());
     assert_eq!(fighter(&mut store, "007"), json!({"displayName": "N7"}));
     assert!(migration_error(store.install_deployment(&deployment("late", 1))).contains("fighters.name"));
@@ -148,22 +147,15 @@ fn installs_need_the_applied_journal_and_roll_back_only_until_the_old_shape_is_d
 }
 
 #[test]
-fn a_backfill_halves_its_batch_on_limits_and_fails_on_a_single_row_that_exceeds_them() {
+fn a_failing_transform_names_its_migration_and_row() {
     let directory = tempfile::tempdir().unwrap();
     let mut store = renamed(&directory.path().join("data.db"));
     let id = store.pending_work().unwrap()[0].id;
-    let mut sizes = Vec::new();
-    let mut limited = |_: &str, _: &str, rows: Vec<Value>| {
-        sizes.push(rows.len());
-        if rows.len() > 100 { Err(TransformError::Limit) } else { Ok(upper(&rows)) }
-    };
-    store.run_work(id, &mut limited).unwrap();
-    store.run_work(id, &mut limited).unwrap();
-    assert_eq!(sizes, [256, 128, 64, 64]);
-    assert_eq!(store.pending_work().unwrap()[0].done, 128);
-
-    let result = store.run_work(id, &mut |_, _, _| Err(TransformError::Limit));
-    assert!(matches!(&result, Err(Error::Migration(m)) if m.contains("0002_rename") && m.contains("row 128")));
+    let result = store.run_work(id, &mut |_, _, row| {
+        if row["_id"] == "003" { Err("boom".into()) } else { Ok(upper(&row)) }
+    });
+    assert!(matches!(&result, Err(Error::Migration(m)) if m.contains("0002_rename") && m.contains("row 003")));
+    assert_eq!(store.pending_work().unwrap()[0].done, 0, "a failed batch commits nothing");
 }
 
 #[test]
@@ -173,7 +165,7 @@ fn a_drop_waits_for_a_pending_backfill_and_recounts_the_remaining_documents() {
     let mut store = renamed(&path);
     let settle = |store: &mut SqliteStore| {
         while let Some(pending) = store.pending_work().unwrap().first().cloned() {
-            store.run_work(pending.id, &mut |_, _, rows| Ok(upper(&rows))).unwrap();
+            store.run_work(pending.id, &mut |_, _, row| Ok(upper(&row))).unwrap();
         }
     };
     settle(&mut store);
@@ -186,7 +178,7 @@ fn a_drop_waits_for_a_pending_backfill_and_recounts_the_remaining_documents() {
     store.install_deployment(&deployment("again", 2)).unwrap();
     let pending = store.pending_work().unwrap();
     assert!(matches!(pending[1].work, Work::Backfill { .. }));
-    store.run_work(pending[0].id, &mut |_, _, rows| Ok(upper(&rows))).unwrap();
+    store.run_work(pending[0].id, &mut |_, _, row| Ok(upper(&row))).unwrap();
     assert_eq!(store.migrations().unwrap().len(), 1, "the drop waits for the backfill");
 
     settle(&mut store);
@@ -196,4 +188,43 @@ fn a_drop_waits_for_a_pending_backfill_and_recounts_the_remaining_documents() {
     assert_eq!(bytes("SELECT _bytes FROM fighters WHERE _id = '007'"), 20);
     let expected: usize = (0..300).map(|i| json!({"displayName": format!("N{i}")}).to_string().len()).sum();
     assert_eq!(bytes("SELECT document_bytes FROM _chunk_metadata"), i64::try_from(expected).unwrap());
+}
+
+#[test]
+fn a_backfill_without_a_carrier_restarts_from_the_first_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = renamed(&directory.path().join("data.db"));
+    let id = store.pending_work().unwrap()[0].id;
+    store.run_work(id, &mut |_, _, row| Ok(upper(&row))).unwrap();
+    assert_eq!(store.pending_work().unwrap()[0].done, 256);
+    store.release_deployment("new").unwrap();
+    let revision = store.snapshot().unwrap().revision.0;
+    let changed = crate::tests::write_to("fighters", "000", Some(json!({"name": "changed"})));
+    store.commit(commit("gap", revision, vec![changed])).unwrap();
+
+    store.install_deployment(&deployment("again", 2)).unwrap();
+    assert_eq!(store.pending_work().unwrap()[0].done, 0);
+    while let Some(pending) = store.pending_work().unwrap().first().cloned() {
+        store.run_work(pending.id, &mut |_, _, row| Ok(upper(&row))).unwrap();
+    }
+    assert_eq!(fighter(&mut store, "000")["displayName"], "CHANGED");
+}
+
+#[test]
+fn an_empty_table_applies_finished_expands_directly_and_a_populated_one_needs_an_intermediate_release() {
+    let directory = tempfile::tempdir().unwrap();
+    let history = journal(4);
+    let mut empty = SqliteStore::open(directory.path().join("empty.db"), "local").unwrap();
+    empty.install_deployment(&deployed("fresh", &history)).unwrap();
+    let pending = empty.pending_work().unwrap();
+    let title = Work::Backfill { migration: "0004_title".into(), table: "fighters".into() };
+    assert_eq!(pending.iter().map(|pending| &pending.work).collect::<Vec<_>>(), [&title], "no work for the rename");
+    assert_eq!(empty.migrations().unwrap(), history[3..], "only the open expand stays active");
+
+    let mut populated = SqliteStore::open(directory.path().join("populated.db"), "local").unwrap();
+    let revision = populated.install_deployment(&deployment("old", 1)).unwrap();
+    let write = crate::tests::write_to("fighters", "a", Some(json!({"name": "a"})));
+    populated.commit(commit("seed", revision.0, vec![write])).unwrap();
+    let error = migration_error(populated.install_deployment(&deployed("fresh", &history)));
+    assert!(error.contains("0004_title") && error.contains("intermediate release"), "{error}");
 }

@@ -32,6 +32,7 @@ export function __chunk_migrate(_, {direction, rows}) {
 }
 export function read(ctx, id) { return JSON.stringify(ctx.db.get('fighters', id)); }
 export function writeOld(ctx, id) { ctx.db.put('fighters', id, {name: id + '-old'}); return ''; }
+export function writeBig(ctx, id) { ctx.db.put('fighters', id, {name: 'a'.repeat(1048496)}); return ''; }
 export function writeNew(ctx, id) { ctx.db.put('fighters', id, {displayName: id.toUpperCase() + '-NEW'}); return ''; }
 export function seed(ctx, part) {
   for (let i = part * 100; i < part * 100 + 100; i++) ctx.db.put('fighters', String(i).padStart(3, '0'), {name: 'n' + i});
@@ -82,6 +83,7 @@ fn deployment(id: &str, length: usize) -> Deployment {
             function("read", FunctionKind::Query),
             function("writeOld", FunctionKind::Mutation),
             function("writeNew", FunctionKind::Mutation),
+            function("writeBig", FunctionKind::Mutation),
             function("seed", FunctionKind::Mutation),
         ]
         .into(),
@@ -186,4 +188,124 @@ async fn a_write_racing_the_backfill_commits_before_the_backfill_reaches_its_row
     backend.ready(new).await.unwrap();
     assert_eq!(read(&backend, "new", "299").await, json!({"displayName": "299-OLD"}));
     assert_eq!(read(&backend, "new", "000").await, json!({"displayName": "N0"}));
+}
+
+/// The rename's deployment of `length` entries, whose `to` returns the fields `body` lists.
+fn transforming(id: &str, length: usize, body: &str) -> Deployment {
+    let migrate = format!("export function __chunk_migrate(_, {{rows}}) {{ return rows.map((row) => ({{{body}}})); }}");
+    let source = SOURCE.replacen("export function __chunk_migrate", "function unused", 1);
+    Deployment { source: format!("{source}\n{migrate}"), ..deployment(id, length) }
+}
+
+#[tokio::test]
+async fn a_transform_gives_the_same_result_in_a_backfill_and_in_a_single_row_sync() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend =
+        Backend::new("local".into(), Box::new(SqliteStore::open(directory.path().join("seed.db"), "local").unwrap()))
+            .unwrap();
+    backend.deploy(transforming("old", 1, "displayName: crypto.randomUUID()")).await.unwrap();
+    for id in ["a", "b"] {
+        write(&backend, "old", "writeOld", id).await;
+    }
+    backend.deploy(transforming("new", 2, "displayName: crypto.randomUUID()")).await.unwrap();
+    write(&backend, "old", "writeOld", "c").await;
+    let [a, b, c] = ["a", "b", "c"].map(|id| read(&backend, "new", id));
+    let (a, b, c) = (a.await, b.await, c.await);
+    assert_eq!((&a, &b), (&b, &c), "the batch position and the path don't change the result");
+}
+
+#[tokio::test]
+async fn a_maximum_size_row_fits_the_migration_invocation_limits() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend =
+        Backend::new("local".into(), Box::new(SqliteStore::open(directory.path().join("big.db"), "local").unwrap()))
+            .unwrap();
+    backend.deploy(transforming("old", 1, "displayName: 'x'")).await.unwrap();
+    write(&backend, "old", "writeBig", "big").await;
+    backend.deploy(transforming("new", 2, "displayName: 'x'")).await.unwrap();
+    assert_eq!(read(&backend, "new", "big").await, json!({"displayName": "x"}));
+}
+
+/// The journals of three deployments: `name`; `name` and an optional `nickname`; and `name` with a required
+/// `displayName` that `to` takes from the nickname or the name.
+fn nicknames(id: &str, length: usize) -> Deployment {
+    let fields = |names: &[(&str, bool)]| -> DatabaseSchema {
+        let fields: serde_json::Map<_, _> = names
+            .iter()
+            .map(|(name, optional)| ((*name).to_owned(), json!({"schema": {"type": "string"}, "optional": optional})))
+            .collect();
+        serde_json::from_value(json!({"fighters": {"fields": fields}})).unwrap()
+    };
+    let entry = |id: &str, kind, tables, schema| Migration {
+        id: id.into(),
+        hash: "0".repeat(64),
+        kind,
+        finishes: None,
+        tables,
+        schema,
+    };
+    let change = MigrationTable { added: vec!["displayName".into()], removed: vec!["nickname".into()], back: false };
+    let mut migrations = vec![
+        entry("0001_init", MigrationKind::Baseline, std::collections::BTreeMap::new(), fields(&[("name", false)])),
+        entry(
+            "0002_nickname",
+            MigrationKind::Additive,
+            std::collections::BTreeMap::new(),
+            fields(&[("name", false), ("nickname", true)]),
+        ),
+        entry(
+            "0003_display_name",
+            MigrationKind::Expand,
+            [("fighters".into(), change)].into(),
+            fields(&[("name", false), ("displayName", false)]),
+        ),
+    ];
+    migrations.truncate(length);
+    let source = r"
+export function __chunk_migrate(_, {rows}) { return rows.map((old) => ({displayName: old.nickname ?? old.name})); }
+export function read(ctx, id) { return JSON.stringify(ctx.db.get('fighters', id)); }
+export function writeName(ctx, id) { ctx.db.put('fighters', id, {name: id}); return ''; }
+export function writeNickname(ctx, id) { ctx.db.put('fighters', id, {name: id, nickname: 'Nick'}); return ''; }
+";
+    let function = |name: &str, kind| {
+        let function = Function {
+            kind,
+            visibility: Visibility::Public,
+            export: name.into(),
+            arguments: Schema::String,
+            result: Schema::String,
+        };
+        (name.into(), function)
+    };
+    Deployment {
+        contracts: Contracts { migrations: migrations.clone(), ..Contracts::default() },
+        contract_version: chunk_contract::CONTRACT_VERSION,
+        runtime_profile: RuntimeProfile::TransactionalV1,
+        id: id.into(),
+        source: source.into(),
+        tables: migrations.last().unwrap().schema.clone(),
+        functions: [
+            function("read", FunctionKind::Query),
+            function("writeName", FunctionKind::Mutation),
+            function("writeNickname", FunctionKind::Mutation),
+        ]
+        .into(),
+    }
+}
+
+#[tokio::test]
+async fn writers_that_predate_a_removed_optional_field_still_synchronize() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Backend::new(
+        "local".into(),
+        Box::new(SqliteStore::open(directory.path().join("nicknames.db"), "local").unwrap()),
+    )
+    .unwrap();
+    for (id, length) in [("a", 1), ("b", 2), ("c", 3)] {
+        backend.deploy(nicknames(id, length)).await.unwrap();
+    }
+    write(&backend, "a", "writeName", "ann").await;
+    assert_eq!(read(&backend, "c", "ann").await, json!({"name": "ann", "displayName": "ann"}));
+    write(&backend, "b", "writeNickname", "bob").await;
+    assert_eq!(read(&backend, "c", "bob").await, json!({"name": "bob", "displayName": "Nick"}));
 }

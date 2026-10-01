@@ -304,3 +304,18 @@ fn migration_snapshots_must_follow_their_declared_changes() {
         assert!(validate_migrations(&migrations).is_err(), "{migrations:?}");
     }
 }
+
+#[test]
+fn migrations_reject_reserved_tables() {
+    use crate::{Migration, MigrationKind, validate_migrations};
+    let schema: DatabaseSchema = [("chunk_control".to_owned(), TableSchema::default())].into();
+    let baseline = Migration {
+        id: "0001_init".into(),
+        hash: "0".repeat(64),
+        kind: MigrationKind::Baseline,
+        finishes: None,
+        tables: BTreeMap::new(),
+        schema,
+    };
+    assert!(validate_migrations(&[baseline]).is_err());
+}

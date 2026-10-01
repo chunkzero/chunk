@@ -133,11 +133,6 @@ fn migrations_are_typed_from_snapshots_and_callable_from_the_bundle() {
     );
 
     assert_eq!(migrate_to(output.path(), "Ann").unwrap(), r#"[{"displayName":"Ann"}]"#);
-
-    fs::write(&path, source.replace("old.name", "String(Math.random())")).unwrap();
-    rehash(project.path(), "2").unwrap();
-    crate::compile(project.path(), output.path()).unwrap();
-    assert!(migrate_to(output.path(), "Ann").unwrap_err().contains("migrations must be deterministic"));
 }
 
 fn migrate_to(output: &Path, name: &str) -> Result<String, String> {

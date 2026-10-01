@@ -43,8 +43,6 @@ pub struct SqliteStore {
     log: Option<log::Log>,
     retention: retention::Retention,
     job_limits: jobs::JobLimits,
-    /// The backfill work ID and the batch size it has shrunk to, for this process only.
-    batch: (u64, usize),
     pruned_at: Option<Instant>,
     readers: Arc<read::Pool>,
     _writer_lock: bootstrap::WriterLock,
@@ -164,7 +162,6 @@ impl SqliteStore {
             log,
             retention: retention::Retention::default(),
             job_limits: jobs::JobLimits::default(),
-            batch: (0, backfill::BATCH),
             pruned_at: None,
             _writer_lock: writer_lock,
         };
@@ -244,7 +241,7 @@ impl Storage for SqliteStore {
         let (migration, new) = if applied.is_empty() && deployment.contracts.migrations.is_empty() {
             (schema::merge(&self.schema, &deployment.tables, None)?, Vec::new())
         } else {
-            journal::install(&self.schema, &applied, deployment)?
+            journal::install(&self.connection, &self.schema, &applied, deployment)?
         };
         let (current, built) = (&self.schema, &self.indexes);
         let revision =
@@ -276,13 +273,10 @@ impl Storage for SqliteStore {
             Some((Work::Index(index), ..)) => index,
             Some((Work::Backfill { migration, table }, done, cursor)) => {
                 let schema = &self.schema;
-                let mut batch = if self.batch.0 == id { self.batch.1 } else { backfill::BATCH };
-                let result = log::write_or_roll_back(&self.connection, self.log.as_mut(), &[], |transaction| {
+                return log::write_or_roll_back(&self.connection, self.log.as_mut(), &[], |transaction| {
                     let work = (migration.as_str(), table.as_str());
-                    backfill::run(transaction, schema, id, work, (done, cursor.as_deref()), &mut batch, transform)
+                    backfill::run(transaction, schema, id, work, (done, cursor.as_deref()), transform)
                 });
-                self.batch = (id, batch);
-                return result;
             }
             Some((Work::Drop { migration }, ..)) => return self.drop_old_shape(id, &migration),
         };

@@ -1,10 +1,15 @@
-//! Runs migration transforms in a deployment's bundle. A transform is a pure function of one row: it can't read,
-//! `Date.now()` returns 0 and `Math.random()` throws, so it returns the same fields on every call.
+//! Runs migration transforms in a deployment's bundle, one engine invocation per row. Every invocation has the same
+//! seed and `Date.now()` returns 0, and a transform can't read, so a row's result never depends on which rows
+//! were transformed before it, nor on whether it was transformed in a backfill or by a write.
 
 use chunk_contract::Deployment;
 use chunk_js::{Cancellation, DeploymentId, Engine, Invocation, Key, Limits, Mode, ReadHost};
-use chunk_store::TransformError;
+use chunk_store::MAX_DOCUMENT_BYTES;
 use serde_json::{Value, json};
+
+/// The most JSON one invocation takes or returns: a maximum-size document, plus room for its `_id` and the call's
+/// envelope.
+const INVOCATION_BYTES: usize = MAX_DOCUMENT_BYTES + 4096;
 
 /// Which transform of a migration runs.
 #[derive(Clone, Copy)]
@@ -13,18 +18,18 @@ pub(crate) enum Direction {
     Back,
 }
 
-/// Maps `rows` through `migration`'s transform for `table` in the bundle of the resident deployment `id`.
+/// Maps `row` through `migration`'s transform for `table` in the bundle of the resident deployment `id`.
 pub(crate) fn transform(
     engine: &mut Engine,
     id: &DeploymentId,
     (migration, table, direction): (&str, &str, Direction),
-    rows: &[Value],
-) -> Result<Vec<Value>, TransformError> {
+    row: &Value,
+) -> Result<Value, String> {
     let direction = match direction {
         Direction::To => "to",
         Direction::Back => "back",
     };
-    let arguments = json!({"migration": migration, "table": table, "direction": direction, "rows": rows});
+    let arguments = json!({"migration": migration, "table": table, "direction": direction, "rows": [row]});
     let invocation = Invocation {
         export: "__chunk_migrate".into(),
         arguments: arguments.into(),
@@ -33,12 +38,14 @@ pub(crate) fn transform(
         timestamp: 0,
         seed: 0,
     };
-    let execution =
-        engine.execute(id, invocation, Box::new(NoReads), &Cancellation::default()).map_err(|error| match error {
-            chunk_js::Error::Invalid(reason) if reason.ends_with("size limit") => TransformError::Limit,
-            error => TransformError::Failed(error.to_string()),
-        })?;
-    serde_json::from_str(&execution.value).map_err(|error| TransformError::Failed(error.to_string()))
+    let execution = engine
+        .execute_sized(id, invocation, Box::new(NoReads), &Cancellation::default(), INVOCATION_BYTES)
+        .map_err(|error| error.to_string())?;
+    let mut rows: Vec<Value> = serde_json::from_str(&execution.value).map_err(|error| error.to_string())?;
+    match (rows.pop(), rows.is_empty()) {
+        (Some(row), true) => Ok(row),
+        _ => Err("the transform must return one row".into()),
+    }
 }
 
 struct NoReads;
@@ -61,14 +68,8 @@ pub(crate) struct Migrator {
 }
 
 impl Migrator {
-    pub fn to(
-        &mut self,
-        deployment: &Deployment,
-        migration: &str,
-        table: &str,
-        rows: &[Value],
-    ) -> Result<Vec<Value>, TransformError> {
-        let failed = |error: &dyn std::fmt::Display| TransformError::Failed(error.to_string());
+    pub fn to(&mut self, deployment: &Deployment, migration: &str, table: &str, row: &Value) -> Result<Value, String> {
+        let failed = |error: &dyn std::fmt::Display| error.to_string();
         let id = DeploymentId::new(&deployment.id).map_err(|error| failed(&error))?;
         let engine = match &mut self.engine {
             Some(engine) => engine,
@@ -83,6 +84,6 @@ impl Migrator {
                 .map_err(|error| failed(&error))?;
             self.loaded = Some(id.clone());
         }
-        transform(engine, &id, (migration, table, Direction::To), rows)
+        transform(engine, &id, (migration, table, Direction::To), row)
     }
 }

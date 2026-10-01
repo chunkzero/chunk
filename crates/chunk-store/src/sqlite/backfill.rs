@@ -5,16 +5,16 @@
 use rusqlite::{Connection, params, params_from_iter, types::Value as SqlValue};
 use serde_json::{Map, Value};
 
-use crate::{DatabaseSchema, Error, Result, Transform, TransformError};
+use crate::{DatabaseSchema, Error, MAX_DOCUMENT_BYTES, Result, Transform};
 
 use super::{
     codec::{self, quote},
     journal, work,
-    write::{MAX_DOCUMENT_BYTES, MAX_DOCUMENT_TOTAL_BYTES},
+    write::MAX_DOCUMENT_TOTAL_BYTES,
 };
 
-pub(super) const BATCH: usize = 256;
-/// Bounds the rows passed to one transform call, below the engine's argument limit.
+const BATCH: usize = 256;
+/// Bounds the documents one batch holds in memory.
 const BATCH_BYTES: usize = 512 * 1024;
 
 type Row = (String, usize, Map<String, Value>);
@@ -54,15 +54,13 @@ fn read(
     Ok((rows, read))
 }
 
-/// Applies the next batch of backfill `id` of at most `batch` rows, finishing it once no rows remain. When the
-/// transform exceeds an engine limit, the batch halves, down to one row, and `batch` keeps the smaller size.
+/// Applies the next batch of backfill `id`, one transform call per row, finishing it once no rows remain.
 pub(super) fn run(
     connection: &Connection,
     schema: &DatabaseSchema,
     id: u64,
     (migration, table): (&str, &str),
     (done, cursor): (u64, Option<&str>),
-    batch: &mut usize,
     transform: &mut Transform<'_>,
 ) -> Result<()> {
     let applied = journal::load(connection)?;
@@ -70,8 +68,7 @@ pub(super) fn run(
     let added = &expand.migration.tables.get(table).ok_or(Error::Corrupt("backfill"))?.added;
     let declared = expand.migration.schema.get(table).ok_or(Error::Corrupt("backfill"))?;
     let stored = schema.get(table).ok_or(Error::Corrupt("backfill"))?;
-    let (mut rows, read) = read(connection, table, stored, (cursor, *batch))?;
-    let limit = *batch;
+    let (rows, read) = read(connection, table, stored, (cursor, BATCH))?;
     if rows.is_empty() {
         work::finish(connection, id)?;
         return journal::schedule_drops(connection);
@@ -79,34 +76,21 @@ pub(super) fn run(
     let failed =
         |reason: String| Error::Migration(format!("migration {migration} failed to backfill {table}: {reason}"));
     let readable = expand.migration.input_fields(table, false);
-    let outputs = loop {
-        let inputs = rows
+    let mut outputs = Vec::with_capacity(rows.len());
+    for (row_id, _, fields) in &rows {
+        let mut input: Map<_, _> = fields
             .iter()
-            .map(|(row_id, _, fields)| {
-                let mut input: Map<_, _> = fields
-                    .iter()
-                    .filter(|(name, _)| readable.contains(name.as_str()))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                input.insert("_id".into(), Value::String(row_id.clone()));
-                Value::Object(input)
-            })
+            .filter(|(name, _)| readable.contains(name.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        match transform(migration, table, inputs) {
-            Ok(outputs) => break outputs,
-            Err(TransformError::Limit) if rows.len() > 1 => {
-                *batch = (rows.len() / 2).max(1);
-                rows.truncate(*batch);
-            }
-            Err(TransformError::Limit) => return Err(failed(format!("row {} exceeds an engine limit", rows[0].0))),
-            Err(TransformError::Failed(reason)) => return Err(failed(reason)),
-        }
-    };
-    if outputs.len() != rows.len() {
-        return Err(failed("the transform returned the wrong number of rows".into()));
+        input.insert("_id".into(), Value::String(row_id.clone()));
+        outputs.push(
+            transform(migration, table, Value::Object(input))
+                .map_err(|reason| failed(format!("row {row_id}: {reason}")))?,
+        );
     }
     let (finished, last, count) =
-        (read < limit && rows.len() == read, rows[rows.len() - 1].0.clone(), rows.len() as u64);
+        (read < BATCH && rows.len() == read, rows[rows.len() - 1].0.clone(), rows.len() as u64);
     let assignments: Vec<_> = added.iter().map(|field| format!("{} = ?", quote(field))).collect();
     let update = format!("UPDATE {} SET _bytes = ?, {} WHERE _id = ?", quote(table), assignments.join(", "));
     let mut total: i64 =

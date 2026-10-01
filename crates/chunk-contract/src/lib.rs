@@ -39,7 +39,9 @@ pub use deployment::{
     CONTRACT_VERSION, Contracts, Deployment, Function, FunctionKind, RuntimeProfile, Visibility, validate_wire_value,
 };
 pub use index::{IndexQuery, compare_index_values};
-pub use schema::{DatabaseSchema, Field, Schema, TableSchema, validate, validate_name};
+pub use schema::{
+    DatabaseSchema, Field, SYSTEM_TABLE_PREFIX, Schema, TableSchema, is_system_table, validate, validate_name,
+};
 
 #[cfg(test)]
 mod tests;

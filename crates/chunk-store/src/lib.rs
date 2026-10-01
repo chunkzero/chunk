@@ -57,7 +57,10 @@ mod snapshot;
 mod sqlite;
 mod work;
 
-pub use chunk_contract::DatabaseSchema;
+/// The largest stored document, as JSON.
+pub const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+
+pub use chunk_contract::{DatabaseSchema, SYSTEM_TABLE_PREFIX, is_system_table};
 pub use jobs::{Job, JobCommand, JobIntent, JobState, Jobs, WakeHandoff};
 pub use model::{
     Commit, Document, DocumentKey, Epoch, IndexDefinition, IndexRange, KeyRange, Operation, Outcome, ReadBudget,
@@ -66,17 +69,7 @@ pub use model::{
 pub use replication::{Listed, ObjectStorage, Replication, ReplicationProgress, Replicator, S3Bucket, S3Credentials};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
-pub use work::{PendingWork, Transform, TransformError, Work, compatible_field};
-
-/// Tables whose names start with this prefix, in any letter case, belong to the
-/// environment itself. App deployments may not declare them.
-pub const SYSTEM_TABLE_PREFIX: &str = "chunk_";
-
-/// Whether `table` is reserved for the environment by [`SYSTEM_TABLE_PREFIX`].
-#[must_use]
-pub fn is_system_table(table: &str) -> bool {
-    table.get(..SYSTEM_TABLE_PREFIX.len()).is_some_and(|prefix| prefix.eq_ignore_ascii_case(SYSTEM_TABLE_PREFIX))
-}
+pub use work::{PendingWork, Transform, Work, compatible_field};
 
 /// Only the database's single owning service holds this capability.
 pub trait Storage: Send {

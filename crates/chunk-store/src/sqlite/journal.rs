@@ -29,16 +29,15 @@ pub(super) fn load(connection: &Connection) -> Result<Vec<Applied>> {
     .collect()
 }
 
-/// Appends `new` after the `applied` entries already recorded, with a backfill for each table an expand adds
-/// fields to.
-pub(super) fn record(connection: &Connection, applied: usize, new: &[Migration]) -> Result<()> {
-    for (position, migration) in (applied..).zip(new) {
-        let expand = migration.kind == MigrationKind::Expand;
+/// Appends `new` after the `applied` entries already recorded, with a backfill for each table an active expand
+/// adds fields to.
+pub(super) fn record(connection: &Connection, applied: usize, new: &[Applied]) -> Result<()> {
+    for (position, Applied { migration, active }) in (applied..).zip(new) {
         connection.execute(
             "INSERT INTO _chunk_applied (position, id, migration, active) VALUES (?1, ?2, ?3, ?4)",
-            params![position, migration.id, serde_json::to_string(migration)?, expand],
+            params![position, migration.id, serde_json::to_string(migration)?, active],
         )?;
-        let backfills = migration.tables.iter().filter(|(_, change)| expand && !change.added.is_empty());
+        let backfills = migration.tables.iter().filter(|(_, change)| *active && !change.added.is_empty());
         work::record(
             connection,
             backfills.map(|(table, _)| Work::Backfill { migration: migration.id.clone(), table: table.clone() }),
@@ -69,11 +68,13 @@ pub(super) fn rebackfill(
 }
 
 /// Checks `deployment`'s journal against `applied`, and plans the schema change that applies its new entries.
+/// An expand that the new entries also finish is applied directly, with no work, when its tables have no rows.
 pub(super) fn install(
+    connection: &Connection,
     current: &DatabaseSchema,
     applied: &[Applied],
     deployment: &Deployment,
-) -> Result<(schema::Migration, Vec<Migration>)> {
+) -> Result<(schema::Migration, Vec<Applied>)> {
     let journal = &deployment.contracts.migrations;
     chunk_contract::validate_migrations(journal)
         .map_err(|error| Error::Migration(format!("invalid migration journal: {error}")))?;
@@ -81,11 +82,16 @@ pub(super) fn install(
     if !applied.is_empty() {
         require_stored(current, &stored(applied))?;
     }
+    let direct = direct(connection, current, new)?;
+    let new: Vec<_> = new
+        .iter()
+        .map(|migration| Applied {
+            migration: migration.clone(),
+            active: migration.kind == MigrationKind::Expand && !direct.contains(&migration.id),
+        })
+        .collect();
     let mut next = applied.to_vec();
-    next.extend(
-        new.iter()
-            .map(|migration| Applied { migration: migration.clone(), active: migration.kind == MigrationKind::Expand }),
-    );
+    next.extend(new.iter().cloned());
     for (index, entry) in next.iter().enumerate().skip(applied.len()) {
         let tables = &entry.migration.tables;
         let busy = next[..index]
@@ -93,12 +99,13 @@ pub(super) fn install(
             .find(|earlier| earlier.active && earlier.migration.tables.keys().any(|table| tables.contains_key(table)));
         if let Some(earlier) = busy.filter(|_| entry.migration.kind == MigrationKind::Expand) {
             return Err(Error::Migration(format!(
-                "migration {} changes a table that {} still migrates; wait for {} to complete before installing it",
+                "migration {} changes a table that {} still migrates; deploy an intermediate release that completes {} \
+                 first",
                 entry.migration.id, earlier.migration.id, earlier.migration.id
             )));
         }
     }
-    let migration = plan(current, &stored(&next), false)?;
+    let migration = plan(current, &stored(&next), !direct.is_empty())?;
     let migrating = migrating(&next);
     for (name, table) in &deployment.tables {
         for (field, declared) in &table.fields {
@@ -113,7 +120,25 @@ pub(super) fn install(
             }
         }
     }
-    Ok((migration, new.to_vec()))
+    Ok((migration, new))
+}
+
+/// The IDs of the expands in `new` that a finish in `new` completes, all over tables with no rows.
+fn direct(connection: &Connection, current: &DatabaseSchema, new: &[Migration]) -> Result<BTreeSet<String>> {
+    let mut direct = BTreeSet::new();
+    for expand in new.iter().filter(|expand| new.iter().any(|finish| finish.finishes.as_ref() == Some(&expand.id))) {
+        let mut empty = true;
+        for table in expand.tables.keys().filter(|table| current.contains_key(*table)) {
+            let rows = connection.query_row(&format!("SELECT EXISTS (SELECT 1 FROM {})", quote(table)), [], |row| {
+                row.get::<_, bool>(0)
+            })?;
+            empty &= !rows;
+        }
+        if empty {
+            direct.insert(expand.id.clone());
+        }
+    }
+    Ok(direct)
 }
 
 /// The tables and fields active expands add or remove.

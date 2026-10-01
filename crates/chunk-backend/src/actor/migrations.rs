@@ -24,11 +24,12 @@ impl Actor {
             .cloned()
     }
 
-    /// Keeps both shapes of each active expand migration in step on a write from `contract`. A writer that declares
-    /// the old shape but not the new one gets the added fields from `to`; one that declares the new shape but not
-    /// the old one gets the removed fields from `back` where the migration has it, and otherwise keeps their stored
-    /// values. Without a resident deployment carrying a migration, its fields are left as they are.
+    /// Keeps both shapes of each active expand migration in step on a write from `contract`, whose row `value`
+    /// is the write merged with the stored fields it doesn't declare. A writer that lacks any added field gets
+    /// them from `to`; one that lacks any removed field gets them from `back`, where the migration has it.
+    /// Without a resident deployment carrying a migration, its fields are left as they are.
     pub(super) fn sync(&mut self, contract: &Deployment, table: &str, id: &str, value: &mut Value) -> Result<()> {
+        let Some(writer) = contract.tables.get(table) else { return Ok(()) };
         let steps: Vec<Step> = self
             .work
             .migrations
@@ -39,26 +40,13 @@ impl Actor {
                 Some((migration.id.clone(), change.clone(), [inputs(false), inputs(true)]))
             })
             .collect();
-        let Some(writer) = contract.tables.get(table).filter(|_| !steps.is_empty()) else {
-            return Ok(());
-        };
-        let mut known: BTreeSet<_> = writer.fields.keys().cloned().collect();
-        let declares = |known: &BTreeSet<String>, fields: &[String]| fields.iter().all(|field| known.contains(field));
-        let lacks = |known: &BTreeSet<String>, fields: &[String]| !fields.iter().any(|field| known.contains(field));
-        for (migration, change, [input, _]) in &steps {
-            if !change.added.is_empty() && declares(&known, &change.removed) && lacks(&known, &change.added) {
-                self.apply((migration, table, Direction::To), (&change.added, input), id, value)?;
-                known.extend(change.added.iter().cloned());
+        let lacks = |fields: &[String]| fields.iter().any(|field| !writer.fields.contains_key(field));
+        for (migration, change, [to, back]) in &steps {
+            if lacks(&change.added) {
+                self.apply((migration, table, Direction::To), (&change.added, to), id, value)?;
             }
-        }
-        for (migration, change, [_, input]) in steps.iter().rev() {
-            if change.back
-                && !change.removed.is_empty()
-                && declares(&known, &change.added)
-                && lacks(&known, &change.removed)
-            {
-                self.apply((migration, table, Direction::Back), (&change.removed, input), id, value)?;
-                known.extend(change.removed.iter().cloned());
+            if change.back && lacks(&change.removed) {
+                self.apply((migration, table, Direction::Back), (&change.removed, back), id, value)?;
             }
         }
         Ok(())
@@ -82,10 +70,8 @@ impl Actor {
         row.insert("_id".into(), Value::String(id.into()));
         let failed =
             |reason: String| Error::Migration(format!("migration {migration} failed on {table} row {id}: {reason}"));
-        let output = transform(&mut self.js, &carrier, (migration, table, direction), &[Value::Object(row)])
-            .map_err(|error| failed(error.to_string()))?
-            .pop()
-            .ok_or_else(|| failed("the transform returned no row".into()))?;
+        let output =
+            transform(&mut self.js, &carrier, (migration, table, direction), &Value::Object(row)).map_err(failed)?;
         for field in fields {
             match output.get(field) {
                 Some(computed) => object.insert(field.clone(), computed.clone()),

@@ -28,7 +28,8 @@ pub(super) fn get(connection: &Connection, id: u64) -> Result<Option<(Work, u64,
     row.map(|(work, done, cursor)| Ok((serde_json::from_str(&work)?, done, cursor))).transpose()
 }
 
-/// Records `work` unless it is already pending. A backfill's total is its table's row count.
+/// Records `work` unless it is already pending. A backfill replaces a pending one, restarting from the first row;
+/// its total is its table's row count.
 pub(super) fn record(connection: &Connection, work: impl IntoIterator<Item = Work>) -> Result<()> {
     for work in work {
         let total: u64 = match &work {
@@ -37,8 +38,9 @@ pub(super) fn record(connection: &Connection, work: impl IntoIterator<Item = Wor
             }
             Work::Index(_) | Work::Drop { .. } => 1,
         };
+        let verb = if matches!(work, Work::Backfill { .. }) { "REPLACE" } else { "IGNORE" };
         connection.execute(
-            "INSERT OR IGNORE INTO _chunk_work (work, done, total) VALUES (?1, 0, ?2)",
+            &format!("INSERT OR {verb} INTO _chunk_work (work, done, total) VALUES (?1, 0, ?2)"),
             params![serde_json::to_string(&work)?, total],
         )?;
     }

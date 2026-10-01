@@ -7,12 +7,13 @@ use chunk_contract::TableSchema;
 
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 
-use crate::{Commit, DatabaseSchema, DocumentKey, Error, JobIntent, Operation, Outcome, Result, Revision};
+use crate::{
+    Commit, DatabaseSchema, DocumentKey, Error, JobIntent, MAX_DOCUMENT_BYTES, Operation, Outcome, Result, Revision,
+};
 
 use super::codec;
 use super::codec::quote;
 
-pub(super) const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 /// Each write charges its key and document JSON, so deletes count too.
 const MAX_COMMIT_BYTES: usize = 64 * 1024 * 1024;
 /// Keeps the database, and so its snapshots and restores, to a bounded size.
