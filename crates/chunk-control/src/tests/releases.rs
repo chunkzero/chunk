@@ -26,7 +26,7 @@ async fn arrived(fixture: &Fixture, control: &Control, operation: &str) -> Claim
 }
 
 #[tokio::test]
-async fn new_logins_use_the_current_release_while_earlier_sessions_and_their_moves_stay() {
+async fn new_logins_and_moves_use_the_current_release_while_earlier_sessions_stay() {
     let fixture = Fixture::new();
     let control = fixture.control().await;
     let first = arrived(&fixture, &control, "first").await;
@@ -48,7 +48,7 @@ async fn new_logins_use_the_current_release_while_earlier_sessions_and_their_mov
         })
         .unwrap();
     control.claim(destination).await.unwrap();
-    assert_eq!(release_of(&control, "move"), "build");
+    assert_eq!(release_of(&control, "move"), "next");
     let nodes = control.nodes().unwrap();
     let releases: BTreeSet<_> = nodes.iter().map(|node| node.deployment.as_str()).collect();
     assert_eq!(releases, BTreeSet::from(["build", "next"]));
@@ -99,24 +99,21 @@ async fn recovery_after_a_restart_keeps_every_live_release() {
 }
 
 #[tokio::test]
-async fn a_login_routed_with_a_retired_release_is_rejected_for_routing_again() {
+async fn a_login_routed_with_a_replaced_release_is_rejected_for_routing_again() {
     let fixture = Fixture::new();
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
     control.activate_release(next(&fixture)).unwrap();
-    // Routed with the earlier release before activation switched, a login still reserves on it.
+    // Routed with the earlier release before activation switched, a login reserves nothing.
     let routed = |operation: &str, deployment: &str| ClaimRequest {
         deployment: deployment.into(),
         ..request(operation, &uuid::Uuid::new_v4().to_string())
     };
-    control.claim(routed("second", "build")).await.unwrap();
-    assert_eq!(release_of(&control, "second"), "build");
-    eventually(|| control.retire_release("build").unwrap()).await;
-    let rejected = control.claim(routed("third", "build")).await;
+    let rejected = control.claim(routed("second", "build")).await;
     assert!(matches!(rejected, Err(Error::Unresolved(crate::ROUTE_AGAIN))));
-    assert!(!control.state().unwrap().claims.contains_key("third"));
-    control.claim(routed("third", "next")).await.unwrap();
-    assert_eq!(release_of(&control, "third"), "next");
+    assert!(!control.state().unwrap().claims.contains_key("second"));
+    control.claim(routed("second", "next")).await.unwrap();
+    assert_eq!(release_of(&control, "second"), "next");
     fixture.close().await;
 }
 

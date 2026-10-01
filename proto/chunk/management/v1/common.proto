@@ -84,3 +84,14 @@ enum SleepingPingMode {
   // Wake the environment and answer from its live ping hook, subject to wake limits.
   SLEEPING_PING_MODE_WAKE = 2;
 }
+
+// How long a deployment keeps running once another replaces it. Its sessions place no new players, apart from players
+// reconnecting to the session they left, and it stops once its sessions have no players. Both limits count from when
+// it was replaced.
+message DrainSettings {
+  // After this, its sessions take no reconnects and its remaining players move to the current deployment where they
+  // can. Defaults to 3 hours.
+  uint32 max_age_seconds = 1;
+  // After this, its JVMs stop, disconnecting whoever remains. At least max_age_seconds. Defaults to 4 hours.
+  uint32 deadline_seconds = 2;
+}

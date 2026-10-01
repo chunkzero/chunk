@@ -85,6 +85,14 @@ async fn a_retained_release_launches_new_jvms_after_a_restart_without_being_acti
         host
     };
     let control = open(&path, previous, host()).unwrap();
+    // A login reserves a host for `previous`, which control restarts before launching.
+    let claim = tokio::spawn({
+        let control = control.clone();
+        async move { control.claim(request("previous", &uuid::Uuid::new_v4().to_string())).await }
+    });
+    eventually(|| !control.state().unwrap().hosts.is_empty()).await;
+    claim.abort();
+    _ = claim.await;
     control.activate_release(fixture.release.clone()).unwrap();
     drop(control);
 
@@ -92,19 +100,12 @@ async fn a_retained_release_launches_new_jvms_after_a_restart_without_being_acti
     let host = host();
     let control = open(&path, fixture.release.clone(), host.clone()).unwrap();
     let executor = Executor::start(&control);
-    let request =
-        ClaimRequest { deployment: "previous".into(), ..request("previous", &uuid::Uuid::new_v4().to_string()) };
-    let claim = tokio::spawn({
-        let control = control.clone();
-        async move { control.claim(request).await }
-    });
     // Java ran the previous release's app from its unpacked directory.
     let jar = unpacked.join("app.jar").display().to_string();
     eventually(|| std::fs::read_to_string(&arguments).is_ok_and(|ran| ran.contains(&jar))).await;
     assert!(
         control.nodes().unwrap().iter().any(|node| node.deployment == "previous" && node.phase != NodePhase::Stopped)
     );
-    claim.abort();
     executor.stop().await;
     host.shutdown().await.unwrap();
     fixture.close().await;

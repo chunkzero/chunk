@@ -31,6 +31,7 @@ mod system;
 mod timing;
 
 pub use actions::{ActionHandle, ActionId, ActionIdentity, ActionStatus};
+pub use actor::MAX_DEPLOYMENTS;
 pub use chunk_js::DeploymentId;
 pub use commands::{
     CommandCatalog, CommandEffect, CommandEffects, CommandIdentity, CommandRequest, CommandScope,

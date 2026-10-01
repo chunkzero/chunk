@@ -61,6 +61,8 @@ message Environment {
   // What players enter in Minecraft to join: the hostname, plus `:port` unless the edge's player port is 25565. Empty
   // when there is no hostname.
   string join_address = 12;
+  // How a deployment drains once another replaces it.
+  DrainSettings drain = 13;
 }
 
 enum EnvironmentState {
@@ -145,6 +147,9 @@ message ListEnvironmentsResponse {
 message UpdateEnvironmentRequest {
   string environment_id = 1;
   optional SleepingPingMode sleeping_ping = 2;
+  // Unset keeps the current settings. Applies to deployments replaced from then on, and to those draining already
+  // where it shortens their limits.
+  DrainSettings drain = 3;
 }
 
 message UpdateEnvironmentResponse {

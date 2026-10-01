@@ -37,7 +37,7 @@ import { file_google_protobuf_timestamp } from "@bufbuild/protobuf/wkt";
  * Describes the file chunk/management/v1/common.proto.
  */
 export const file_chunk_management_v1_common: GenFile /*@__PURE__*/ = fileDesc(
-  "CiBjaHVuay9tYW5hZ2VtZW50L3YxL2NvbW1vbi5wcm90bxITY2h1bmsubWFuYWdlbWVudC52MSL3AQoITG9nRW50cnkSKAoEdGltZRgBIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoGc291cmNlGAIgASgOMh4uY2h1bmsubWFuYWdlbWVudC52MS5Mb2dTb3VyY2USMgoIc2V2ZXJpdHkYAyABKA4yIC5jaHVuay5tYW5hZ2VtZW50LnYxLkxvZ1NldmVyaXR5Eg8KB21lc3NhZ2UYBCABKAkSEwoLaW5zdGFuY2VfaWQYBSABKAkSDgoGYXBwX2lkGAYgASgJEhUKDWRlcGxveW1lbnRfaWQYByABKAkSEAoIc2VxdWVuY2UYCCABKAQqfwoJTG9nU291cmNlEhoKFkxPR19TT1VSQ0VfVU5TUEVDSUZJRUQQABITCg9MT0dfU09VUkNFX0NPUkUQARIWChJMT0dfU09VUkNFX0dBVEVXQVkQAhISCg5MT0dfU09VUkNFX0pWTRAEIgQIAxADKg9MT0dfU09VUkNFX0VYRUMqiQEKC0xvZ1NldmVyaXR5EhwKGExPR19TRVZFUklUWV9VTlNQRUNJRklFRBAAEhYKEkxPR19TRVZFUklUWV9ERUJVRxABEhUKEUxPR19TRVZFUklUWV9JTkZPEAISFQoRTE9HX1NFVkVSSVRZX1dBUk4QAxIWChJMT0dfU0VWRVJJVFlfRVJST1IQBCrOAQoPRGVwbG95bWVudFN0YXRlEiAKHERFUExPWU1FTlRfU1RBVEVfVU5TUEVDSUZJRUQQABIcChhERVBMT1lNRU5UX1NUQVRFX1BFTkRJTkcQARIgChxERVBMT1lNRU5UX1NUQVRFX0lOX1BST0dSRVNTEAISGwoXREVQTE9ZTUVOVF9TVEFURV9BQ1RJVkUQAxIbChdERVBMT1lNRU5UX1NUQVRFX0ZBSUxFRBAEEh8KG0RFUExPWU1FTlRfU1RBVEVfU1VQRVJTRURFRBAFKnEKEFNsZWVwaW5nUGluZ01vZGUSIgoeU0xFRVBJTkdfUElOR19NT0RFX1VOU1BFQ0lGSUVEEAASHAoYU0xFRVBJTkdfUElOR19NT0RFX0NBQ0hFEAESGwoXU0xFRVBJTkdfUElOR19NT0RFX1dBS0UQAmIGcHJvdG8z",
+  "CiBjaHVuay9tYW5hZ2VtZW50L3YxL2NvbW1vbi5wcm90bxITY2h1bmsubWFuYWdlbWVudC52MSL3AQoITG9nRW50cnkSKAoEdGltZRgBIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLgoGc291cmNlGAIgASgOMh4uY2h1bmsubWFuYWdlbWVudC52MS5Mb2dTb3VyY2USMgoIc2V2ZXJpdHkYAyABKA4yIC5jaHVuay5tYW5hZ2VtZW50LnYxLkxvZ1NldmVyaXR5Eg8KB21lc3NhZ2UYBCABKAkSEwoLaW5zdGFuY2VfaWQYBSABKAkSDgoGYXBwX2lkGAYgASgJEhUKDWRlcGxveW1lbnRfaWQYByABKAkSEAoIc2VxdWVuY2UYCCABKAQiQgoNRHJhaW5TZXR0aW5ncxIXCg9tYXhfYWdlX3NlY29uZHMYASABKA0SGAoQZGVhZGxpbmVfc2Vjb25kcxgCIAEoDSp/CglMb2dTb3VyY2USGgoWTE9HX1NPVVJDRV9VTlNQRUNJRklFRBAAEhMKD0xPR19TT1VSQ0VfQ09SRRABEhYKEkxPR19TT1VSQ0VfR0FURVdBWRACEhIKDkxPR19TT1VSQ0VfSlZNEAQiBAgDEAMqD0xPR19TT1VSQ0VfRVhFQyqJAQoLTG9nU2V2ZXJpdHkSHAoYTE9HX1NFVkVSSVRZX1VOU1BFQ0lGSUVEEAASFgoSTE9HX1NFVkVSSVRZX0RFQlVHEAESFQoRTE9HX1NFVkVSSVRZX0lORk8QAhIVChFMT0dfU0VWRVJJVFlfV0FSThADEhYKEkxPR19TRVZFUklUWV9FUlJPUhAEKs4BCg9EZXBsb3ltZW50U3RhdGUSIAocREVQTE9ZTUVOVF9TVEFURV9VTlNQRUNJRklFRBAAEhwKGERFUExPWU1FTlRfU1RBVEVfUEVORElORxABEiAKHERFUExPWU1FTlRfU1RBVEVfSU5fUFJPR1JFU1MQAhIbChdERVBMT1lNRU5UX1NUQVRFX0FDVElWRRADEhsKF0RFUExPWU1FTlRfU1RBVEVfRkFJTEVEEAQSHwobREVQTE9ZTUVOVF9TVEFURV9TVVBFUlNFREVEEAUqcQoQU2xlZXBpbmdQaW5nTW9kZRIiCh5TTEVFUElOR19QSU5HX01PREVfVU5TUEVDSUZJRUQQABIcChhTTEVFUElOR19QSU5HX01PREVfQ0FDSEUQARIbChdTTEVFUElOR19QSU5HX01PREVfV0FLRRACYgZwcm90bzM",
   [file_google_protobuf_timestamp],
 );
 
@@ -101,6 +101,39 @@ export type LogEntry = Message<"chunk.management.v1.LogEntry"> & {
  * Use `create(LogEntrySchema)` to create a new message.
  */
 export const LogEntrySchema: GenMessage<LogEntry> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_common, 0);
+
+/**
+ * How long a deployment keeps running once another replaces it. Its sessions place no new players, apart from players
+ * reconnecting to the session they left, and it stops once its sessions have no players. Both limits count from when
+ * it was replaced.
+ *
+ * @generated from message chunk.management.v1.DrainSettings
+ */
+export type DrainSettings = Message<"chunk.management.v1.DrainSettings"> & {
+  /**
+   * After this, its sessions take no reconnects and its remaining players move to the current deployment where they
+   * can. Defaults to 3 hours.
+   *
+   * @generated from field: uint32 max_age_seconds = 1;
+   */
+  maxAgeSeconds: number;
+
+  /**
+   * After this, its JVMs stop, disconnecting whoever remains. At least max_age_seconds. Defaults to 4 hours.
+   *
+   * @generated from field: uint32 deadline_seconds = 2;
+   */
+  deadlineSeconds: number;
+};
+
+/**
+ * Describes the message chunk.management.v1.DrainSettings.
+ * Use `create(DrainSettingsSchema)` to create a new message.
+ */
+export const DrainSettingsSchema: GenMessage<DrainSettings> /*@__PURE__*/ = messageDesc(
+  file_chunk_management_v1_common,
+  1,
+);
 
 /**
  * @generated from enum chunk.management.v1.LogSource

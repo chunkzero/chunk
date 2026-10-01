@@ -173,7 +173,8 @@ fn validate(request: &ClaimRequest) -> Result<()> {
     Ok(())
 }
 
-/// Reserves `request`'s claim unless it already has one, and returns whether it did.
+/// Reserves `request`'s claim unless it already has one, and returns whether it did. A login returns to the session of
+/// a draining release it left within the reconnect grace.
 fn reserve(
     state: &mut State,
     request: &ClaimRequest,
@@ -183,9 +184,14 @@ fn reserve(
         return Ok(false);
     }
     let owner = owner(state, request)?;
-    let (name, release) = state.placing(request)?;
-    let demand = request.demand.as_ref().ok_or(Error::Invalid("demand"))?;
-    let session = select_session(state, &name, &release, demand, unavailable)?;
+    let rejoined = request.source.is_none().then(|| crate::draining::rejoin(state, &owner.player, unavailable));
+    let session = if let Some(session) = rejoined.flatten() {
+        session
+    } else {
+        let (name, release) = state.placing(request)?;
+        let demand = request.demand.as_ref().ok_or(Error::Invalid("demand"))?;
+        select_session(state, &name, &release, demand, unavailable)?
+    };
     insert_claim(state, request, owner, session, None)?;
     Ok(true)
 }

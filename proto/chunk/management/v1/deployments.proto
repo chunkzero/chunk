@@ -118,6 +118,8 @@ message DeployRequest {
   string environment_id = 2;
   // A READY release of the environment's project.
   string release_id = 3;
+  // Stop the deployments this one replaces at once, disconnecting their players, rather than draining them.
+  bool stop_previous = 4;
 }
 
 message DeployResponse {

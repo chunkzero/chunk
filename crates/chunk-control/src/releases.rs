@@ -1,6 +1,7 @@
-//! The releases one control runs side by side. A login is placed on the release its proxy routed it with; every other
-//! placement, and recovery, uses the release of the host a row runs on. A release is forgotten once none of its hosts
-//! remain and every launch that may still run a JVM has a host row naming its release.
+//! The releases one control runs side by side. New sessions are placed on the current release only: a login routed
+//! with another one is routed again, and a move out of another one goes to the current release. Recovery uses the
+//! release of the host a row runs on. A release is forgotten once none of its hosts remain and every launch that may
+//! still run a JVM has a host row naming its release.
 
 use std::{collections::BTreeSet, sync::Arc};
 
@@ -24,7 +25,7 @@ impl Launches {
 }
 
 impl Control {
-    /// Records `release` if it is new, and makes it current. Sessions of earlier releases keep running.
+    /// Records `release` if it is new, and makes it current, ending its drain. Sessions of earlier releases keep running.
     /// # Errors
     /// Rejects an invalid release, one of another environment, a changed or retired release, and a stopped store.
     pub fn activate_release(&self, release: Release) -> Result<()> {
@@ -42,8 +43,12 @@ impl Control {
                 }
                 Some(_) => {}
                 None => {
-                    state.releases.insert(name.clone(), ReleaseState { release: Arc::new(release), retired: false });
+                    let release = ReleaseState { release: Arc::new(release), retired: false, drain: None };
+                    state.releases.insert(name.clone(), release);
                 }
+            }
+            if let Some(release) = state.releases.get_mut(&name) {
+                release.drain = None;
             }
             state.current = Some(name);
             Ok(())
@@ -64,6 +69,7 @@ impl Control {
                 return Ok(());
             };
             release.retired = true;
+            release.drain = None;
             let hosts: Vec<_> =
                 state.hosts.iter().filter(|(_, host)| host.release == deployment).map(|(id, _)| id.clone()).collect();
             for id in hosts {
@@ -72,9 +78,16 @@ impl Control {
             Ok(())
         })?;
         self.wake_capacity();
+        self.release_stopped(deployment)
+    }
+
+    /// Whether `deployment`'s release retired and every one of its hosts has stopped, as for an unknown release, and no
+    /// launch of an unknown release may still run.
+    pub(crate) fn release_stopped(&self, deployment: &str) -> Result<bool> {
         let launches = self.launches()?;
         let state = self.state()?;
         Ok(launches.attributed(&state)
+            && state.releases.get(deployment).is_none_or(|release| release.retired)
             && !state.hosts.values().any(|host| host.release == deployment && host.capacity != Capacity::Released))
     }
 

@@ -706,6 +706,7 @@ fn control_refuses_a_short_persisted_credential() {
 mod capacity;
 mod creation;
 mod destinations;
+mod draining;
 mod gateway;
 mod launch;
 mod log;

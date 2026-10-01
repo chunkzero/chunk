@@ -115,6 +115,8 @@ struct Deployments {
     loading: Option<String>,
     /// The latest deployment this core rejected, and why.
     rejected: Option<(String, String)>,
+    /// How the deployments the latest desired state replaces retire.
+    retiring: retire::Retiring,
 }
 
 impl Deployments {
@@ -361,6 +363,7 @@ impl<'a> Managed<'a> {
                         let mut deployments = lock(&self.deployments);
                         deployments.revision = desired.revision;
                         deployments.desired = Some(desired.deployment_id.clone());
+                        deployments.retiring = retire::Retiring::from(&desired);
                     }
                     if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
                         work.cancel.cancel();

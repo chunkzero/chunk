@@ -4,6 +4,7 @@ mod callers;
 mod capacity;
 mod delivery;
 mod drain;
+mod draining;
 pub mod gateway;
 mod host;
 mod idle;
@@ -26,6 +27,7 @@ mod sessions;
 mod state;
 mod sync;
 pub use callers::{ArrivedClaim, SessionScope, StoredClaim};
+pub use draining::{DrainPolicy, RECONNECT_GRACE};
 pub use nodes::NodeStatus;
 pub use session_methods::{CapturedSession, MethodOutcome, PreparedSessionMethod};
 

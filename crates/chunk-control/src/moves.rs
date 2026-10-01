@@ -28,7 +28,7 @@ impl Control {
     /// Queues one move for the proxy that owns the player's public connection.
     /// # Errors
     /// Rejects changed operations, and refuses with [`Error::Refused`] a player who is offline, still arriving or
-    /// already moving, and a destination the player's release doesn't offer or that is full.
+    /// already moving, and a destination the current release doesn't offer or that is full.
     pub fn move_player(&self, request: MoveRequest) -> Result<ClaimRequest> {
         validate(&request)?;
         self.update(|state| queue(state, request))
@@ -118,7 +118,7 @@ pub(crate) fn validate(request: &MoveRequest) -> Result<()> {
     Ok(())
 }
 
-/// Queues `request`'s move within its source's release in the current update, returning the destination claim request.
+/// Queues `request`'s move to the current release in the current update, returning the destination claim request.
 /// Refuses a player without any claim as offline, and a source or player that can't move now as stale.
 pub(crate) fn queue(state: &mut State, request: MoveRequest) -> Result<ClaimRequest> {
     let online =

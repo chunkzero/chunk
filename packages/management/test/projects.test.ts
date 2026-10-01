@@ -51,6 +51,20 @@ describe.skipIf(!databaseUrl)("ProjectService", () => {
       sleepingPing: SleepingPingMode.WAKE,
     });
     expect(updated.environment?.sleepingPing).toBe(SleepingPingMode.WAKE);
+    expect(updated.environment?.drain).toMatchObject({ maxAgeSeconds: 10_800, deadlineSeconds: 14_400 });
+    const environmentId = production?.id ?? "";
+    for (const drain of [
+      { maxAgeSeconds: 0, deadlineSeconds: 60 },
+      { maxAgeSeconds: 120, deadlineSeconds: 60 },
+      { maxAgeSeconds: 60, deadlineSeconds: 604_801 },
+    ]) {
+      expect(await codeOf(projects.updateEnvironment({ environmentId, drain }))).toBe(Code.InvalidArgument);
+    }
+    const drained = await projects.updateEnvironment({
+      environmentId,
+      drain: { maxAgeSeconds: 60, deadlineSeconds: 120 },
+    });
+    expect(drained.environment?.drain).toMatchObject({ maxAgeSeconds: 60, deadlineSeconds: 120 });
     expect((await projects.listSnapshots({ environmentId: production?.id ?? "" })).snapshots).toEqual([]);
 
     await projects.deleteEnvironment({ environmentId: production?.id ?? "" });

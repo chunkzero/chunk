@@ -225,12 +225,26 @@ pub(crate) struct ReleaseState {
     pub release: Arc<Release>,
     /// Retired releases place nothing new; their hosts are stopping.
     pub retired: bool,
+    /// Set while the release drains, until it retires or becomes current again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain: Option<ReleaseDrain>,
 }
 
 impl PartialEq for ReleaseState {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.release, &other.release) && self.retired == other.retired
+        Arc::ptr_eq(&self.release, &other.release) && self.retired == other.retired && self.drain == other.drain
     }
+}
+
+/// When a release started draining, when it stops taking reconnects and when it stops regardless, in milliseconds
+/// since the Unix epoch. Unset limits never pass.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ReleaseDrain {
+    pub since: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconnects_until: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stops_at: Option<u64>,
 }
 
 /// A host's capacity in lifecycle order. Control commits `Requested` and `Releasing`; the capacity executor commits

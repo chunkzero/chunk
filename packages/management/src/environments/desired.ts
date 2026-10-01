@@ -23,12 +23,13 @@ interface DesiredDeployment {
   project_id: string;
   archive_sha256: string;
   archive_size_bytes: bigint;
+  stop_previous: boolean;
 }
 
 /** The deployment an environment should serve: its newest one that neither failed nor was superseded. */
 export async function desiredDeployment(db: Db, environmentId: string): Promise<DesiredDeployment | undefined> {
   const [row] = await db<DesiredDeployment[]>`
-    select d.id, d.release_id, r.project_id, r.archive_sha256, r.archive_size_bytes
+    select d.id, d.release_id, r.project_id, r.archive_sha256, r.archive_size_bytes, d.stop_previous
     from deployments d
     join environments e on e.id = d.environment_id
     join releases r on r.project_id = e.project_id and r.id = d.release_id
@@ -45,8 +46,16 @@ export async function desiredState(
 ): Promise<{ message: AttachResponse; lease: bigint }> {
   const { snapshot } = await sql.begin("isolation level repeatable read read only", async (tx) => {
     const [environment] = await tx<
-      { project_id: string; name: string; revision: bigint; lease: bigint; state: EnvironmentState }[]
-    >`select project_id, name, revision, lease, state from environments where id = ${environmentId}`;
+      {
+        project_id: string;
+        name: string;
+        revision: bigint;
+        lease: bigint;
+        state: EnvironmentState;
+        drain_max_age_seconds: number;
+        drain_deadline_seconds: number;
+      }[]
+    >`select project_id, name, revision, lease, state, drain_max_age_seconds, drain_deadline_seconds from environments where id = ${environmentId}`;
     if (!environment || environment.state === EnvironmentState.DELETING) throw notFound("environment");
     const deployment = await desiredDeployment(tx, environmentId);
     const secrets = await tx<{ name: string; version: bigint; ciphertext: Uint8Array }[]>`
@@ -62,6 +71,7 @@ export async function desiredState(
     environmentId,
     environmentName: environment.name,
     projectId: environment.project_id,
+    drain: { maxAgeSeconds: environment.drain_max_age_seconds, deadlineSeconds: environment.drain_deadline_seconds },
     secrets: await Promise.all(
       secrets.map(async ({ name, version, ciphertext }) => ({
         name,
@@ -73,6 +83,7 @@ export async function desiredState(
   if (deployment) {
     const key = releaseKey(deployment.project_id, deployment.release_id, deployment.archive_sha256);
     message.deploymentId = deployment.id;
+    message.stopPrevious = deployment.stop_previous;
     message.release = create(ReleaseArtifactSchema, {
       releaseId: deployment.release_id,
       url: await releases.downloadUrl(key, new Date(Date.now() + artifactUrlLifetimeMs)),

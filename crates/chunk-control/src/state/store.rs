@@ -225,7 +225,11 @@ fn schema() -> DatabaseSchema {
     let strings = json!({"type": "array", "items": string});
     let tables = json!({
         META: {"config": string, "method_sequence": integer, "current?": string},
-        RELEASES: {"release": string, "retired": boolean},
+        RELEASES: {"release": string, "retired": boolean, "drain?": {"type": "object", "fields": {
+            "since": {"schema": integer},
+            "reconnects_until": {"schema": integer, "optional": true},
+            "stops_at": {"schema": integer, "optional": true},
+        }}},
         HOSTS: {
             "release?": string, "app": string, "profile": string, "retired": boolean, "idle_since_ms?": integer,
             "capacity?": {"type": "enum", "values": Capacity::NAMES}, "failure?": string,

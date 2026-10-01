@@ -51,6 +51,9 @@ pub struct RuntimeRequirements {
     pub machine_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capacity: Option<u32>,
+    /// An implementation's `reconnect` option; unset for an app's runtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconnect: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

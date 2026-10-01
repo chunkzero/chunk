@@ -15,7 +15,7 @@ use crate::{Config, Error, Release, Result};
 use entities::Stamp;
 pub(crate) use entities::{
     Capacity, Claim, Drain, HostState, Machine, Meta, MoveFailure, MoveIntent, OperatorCall, OperatorMethod, Phase,
-    PlayerState, ReleaseState, Roster, SessionState,
+    PlayerState, ReleaseDrain, ReleaseState, Roster, SessionState,
 };
 pub use entities::{Generation, Launch, MachineKind};
 
@@ -74,32 +74,15 @@ impl State {
         Ok(&self.releases.get(name).ok_or(Error::Invalid("unknown release"))?.release)
     }
 
-    /// The release that places `request`: for a login, the one its proxy routed it with, or the current one when it
-    /// names none; for a move, its source's. Retired releases place nothing, and a login routed with one is
-    /// rejected as unavailable so its proxy routes it again.
+    /// The release that places `request`, which is always the current one. A login routed with another release is
+    /// rejected as unavailable so its proxy routes it again; a move out of another release goes to the current one.
     pub fn placing(&self, request: &ClaimRequest) -> Result<(String, Arc<Release>)> {
-        let name = match &request.source {
-            None if request.deployment.is_empty() => {
-                self.current.clone().ok_or(Error::Invalid("no current release"))?
-            }
-            None => {
-                if self.releases.get(&request.deployment).is_none_or(|release| release.retired) {
-                    return Err(Error::Unresolved(crate::ROUTE_AGAIN));
-                }
-                request.deployment.clone()
-            }
-            Some(source) => {
-                let claim = self.claims.get(&source.operation_id).ok_or(Error::Invalid("missing move source"))?;
-                let session = self.sessions.get(&claim.session).ok_or(Error::Invalid("missing move source"))?;
-                self.hosts.get(&session.host).ok_or(Error::Invalid("missing move source"))?.release.clone()
-            }
-        };
-        let release = self.releases.get(&name).ok_or(Error::Invalid("unknown release"))?;
-        if release.retired {
-            return Err(Error::Invalid("release retired"));
+        let name = self.current.clone().ok_or(Error::Invalid("no current release"))?;
+        if request.source.is_none() && !request.deployment.is_empty() && request.deployment != name {
+            return Err(Error::Unresolved(crate::ROUTE_AGAIN));
         }
-        let release = release.release.clone();
-        Ok((name, release))
+        let release = self.releases.get(&name).ok_or(Error::Invalid("unknown release"))?;
+        Ok((name, release.release.clone()))
     }
 
     /// Re-indexes [`State::move_sources`] for the `written` moves, as they were in `previous` and are now.

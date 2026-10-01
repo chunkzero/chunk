@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chunk_contract::SessionDeclaration;
+
 use super::{
     Manifest, Metadata, archive, content_digest, descriptor, directory, jars, launcher, read_jvm_descriptor, verify,
 };
@@ -77,9 +79,10 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
                     .ok_or_else(|| io::Error::other(format!("unknown machine profile {machine_profile}")))?;
                 metadata.profiles.insert(machine_profile.into(), profile.clone());
             }
+            let reconnect = requirements.reconnect.unwrap_or(true);
             sessions.insert(
                 id.clone(),
-                chunk_contract::SessionDeclaration { machine_profile: machine_profile.into(), capacity },
+                SessionDeclaration { machine_profile: machine_profile.into(), capacity, reconnect },
             );
         }
         insert(&mut files, jar.clone(), bytes)?;

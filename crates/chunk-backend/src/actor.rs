@@ -36,7 +36,8 @@ mod watches;
 
 pub(crate) use readers::Evaluated;
 
-const MAX_DEPLOYMENTS: usize = 16;
+/// How many deployments the backend holds at once.
+pub const MAX_DEPLOYMENTS: usize = 16;
 
 struct Mutation {
     operation: Operation,
