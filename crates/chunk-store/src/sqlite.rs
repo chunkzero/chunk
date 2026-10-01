@@ -6,10 +6,12 @@ use std::{
 };
 
 use rusqlite::Connection;
+use serde_json::Value;
 
 use crate::{
-    Commit, DatabaseSchema, Epoch, Error, IndexDefinition, JobIntent, Operation, Outcome, PendingWork, Replication,
-    Replicator, Reply, Request, Result, RetryContext, Revision, Snapshot, Storage, Transform, Work, replication,
+    Backfill, Commit, DatabaseSchema, Epoch, Error, IndexDefinition, JobIntent, Operation, Outcome, PendingWork,
+    Replication, Replicator, Reply, Request, Result, RetryContext, Revision, Snapshot, Storage, Transform, Work,
+    replication,
 };
 
 mod backfill;
@@ -271,12 +273,16 @@ impl Storage for SqliteStore {
         let index = match work::get(&self.connection, id)? {
             None => return Ok(()),
             Some((Work::Index(index), ..)) => index,
-            Some((Work::Backfill { migration, table }, done, cursor)) => {
-                let schema = &self.schema;
-                return log::write_or_roll_back(&self.connection, self.log.as_mut(), &[], |transaction| {
-                    let work = (migration.as_str(), table.as_str());
-                    backfill::run(transaction, schema, id, work, (done, cursor.as_deref()), transform)
-                });
+            Some((Work::Backfill { .. }, ..)) => {
+                let Some(batch) = self.read_backfill(id, backfill::BATCH)? else { return Ok(()) };
+                let mut outputs = Vec::with_capacity(batch.rows.len());
+                for row in &batch.rows {
+                    outputs.push(
+                        transform(&batch.migration, &batch.table, row.input.clone())
+                            .map_err(|reason| batch.failure(&row.id, &reason))?,
+                    );
+                }
+                return self.commit_backfill(id, &batch, &outputs);
             }
             Some((Work::Drop { migration }, ..)) => return self.drop_old_shape(id, &migration),
         };
@@ -297,6 +303,26 @@ impl Storage for SqliteStore {
             self.indexes = Arc::new(indexes);
         }
         Ok(())
+    }
+
+    fn read_backfill(&mut self, id: u64, rows: usize) -> Result<Option<Backfill>> {
+        let Some((Work::Backfill { migration, table }, _, cursor)) = work::get(&self.connection, id)? else {
+            return Ok(None);
+        };
+        let schema = &self.schema;
+        log::write_or_roll_back(&self.connection, self.log.as_mut(), &[], |transaction| {
+            backfill::read(transaction, schema, id, (&migration, &table), (cursor.as_deref(), rows))
+        })
+    }
+
+    fn commit_backfill(&mut self, id: u64, batch: &Backfill, outputs: &[Value]) -> Result<()> {
+        let Some((Work::Backfill { .. }, done, cursor)) = work::get(&self.connection, id)? else {
+            return Ok(());
+        };
+        let schema = &self.schema;
+        log::write_or_roll_back(&self.connection, self.log.as_mut(), &[], |transaction| {
+            backfill::commit(transaction, schema, id, batch, outputs, (done, cursor.as_deref()))
+        })
     }
 
     fn release_deployment(&mut self, id: &str) -> Result<bool> {

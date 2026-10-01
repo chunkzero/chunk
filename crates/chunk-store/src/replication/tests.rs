@@ -16,14 +16,14 @@ use crate::{
 };
 
 #[derive(Default)]
-struct Memory(Mutex<BTreeMap<String, (Vec<u8>, SystemTime)>>);
+pub(crate) struct Memory(Mutex<BTreeMap<String, (Vec<u8>, SystemTime)>>);
 
 impl Memory {
     fn keys(&self) -> Vec<String> {
         self.0.lock().unwrap().keys().cloned().collect()
     }
 
-    fn copy(&self) -> Arc<Self> {
+    pub(crate) fn copy(&self) -> Arc<Self> {
         Arc::new(Self(Mutex::new(self.0.lock().unwrap().clone())))
     }
 }
@@ -63,7 +63,7 @@ impl ObjectStorage for Memory {
 }
 
 /// Uploads only on flush, so tests control every object.
-fn manual(storage: &Arc<Memory>) -> Replication {
+pub(crate) fn manual(storage: &Arc<Memory>) -> Replication {
     manual_on(storage.clone())
 }
 
@@ -71,7 +71,12 @@ fn manual_on(storage: Arc<dyn ObjectStorage>) -> Replication {
     Replication { batch_delay: Duration::from_secs(3600), ..Replication::new(storage) }
 }
 
-fn open(path: &Path, replication: Replication) -> (SqliteStore, Replicator) {
+/// Snapshots after every two segments.
+pub(crate) fn snapshotting(storage: &Arc<Memory>) -> Replication {
+    Replication { snapshot_segments: 2, ..manual(storage) }
+}
+
+pub(crate) fn open(path: &Path, replication: Replication) -> (SqliteStore, Replicator) {
     SqliteStore::open_replicated(path, "local", replication).unwrap()
 }
 
@@ -87,12 +92,12 @@ fn eventually(what: &str, done: impl Fn() -> bool) {
     }
 }
 
-fn count(storage: &Memory, kind: &str) -> usize {
+pub(crate) fn count(storage: &Memory, kind: &str) -> usize {
     storage.keys().iter().filter(|key| key.contains(kind)).count()
 }
 
 /// Every schema object and row except replication bookkeeping.
-fn dump(path: &Path) -> Vec<String> {
+pub(crate) fn dump(path: &Path) -> Vec<String> {
     let connection = Connection::open(path).unwrap();
     let mut lines = Vec::new();
     let mut tables = connection.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY name").unwrap();

@@ -82,7 +82,7 @@ pub(super) fn install(
     if !applied.is_empty() {
         require_stored(current, &stored(applied))?;
     }
-    let direct = direct(connection, current, new)?;
+    let direct = direct(connection, current, new, &deployments::load(connection)?)?;
     let new: Vec<_> = new
         .iter()
         .map(|migration| Applied {
@@ -123,11 +123,25 @@ pub(super) fn install(
     Ok((migration, new))
 }
 
-/// The IDs of the expands in `new` that a finish in `new` completes, all over tables with no rows.
-fn direct(connection: &Connection, current: &DatabaseSchema, new: &[Migration]) -> Result<BTreeSet<String>> {
+/// The IDs of the expands in `new` that a finish in `new` completes, all over tables with no rows, where no
+/// resident deployment declares a removed field or lacks an added required one.
+fn direct(
+    connection: &Connection,
+    current: &DatabaseSchema,
+    new: &[Migration],
+    residents: &[Deployment],
+) -> Result<BTreeSet<String>> {
     let mut direct = BTreeSet::new();
     for expand in new.iter().filter(|expand| new.iter().any(|finish| finish.finishes.as_ref() == Some(&expand.id))) {
-        let mut empty = true;
+        let mut empty = expand.tables.iter().all(|(name, change)| {
+            let required = |field: &String| {
+                expand.schema.get(name).and_then(|table| table.fields.get(field)).is_some_and(|field| !field.optional)
+            };
+            residents.iter().filter_map(|resident| resident.tables.get(name)).all(|table| {
+                !change.removed.iter().any(|field| table.fields.contains_key(field))
+                    && change.added.iter().filter(|field| required(field)).all(|field| table.fields.contains_key(field))
+            })
+        });
         for table in expand.tables.keys().filter(|table| current.contains_key(*table)) {
             let rows = connection.query_row(&format!("SELECT EXISTS (SELECT 1 FROM {})", quote(table)), [], |row| {
                 row.get::<_, bool>(0)
@@ -302,17 +316,17 @@ pub(super) fn plan(current: &DatabaseSchema, target: &DatabaseSchema, drop: bool
             }
         }
     }
-    chunk_contract::validate(&merged).map_err(Error::Invalid)?;
+    chunk_contract::validate_physical(&merged).map_err(Error::Invalid)?;
     Ok(schema::Migration { schema: merged, statements, indexes: Vec::new() })
 }
 
-/// Whether `expand`'s old shape can be dropped: no deployment declares a removed field.
+/// Whether `expand` can stop syncing and drop its old shape: every resident deployment that declares a changed
+/// table declares all of the fields it adds and none of those it removes.
 fn droppable(expand: &Migration, deployments: &[Deployment]) -> bool {
     expand.tables.iter().all(|(name, change)| {
-        change.removed.iter().all(|field| {
-            !deployments
-                .iter()
-                .any(|deployment| deployment.tables.get(name).is_some_and(|table| table.fields.contains_key(field)))
+        deployments.iter().filter_map(|deployment| deployment.tables.get(name)).all(|table| {
+            change.added.iter().all(|field| table.fields.contains_key(field))
+                && !change.removed.iter().any(|field| table.fields.contains_key(field))
         })
     })
 }

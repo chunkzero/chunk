@@ -69,7 +69,7 @@ pub use model::{
 pub use replication::{Listed, ObjectStorage, Replication, ReplicationProgress, Replicator, S3Bucket, S3Credentials};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
-pub use work::{PendingWork, Transform, Work, compatible_field};
+pub use work::{Backfill, BackfillRow, PendingWork, Transform, Work, compatible_field};
 
 /// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
@@ -111,6 +111,20 @@ pub trait Storage: Send {
     /// rows with [`Error::Migration`]. A failure that changed nothing is
     /// [`Error::RolledBack`].
     fn run_work(&mut self, id: u64, transform: &mut Transform<'_>) -> Result<()>;
+
+    /// Reads the next batch of at most `rows` rows of backfill `id`, for the caller to transform and
+    /// [commit](Storage::commit_backfill). A backfill with no rows left finishes and yields `None`, as does work
+    /// no longer pending.
+    /// # Errors
+    /// Reports storage failures or corrupt work records.
+    fn read_backfill(&mut self, id: u64, rows: usize) -> Result<Option<Backfill>>;
+
+    /// Commits `batch` with `outputs`, one transformed row for each of its rows, and advances the backfill. A row
+    /// whose revision changed since it was read was synchronized by its write and is skipped. Does nothing if the
+    /// backfill is no longer at the batch's cursor.
+    /// # Errors
+    /// As [`Storage::run_work`].
+    fn commit_backfill(&mut self, id: u64, batch: &Backfill, outputs: &[serde_json::Value]) -> Result<()>;
 
     /// Applied expand migrations whose old shape is still stored, in journal order.
     /// # Errors

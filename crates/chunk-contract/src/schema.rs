@@ -164,7 +164,7 @@ impl Schema {
             }
             Self::Nullable { value } => value.validate(depth + 1)?,
             Self::Array { items } => items.validate(depth + 1)?,
-            Self::Object { fields } => validate_fields(fields, depth + 1, true)?,
+            Self::Object { fields } => validate_fields(fields, depth + 1, (true, MAX_FIELDS))?,
             Self::Union { variants } => {
                 if variants.is_empty() || variants.len() > MAX_UNION_VARIANTS {
                     return Err("invalid union size");
@@ -199,7 +199,11 @@ impl TableSchema {
     /// # Errors
     /// Rejects invalid names, excessive declarations and non-scalar index fields.
     pub fn validate(&self) -> Result<(), &'static str> {
-        validate_fields(&self.fields, 0, false)?;
+        self.validate_with(MAX_FIELDS)
+    }
+
+    fn validate_with(&self, max_fields: usize) -> Result<(), &'static str> {
+        validate_fields(&self.fields, 0, (false, max_fields))?;
         if self.indexes.len() > MAX_INDEXES {
             return Err("too many indexes");
         }
@@ -234,8 +238,12 @@ fn accepts_object(fields: &BTreeMap<String, Field>, value: &Value, depth: usize,
     })
 }
 
-fn validate_fields(fields: &BTreeMap<String, Field>, depth: usize, metadata: bool) -> Result<(), &'static str> {
-    if fields.len() > MAX_FIELDS + usize::from(metadata && fields.contains_key("_id")) {
+fn validate_fields(
+    fields: &BTreeMap<String, Field>,
+    depth: usize,
+    (metadata, max_fields): (bool, usize),
+) -> Result<(), &'static str> {
+    if fields.len() > max_fields + usize::from(metadata && fields.contains_key("_id")) {
         return Err("too many fields");
     }
     let mut names = BTreeSet::new();
@@ -279,8 +287,20 @@ pub fn validate_name(name: &str) -> Result<(), &'static str> {
 /// # Errors
 /// Rejects invalid declarations, case collisions and excessive schema sizes.
 pub fn validate(schema: &DatabaseSchema) -> Result<(), &'static str> {
+    validate_scaled(schema, 1)
+}
+
+/// Validates a stored schema, which holds both shapes of a table while a migration is active, with twice the
+/// field-count and serialized-size limits of a declaration.
+/// # Errors
+/// As [`validate`].
+pub fn validate_physical(schema: &DatabaseSchema) -> Result<(), &'static str> {
+    validate_scaled(schema, 2)
+}
+
+fn validate_scaled(schema: &DatabaseSchema, scale: usize) -> Result<(), &'static str> {
     if schema.len() > MAX_TABLES
-        || serde_json::to_vec(schema).map_err(|_| "invalid schema serialization")?.len() > MAX_SCHEMA_BYTES
+        || serde_json::to_vec(schema).map_err(|_| "invalid schema serialization")?.len() > MAX_SCHEMA_BYTES * scale
     {
         return Err("schema size limit");
     }
@@ -290,7 +310,7 @@ pub fn validate(schema: &DatabaseSchema) -> Result<(), &'static str> {
         if !names.insert(name.to_ascii_lowercase()) {
             return Err("table names differ only by case");
         }
-        table.validate()?;
+        table.validate_with(MAX_FIELDS * scale)?;
     }
     Ok(())
 }

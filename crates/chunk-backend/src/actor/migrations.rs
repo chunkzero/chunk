@@ -1,14 +1,35 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use chunk_contract::{Deployment, MigrationTable};
-use chunk_js::DeploymentId;
+use chunk_js::{Cancellation, DeploymentId};
 use serde_json::{Map, Value};
 
 use super::Actor;
 use crate::{
-    Error, Result,
+    Error, Limit, Result,
+    limits::MUTATION_BYTES,
     migrations::{Direction, transform},
 };
+
+/// The longest the transforms of one write may take in all.
+const SYNC_DEADLINE: Duration = Duration::from_secs(5);
+
+/// What the transforms of one write may still spend: time, and the memory the request has left.
+pub(super) struct Budget {
+    deadline: Instant,
+    bytes: usize,
+}
+
+impl Budget {
+    /// A budget for a request that already holds `used` of the mutation memory budget.
+    pub fn new(used: usize) -> Self {
+        Self { deadline: Instant::now() + SYNC_DEADLINE, bytes: MUTATION_BYTES.saturating_sub(used) }
+    }
+}
 
 /// An active expand's ID, its change to a table, and the fields its `to` and `back` read.
 type Step = (String, MigrationTable, [BTreeSet<String>; 2]);
@@ -25,10 +46,17 @@ impl Actor {
     }
 
     /// Keeps both shapes of each active expand migration in step on a write from `contract`, whose row `value`
-    /// is the write merged with the stored fields it doesn't declare. A writer that lacks any added field gets
-    /// them from `to`; one that lacks any removed field gets them from `back`, where the migration has it.
-    /// Without a resident deployment carrying a migration, its fields are left as they are.
-    pub(super) fn sync(&mut self, contract: &Deployment, table: &str, id: &str, value: &mut Value) -> Result<()> {
+    /// is the write merged with the stored fields it doesn't declare. A writer that lacks any added field is on the
+    /// old shape and gets them from `to`; one that declares them but lacks a removed field is on the new shape and
+    /// gets those from `back`, where the migration has it. Without a resident deployment carrying a migration, its
+    /// fields are left as they are. Fails once the transforms outlast `budget`.
+    pub(super) fn sync(
+        &mut self,
+        contract: &Deployment,
+        (table, id): (&str, &str),
+        value: &mut Value,
+        budget: &mut Budget,
+    ) -> Result<()> {
         let Some(writer) = contract.tables.get(table) else { return Ok(()) };
         let steps: Vec<Step> = self
             .work
@@ -43,10 +71,9 @@ impl Actor {
         let lacks = |fields: &[String]| fields.iter().any(|field| !writer.fields.contains_key(field));
         for (migration, change, [to, back]) in &steps {
             if lacks(&change.added) {
-                self.apply((migration, table, Direction::To), (&change.added, to), id, value)?;
-            }
-            if change.back && lacks(&change.removed) {
-                self.apply((migration, table, Direction::Back), (&change.removed, back), id, value)?;
+                self.apply((migration, table, Direction::To), (&change.added, to), id, (value, budget))?;
+            } else if change.back && lacks(&change.removed) {
+                self.apply((migration, table, Direction::Back), (&change.removed, back), id, (value, budget))?;
             }
         }
         Ok(())
@@ -58,7 +85,7 @@ impl Actor {
         (migration, table, direction): (&str, &str, Direction),
         (fields, input): (&[String], &BTreeSet<String>),
         id: &str,
-        value: &mut Value,
+        (value, budget): (&mut Value, &mut Budget),
     ) -> Result<()> {
         let Some(carrier) = self.carrier(migration) else {
             return Ok(());
@@ -70,8 +97,18 @@ impl Actor {
         row.insert("_id".into(), Value::String(id.into()));
         let failed =
             |reason: String| Error::Migration(format!("migration {migration} failed on {table} row {id}: {reason}"));
-        let output =
-            transform(&mut self.js, &carrier, (migration, table, direction), &Value::Object(row)).map_err(failed)?;
+        if Instant::now() >= budget.deadline {
+            return Err(failed(format!("the write's transforms exceeded {SYNC_DEADLINE:?}")));
+        }
+        let output = transform(
+            &mut self.js,
+            &carrier,
+            (migration, table, direction),
+            &Value::Object(row),
+            &Cancellation::default(),
+        )
+        .map_err(failed)?;
+        budget.bytes = budget.bytes.checked_sub(output.to_string().len()).ok_or(Limit::MutationMemory.exceeded())?;
         for field in fields {
             match output.get(field) {
                 Some(computed) => object.insert(field.clone(), computed.clone()),

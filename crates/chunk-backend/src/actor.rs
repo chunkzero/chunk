@@ -35,7 +35,7 @@ mod readiness;
 mod subscriptions;
 mod watches;
 
-pub(crate) use readers::Evaluated;
+pub(crate) use readers::{Computed, Evaluated};
 
 /// How many deployments the backend holds at once.
 pub const MAX_DEPLOYMENTS: usize = 16;
@@ -233,6 +233,8 @@ impl Actor {
                     self.outstanding -= 1;
                     self.released(result);
                 }
+                Event::BackfillRead { id, batch } => self.backfill_read(id, batch),
+                Event::Computed(computed) => self.computed(*computed),
                 Event::Evaluated(evaluated) => self.evaluated(*evaluated),
                 Event::System { count, revision, snapshot } => self.system_committed(count, revision, snapshot),
                 Event::Failed => {

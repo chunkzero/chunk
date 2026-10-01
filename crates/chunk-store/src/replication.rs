@@ -347,4 +347,4 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

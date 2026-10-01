@@ -244,7 +244,7 @@ fn nicknames(id: &str, length: usize) -> Deployment {
         tables,
         schema,
     };
-    let change = MigrationTable { added: vec!["displayName".into()], removed: vec!["nickname".into()], back: false };
+    let change = MigrationTable { added: vec!["displayName".into()], removed: vec!["nickname".into()], back: true };
     let mut migrations = vec![
         entry("0001_init", MigrationKind::Baseline, std::collections::BTreeMap::new(), fields(&[("name", false)])),
         entry(
@@ -262,10 +262,14 @@ fn nicknames(id: &str, length: usize) -> Deployment {
     ];
     migrations.truncate(length);
     let source = r"
-export function __chunk_migrate(_, {rows}) { return rows.map((old) => ({displayName: old.nickname ?? old.name})); }
+export function __chunk_migrate(_, {direction, rows}) {
+  return rows.map((row) => direction === 'to' ? {displayName: row.nickname ?? row.name} : {nickname: row.displayName});
+}
 export function read(ctx, id) { return JSON.stringify(ctx.db.get('fighters', id)); }
 export function writeName(ctx, id) { ctx.db.put('fighters', id, {name: id}); return ''; }
 export function writeNickname(ctx, id) { ctx.db.put('fighters', id, {name: id, nickname: 'Nick'}); return ''; }
+export function writeRenamed(ctx, id) { ctx.db.put('fighters', id, {name: id + '2'}); return ''; }
+export function writeDisplay(ctx, id) { ctx.db.put('fighters', id, {name: id, displayName: 'Dee'}); return ''; }
 ";
     let function = |name: &str, kind| {
         let function = Function {
@@ -288,6 +292,8 @@ export function writeNickname(ctx, id) { ctx.db.put('fighters', id, {name: id, n
             function("read", FunctionKind::Query),
             function("writeName", FunctionKind::Mutation),
             function("writeNickname", FunctionKind::Mutation),
+            function("writeRenamed", FunctionKind::Mutation),
+            function("writeDisplay", FunctionKind::Mutation),
         ]
         .into(),
     }
@@ -308,4 +314,38 @@ async fn writers_that_predate_a_removed_optional_field_still_synchronize() {
     assert_eq!(read(&backend, "c", "ann").await, json!({"name": "ann", "displayName": "ann"}));
     write(&backend, "b", "writeNickname", "bob").await;
     assert_eq!(read(&backend, "c", "bob").await, json!({"name": "bob", "displayName": "Nick"}));
+}
+
+#[tokio::test]
+async fn a_write_runs_one_direction_so_the_derived_field_follows_the_name() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend =
+        Backend::new("local".into(), Box::new(SqliteStore::open(directory.path().join("once.db"), "local").unwrap()))
+            .unwrap();
+    for (id, length) in [("a", 1), ("b", 2), ("c", 3)] {
+        backend.deploy(nicknames(id, length)).await.unwrap();
+    }
+    write(&backend, "a", "writeName", "ann").await;
+    write(&backend, "a", "writeRenamed", "ann").await;
+    assert_eq!(read(&backend, "c", "ann").await, json!({"name": "ann2", "displayName": "ann2"}));
+    assert_eq!(read(&backend, "b", "ann").await, json!({"name": "ann2"}));
+    write(&backend, "c", "writeDisplay", "dee").await;
+    assert_eq!(read(&backend, "b", "dee").await, json!({"name": "dee", "nickname": "Dee"}));
+}
+
+#[tokio::test]
+async fn a_slow_backfill_leaves_the_commit_lane_to_other_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend =
+        Backend::new("local".into(), Box::new(SqliteStore::open(directory.path().join("slow.db"), "local").unwrap()))
+            .unwrap();
+    let spin = "displayName: (() => { let x = 0; for (let i = 0; i < 3e7; i++) x += i; return 'x' + (x < 0); })()";
+    backend.deploy(transforming("old", 1, spin)).await.unwrap();
+    write(&backend, "old", "seed", "0").await;
+    let new = DeploymentId::new("new").unwrap();
+    backend.install(transforming("new", 2, spin)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    write(&backend, "old", "writeOld", "live").await;
+    assert!(!backend.readiness(new.clone()).await.unwrap().ready, "the write committed while the backfill ran");
+    backend.ready(new).await.unwrap();
 }

@@ -26,10 +26,19 @@ pub(crate) enum Job {
     Install {
         deployment: Arc<chunk_contract::Deployment>,
     },
-    /// Runs one item of pending work. A backfill runs its transform in `deployment`'s bundle.
+    /// Runs one item of pending work other than a backfill.
     Work {
         id: u64,
-        deployment: Option<Arc<chunk_contract::Deployment>>,
+    },
+    /// Reads the next batch of a backfill.
+    ReadBackfill {
+        id: u64,
+    },
+    /// Commits the rows of a batch that were transformed, skipping those written since they were read.
+    CommitBackfill {
+        id: u64,
+        batch: chunk_store::Backfill,
+        outputs: Vec<serde_json::Value>,
     },
     Commit {
         expected: Revision,
@@ -50,6 +59,9 @@ pub(crate) enum Job {
 /// Prepares and commits that may share one durable write, bounded to keep
 /// acknowledgement latency low.
 const MAX_BATCH: usize = 64;
+
+/// The rows a backfill batch reads at most.
+const BACKFILL_ROWS: usize = 256;
 
 /// Every system commit records an operation with a unique ID, so they share one request fingerprint.
 const FINGERPRINT: [u8; 32] = *b"chunk-environment-system-commit!";
@@ -113,7 +125,6 @@ impl Committer {
             }
             let mut failed = false;
             let mut next = None;
-            let mut migrator = crate::migrations::Migrator::default();
             while let Some(job) = next.take().or_else(|| incoming.recv().ok()) {
                 let system = lane.0.take();
                 let healthy = !failed;
@@ -136,7 +147,7 @@ impl Committer {
                     Job::Wake => durable(store.as_mut(), &mut sequence, system, Vec::new(), &mut failed),
                     job => {
                         let mut events = durable(store.as_mut(), &mut sequence, system, Vec::new(), &mut failed);
-                        events.push(run(store.as_mut(), &mut sequence, job, &mut migrator, &mut failed));
+                        events.push(run(store.as_mut(), &mut sequence, job, &mut failed));
                         events
                     }
                 };
@@ -178,13 +189,7 @@ impl Drop for Closing {
     }
 }
 
-fn run(
-    store: &mut dyn Storage,
-    sequence: &mut Sequence,
-    job: Job,
-    migrator: &mut crate::migrations::Migrator,
-    failed: &mut bool,
-) -> Event {
+fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut bool) -> Event {
     match job {
         Job::Release { id } => {
             let result = if *failed {
@@ -214,16 +219,33 @@ fn run(
             *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
             Event::Installed { result }
         }
-        Job::Work { id, deployment } => {
+        Job::Work { id } => {
             let result = if *failed {
                 Err(Error::CommitFailed)
             } else {
-                let mut transform = |migration: &str, table: &str, row| {
-                    let deployment =
-                        deployment.as_ref().ok_or("no resident deployment carries the migration".to_owned())?;
-                    migrator.to(deployment, migration, table, &row)
-                };
+                let mut transform = |_: &str, _: &str, _| Err("backfills run outside the commit lane".to_owned());
                 store.run_work(id, &mut transform).map_err(Error::from).and_then(|()| current(store))
+            };
+            *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+            Event::Worked { id, result }
+        }
+        Job::ReadBackfill { id } => match if *failed {
+            Err(Error::CommitFailed)
+        } else {
+            store.read_backfill(id, BACKFILL_ROWS).map_err(Error::from)
+        } {
+            Ok(Some(batch)) => Event::BackfillRead { id, batch },
+            Ok(None) => Event::Worked { id, result: current(store) },
+            Err(error) => {
+                *failed |= !error.is_rejected_commit();
+                Event::Worked { id, result: Err(error) }
+            }
+        },
+        Job::CommitBackfill { id, batch, outputs } => {
+            let result = if *failed {
+                Err(Error::CommitFailed)
+            } else {
+                store.commit_backfill(id, &batch, &outputs).map_err(Error::from).and_then(|()| current(store))
             };
             *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
             Event::Worked { id, result }

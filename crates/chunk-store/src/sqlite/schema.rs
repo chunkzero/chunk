@@ -17,7 +17,7 @@ pub(super) fn load(connection: &Connection) -> Result<DatabaseSchema> {
         || Ok(DatabaseSchema::new()),
         |schema| {
             let schema = serde_json::from_str(&schema)?;
-            chunk_contract::validate(&schema).map_err(Error::Invalid)?;
+            chunk_contract::validate_physical(&schema).map_err(Error::Invalid)?;
             Ok(schema)
         },
     )
@@ -73,7 +73,7 @@ pub(super) fn merge(
             }
         }
     }
-    chunk_contract::validate(&merged).map_err(Error::Invalid)?;
+    chunk_contract::validate_physical(&merged).map_err(Error::Invalid)?;
     let indexes: Vec<_> = built.map_or_else(Vec::new, |built| {
         IndexDefinition::declared(incoming).filter(|index| !built.contains(index)).collect()
     });

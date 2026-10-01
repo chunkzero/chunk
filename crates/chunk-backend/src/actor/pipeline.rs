@@ -167,6 +167,12 @@ impl Actor {
             .collect::<Result<Vec<_>>>()?;
         if let Some(Some(contract)) = self.versions.get(&mutation.call.deployment).cloned() {
             let mut budget = crate::reads::read_budget();
+            let staged: usize = if self.work.migrations.is_empty() {
+                0
+            } else {
+                writes.iter().filter_map(|write| write.value.as_ref()).map(|value| value.to_string().len()).sum()
+            };
+            let mut sync = super::migrations::Budget::new(self.pending_bytes + execution.value.len() + staged);
             for write in &mut writes {
                 let table = contract.tables.get(&write.key.table).ok_or(Error::Contract)?;
                 if let Some(value) = &mut write.value {
@@ -182,7 +188,7 @@ impl Actor {
                             }
                         }
                     }
-                    self.sync(&contract, &write.key.table, &write.key.id, value)?;
+                    self.sync(&contract, (&write.key.table, &write.key.id), value, &mut sync)?;
                 }
                 if let Some(value) = &write.value {
                     for retained in self.versions.values().flatten() {

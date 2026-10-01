@@ -47,6 +47,45 @@ pub struct PendingWork {
 /// `migration`'s `to` for `table`, returning an object of the added fields. A row's result depends on nothing else.
 pub type Transform<'a> = dyn FnMut(&str, &str, Value) -> Result<Value, String> + 'a;
 
+/// One batch of a backfill: the rows after `cursor`, with the fields their migration's `to` reads, ready to be
+/// transformed outside the store. `complete` means no row follows the batch.
+#[derive(Debug, Clone)]
+pub struct Backfill {
+    pub migration: String,
+    pub table: String,
+    pub cursor: Option<String>,
+    pub rows: Vec<BackfillRow>,
+    pub complete: bool,
+}
+
+/// A row as a backfill read it. It is skipped when committed if its revision has moved since.
+#[derive(Debug, Clone)]
+pub struct BackfillRow {
+    pub id: String,
+    pub revision: u64,
+    /// The transform's input: the row's `_id` and the fields `to` reads.
+    pub input: Value,
+}
+
+impl Backfill {
+    /// Keeps the first `rows` rows; the rest are read again by the next batch.
+    pub fn shrink(&mut self, rows: usize) {
+        if rows < self.rows.len() {
+            self.rows.truncate(rows);
+            self.complete = false;
+        }
+    }
+
+    /// The error for a transform that fails on `row`.
+    #[must_use]
+    pub fn failure(&self, row: &str, reason: &str) -> crate::Error {
+        crate::Error::Migration(format!(
+            "migration {} failed to backfill {}: row {row}: {reason}",
+            self.migration, self.table
+        ))
+    }
+}
+
 /// Whether a stored field serves a deployment that declares it as `declared`. A field an active expand migration
 /// adds or removes (`migrating`) is stored as optional.
 #[must_use]

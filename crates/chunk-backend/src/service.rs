@@ -310,6 +310,13 @@ pub(crate) enum Event {
         id: u64,
         result: Result<(Snapshot, crate::commit::Stored)>,
     },
+    /// The next batch of a backfill, read for a worker to transform.
+    BackfillRead {
+        id: u64,
+        batch: chunk_store::Backfill,
+    },
+    /// A worker transformed a backfill batch.
+    Computed(Box<crate::actor::Computed>),
     Released {
         result: Result<(bool, crate::commit::Stored)>,
     },
