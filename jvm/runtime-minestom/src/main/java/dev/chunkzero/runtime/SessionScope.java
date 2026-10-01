@@ -271,7 +271,8 @@ public final class SessionScope {
     /**
      * Asks core to move an admitted player to {@code destination}, through its admission policy.
      * Once core accepts, the player's gateway carries the move out and the player leaves this
-     * session. Fails if core can't be reached.
+     * session. The runtime repeats the request while core can't be reached, and fails once it gives
+     * up.
      */
     public CompletionStage<MoveResult> move(Player player, Destination destination) {
         Objects.requireNonNull(destination);

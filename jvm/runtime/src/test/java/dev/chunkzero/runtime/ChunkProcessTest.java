@@ -7,8 +7,10 @@ import chunk.sync.v1.CoreOuterClass.CallRequest;
 import chunk.sync.v1.CoreOuterClass.CallResponse;
 import chunk.sync.v1.CoreOuterClass.Entry;
 import chunk.sync.v1.CoreOuterClass.Error;
+import chunk.sync.v1.CoreOuterClass.Position;
 import chunk.sync.v1.CoreOuterClass.SubscribeRequest;
 import chunk.sync.v1.CoreOuterClass.Update;
+import chunk.sync.v1.Jvm.JvmMove;
 import chunk.sync.v1.Jvm.JvmRegistered;
 import chunk.sync.v1.Jvm.JvmRegistration;
 import chunk.sync.v1.Jvm.JvmReport;
@@ -19,6 +21,7 @@ import chunk.sync.v1.Jvm.JvmStop;
 
 import com.google.protobuf.ByteString;
 
+import dev.chunkzero.backend.api.Destination;
 import dev.chunkzero.runtime.bootstrap.RuntimeEnvironment;
 import dev.chunkzero.runtime.control.ProcessState;
 
@@ -144,6 +147,29 @@ class ChunkProcessTest {
     }
 
     @Test
+    void movesRepeatTheirOperationWhenCoresReplyIsLost() throws Exception {
+        var core = new FakeCore();
+        var server = core.start();
+        core.lostMoves = 2;
+        try (var process = new ChunkProcess(environment(server.getPort()))) {
+            var generation = Position.newBuilder().setEpoch(1).setRevision(7).build();
+            var moved =
+                    process.move(
+                            "delivery", generation, new Destination("arena", "app/arena", "local"));
+            assertEquals(MoveResult.ACCEPTED, moved.toCompletableFuture().get(5, TimeUnit.SECONDS));
+            var first = core.call("chunk:move");
+            var move = JvmMove.parseFrom(first.getArguments());
+            assertEquals("delivery", move.getDelivery());
+            assertEquals(generation, move.getGeneration());
+            assertEquals("arena", move.getDestination().getKey());
+            for (int retry = 0; retry < 2; retry++) assertEquals(first, core.call("chunk:move"));
+            assertNull(core.calls.poll());
+        } finally {
+            server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
+        }
+    }
+
+    @Test
     void stopsForGoodOnceCoreRejectsItsCredential() throws Exception {
         var core = new FakeCore();
         var server = core.start();
@@ -209,6 +235,8 @@ class ChunkProcessTest {
         final BlockingQueue<SubscribeRequest> subscriptions = new LinkedBlockingQueue<>();
         final BlockingQueue<String> rejected = new LinkedBlockingQueue<>();
         volatile Status rejecting;
+        // Moves core takes, but whose replies are lost.
+        volatile int lostMoves;
         private StreamObserver<Update> topic;
         private String stream = "";
         private int streams;
@@ -251,6 +279,11 @@ class ChunkProcessTest {
         @Override
         public synchronized void call(CallRequest request, StreamObserver<CallResponse> response) {
             calls.add(request);
+            if (request.getMethod().equals("chunk:move") && lostMoves > 0) {
+                lostMoves--;
+                response.onError(Status.UNAVAILABLE.asRuntimeException());
+                return;
+            }
             var result = CallResponse.newBuilder();
             if (request.getMethod().equals("chunk:register"))
                 result.setResult(JvmRegistered.newBuilder().setHost("host").build().toByteString());

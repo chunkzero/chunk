@@ -136,7 +136,8 @@ at the generation this JVM admitted them with. `MoveResult` is `ACCEPTED` once t
 gateway then carries it out, so the player leaves this session; the destination's login and `player.beforeMove` hooks
 may still turn them away. Otherwise it says why core queued nothing: `OFFLINE`, `STALE` (the player already left this
 delivery, is still arriving, or is already moving), `FULL` (a `"reject"` destination whose one session is full) or
-`UNKNOWN_DESTINATION`. The stage fails if core can't be reached.
+`UNKNOWN_DESTINATION` (the release declares no such destination). While core can't be reached, the runtime repeats the
+request for a few seconds, under the same operation so a repeat can't move the player twice, and then fails the stage.
 
 ## Components
 
