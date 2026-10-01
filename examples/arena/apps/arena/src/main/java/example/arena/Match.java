@@ -52,7 +52,7 @@ final class Match {
 
     /**
      * Advances one second. A match starts once both teams have a player, and ends early if one
-     * empties.
+     * empties, or on points if both do.
      */
     void second(Headcount players, Headcount onHill) {
         var bothTeams = players.red() > 0 && players.blue() > 0;
@@ -75,6 +75,10 @@ final class Match {
     private void play(Headcount players, Headcount onHill) {
         holder = null;
         contested = onHill.red() > 0 && onHill.blue() > 0;
+        if (players.red() == 0 && players.blue() == 0) {
+            end(leader());
+            return;
+        }
         for (var team : Team.values()) {
             if (players.of(team) == 0) {
                 end(team.opponent());
@@ -85,10 +89,15 @@ final class Match {
         if (holder != null && scores.merge(holder, 1, Integer::sum) >= rules.targetScore()) {
             end(holder);
         } else if (--secondsLeft == 0) {
-            var red = score(Team.RED);
-            var blue = score(Team.BLUE);
-            end(red == blue ? null : red > blue ? Team.RED : Team.BLUE);
+            end(leader());
         }
+    }
+
+    /** The team ahead on points, or null when the scores are level. */
+    private Team leader() {
+        var red = score(Team.RED);
+        var blue = score(Team.BLUE);
+        return red == blue ? null : red > blue ? Team.RED : Team.BLUE;
     }
 
     private void end(Team winner) {

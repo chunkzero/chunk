@@ -229,9 +229,9 @@ public class PolarLoader implements ChunkLoader {
                                         + " world, but it has been loaded with plains instead. No"
                                         + " data has been written.");
                             section.biomePalette().set(x, y, z, plainsBiomeId);
+                        } else {
+                            section.biomePalette().set(x, y, z, biomePalette[paletteIndex]);
                         }
-
-                        section.biomePalette().set(x, y, z, biomePalette[paletteIndex]);
                     }
                 }
             }

@@ -48,6 +48,15 @@ class MatchTest {
     }
 
     @Test
+    void whenBothTeamsLeaveTheTeamAheadWins() {
+        var match = running(new Match.Rules(10, 60));
+        match.second(ONE_EACH, new Headcount(1, 0));
+        match.second(EMPTY, EMPTY);
+        assertEquals(Phase.ENDED, match.phase());
+        assertEquals(Optional.of(Team.RED), match.winner());
+    }
+
+    @Test
     void aMatchWaitsForBothTeamsAndCountsDownBeforeItStarts() {
         var match = new Match(new Match.Rules(10, 60));
         match.second(new Headcount(2, 0), EMPTY);
