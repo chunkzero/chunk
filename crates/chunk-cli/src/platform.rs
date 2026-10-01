@@ -11,6 +11,7 @@ use clap::{Args, Subcommand};
 mod auth;
 mod config;
 mod deploy;
+mod domains;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod keychain;
 mod resources;
@@ -31,6 +32,10 @@ pub(crate) enum Command {
     Login(Login),
     /// Build the project and deploy its release to an environment.
     Deploy(deploy::Options),
+    /// Deploy the release active in one environment to another environment of the project.
+    Promote(deploy::Promote),
+    /// Deploy an earlier deployment's release to an environment again.
+    Rollback(deploy::Rollback),
     /// List projects, or create one.
     Projects(resources::Projects),
     /// List a project's environments, or create one.
@@ -43,6 +48,8 @@ pub(crate) enum Command {
     Logs(resources::Logs),
     /// Set, list or delete an environment's secrets.
     Secrets(secrets::Secrets),
+    /// Add, verify, list or remove an environment's custom domains.
+    Domains(domains::Domains),
 }
 
 pub(crate) async fn run(command: Command) -> io::Result<()> {
@@ -50,12 +57,15 @@ pub(crate) async fn run(command: Command) -> io::Result<()> {
         Command::Auth(auth) => auth::run(auth).await,
         Command::Login(options) => auth::run(Auth::Login(options)).await,
         Command::Deploy(options) => deploy::run(options).await,
+        Command::Promote(options) => deploy::promote(options).await,
+        Command::Rollback(options) => deploy::rollback(options).await,
         Command::Projects(options) => resources::projects(options).await,
         Command::Environments(options) => resources::environments(options).await,
         Command::Deployments(options) => resources::deployments(options).await,
         Command::Apps(options) => resources::apps(options).await,
         Command::Logs(options) => resources::logs(options).await,
         Command::Secrets(options) => secrets::run(options).await,
+        Command::Domains(options) => domains::run(options).await,
     }
 }
 

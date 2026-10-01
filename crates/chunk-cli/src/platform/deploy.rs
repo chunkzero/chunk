@@ -1,4 +1,5 @@
-//! `chunk deploy`: build the release, upload it unless the project holds it, deploy it and follow the deployment.
+//! `chunk deploy`, `chunk promote` and `chunk rollback`: make a release current in an environment and follow the
+//! deployment. Deploy first builds the release and uploads it unless the project holds it.
 
 use std::{
     collections::BTreeSet,
@@ -12,12 +13,13 @@ use chunk_management::{
     Client, Code,
     v1::{
         CompleteReleaseUploadRequest, DeployRequest, Deployment, DeploymentState, Environment, GetDeploymentRequest,
-        UploadReleaseRequest,
+        PromoteRequest, RollbackRequest, UploadReleaseRequest,
     },
 };
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
-use super::{EnvironmentArgs, Session, api_error, secrets};
+use super::{EnvironmentArgs, Session, api_error, resources::request_id, secrets};
 use crate::building::{self, BuildMode, progress::Progress};
 
 #[derive(clap::Args)]
@@ -30,6 +32,24 @@ pub(crate) struct Options {
     /// Stop the deployments this one replaces at once, disconnecting their players, instead of draining them.
     #[arg(long)]
     stop_previous: bool,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct Promote {
+    #[command(flatten)]
+    environment: EnvironmentArgs,
+    /// The environment, of the same project, whose active release to deploy to `--env`.
+    #[arg(long)]
+    from: String,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct Rollback {
+    #[command(flatten)]
+    environment: EnvironmentArgs,
+    /// The earlier deployment, by ID, whose release to restore; defaults to the one active before the current one.
+    #[arg(long)]
+    to: Option<String>,
 }
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -53,19 +73,60 @@ pub(super) async fn run(options: Options) -> io::Result<()> {
             } => deployment?,
             () = stop.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "deploy stopped")),
         };
-        let id = deployment.id.clone();
-        tokio::select! {
-            followed = follow(client, &environment, deployment) => followed,
-            () = stop.cancelled() => {
-                cliclack::log::info(format!(
-                    "Stopped waiting; deployment {id} continues. `chunk deployments --env {}` shows it.",
-                    environment.name
-                ))?;
-                Err(io::Error::new(io::ErrorKind::Interrupted, "stopped waiting"))
-            }
-        }
+        follow_until_stopped(client, &environment, deployment, stop).await
     })
     .await
+}
+
+/// Promotes the release active in `--from` to `--env`, and follows the deployment.
+pub(super) async fn promote(options: Promote) -> io::Result<()> {
+    let session = Session::open()?;
+    let (project, target) = session.environment(&options.environment).await?;
+    let source = session.environment_in(&project, &options.from).await?;
+    let request = PromoteRequest {
+        request_id: request_id(),
+        source_environment_id: source.id,
+        target_environment_id: target.id.clone(),
+    };
+    let client = &session.client;
+    let deployment = retry(|| client.promote(&request)).await?.deployment;
+    let deployment = deployment.ok_or_else(|| io::Error::other("Promote returned no deployment"))?;
+    chunk_service::run(|stop| follow_until_stopped(client, &target, deployment, stop)).await
+}
+
+/// Deploys an earlier deployment's release again, and follows the deployment.
+pub(super) async fn rollback(options: Rollback) -> io::Result<()> {
+    let session = Session::open()?;
+    let (_, environment) = session.environment(&options.environment).await?;
+    let request = RollbackRequest {
+        request_id: request_id(),
+        environment_id: environment.id.clone(),
+        deployment_id: options.to.unwrap_or_default(),
+    };
+    let client = &session.client;
+    let deployment = retry(|| client.rollback(&request)).await?.deployment;
+    let deployment = deployment.ok_or_else(|| io::Error::other("Rollback returned no deployment"))?;
+    chunk_service::run(|stop| follow_until_stopped(client, &environment, deployment, stop)).await
+}
+
+/// Follows the deployment until `stop`, which leaves it running.
+async fn follow_until_stopped(
+    client: &Client,
+    environment: &Environment,
+    deployment: Deployment,
+    stop: CancellationToken,
+) -> io::Result<()> {
+    let id = deployment.id.clone();
+    tokio::select! {
+        followed = follow(client, environment, deployment) => followed,
+        () = stop.cancelled() => {
+            cliclack::log::info(format!(
+                "Stopped waiting; deployment {id} continues. `chunk deployments --env {}` shows it.",
+                environment.name
+            ))?;
+            Err(io::Error::new(io::ErrorKind::Interrupted, "stopped waiting"))
+        }
+    }
 }
 
 async fn upload(client: &Client, project_id: &str, release_id: &str, archive: PathBuf) -> io::Result<()> {
@@ -127,17 +188,24 @@ async fn deploy(
     stop_previous: bool,
 ) -> io::Result<Deployment> {
     let request = DeployRequest {
-        request_id: uuid::Uuid::new_v4().to_string(),
+        request_id: request_id(),
         environment_id: environment.id.clone(),
         release_id: release_id.into(),
         stop_previous,
     };
+    let response = retry(|| client.deploy(&request)).await?;
+    response.deployment.ok_or_else(|| io::Error::other("Deploy returned no deployment"))
+}
+
+/// Makes a call that takes a request ID, repeating it while an unreachable platform makes it fail as unavailable.
+async fn retry<T, Call>(call: impl Fn() -> Call) -> io::Result<T>
+where
+    Call: Future<Output = Result<T, chunk_management::Error>>,
+{
     let mut attempt = 1;
     loop {
-        match client.deploy(&request).await {
-            Ok(response) => {
-                return response.deployment.ok_or_else(|| io::Error::other("Deploy returned no deployment"));
-            }
+        match call().await {
+            Ok(response) => return Ok(response),
             Err(error) if error.code() == Code::Unavailable && attempt < DEPLOY_ATTEMPTS => {
                 tokio::time::sleep(Duration::from_secs(attempt)).await;
                 attempt += 1;
