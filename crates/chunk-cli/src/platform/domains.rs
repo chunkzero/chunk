@@ -57,14 +57,14 @@ pub(super) async fn run(options: Domains) -> io::Result<()> {
             let (_, environment) = session.environment(&environment).await?;
             let request = AddDomainRequest { environment_id: environment.id, hostname };
             let domain = client.add_domain(&request).await.map_err(api_error)?.domain.unwrap_or_default();
-            show(&domain)
+            show(&domain, &environment.name)
         }
         Action::Verify { domain, environment } => {
             let (_, environment) = session.environment(&environment).await?;
             let domain = find(client, &environment.id, &domain).await?;
             let request = VerifyDomainRequest { domain_id: domain.id };
             let domain = client.verify_domain(&request).await.map_err(api_error)?.domain.unwrap_or_default();
-            show(&domain)
+            show(&domain, &environment.name)
         }
         Action::List { environment } => {
             let (_, environment) = session.environment(&environment).await?;
@@ -88,13 +88,14 @@ pub(super) async fn run(options: Domains) -> io::Result<()> {
 }
 
 /// Prints the domain's state and the DNS records its owner creates.
-fn show(domain: &Domain) -> io::Result<()> {
+fn show(domain: &Domain, environment: &str) -> io::Result<()> {
     let hostname = &domain.hostname;
     if domain.state() == DomainState::Verified {
         cliclack::log::success(format!("{hostname} is verified; players can connect to it"))?;
     } else {
         cliclack::log::info(format!(
-            "{hostname} is pending verification. Create these DNS records, then run `chunk domains verify {hostname}`."
+            "{hostname} is pending verification. Create these DNS records, then run \
+             `chunk domains verify {hostname} --env {environment}`."
         ))?;
     }
     table(
@@ -103,10 +104,11 @@ fn show(domain: &Domain) -> io::Result<()> {
     )
 }
 
-/// The environment's domain with this hostname or ID.
+/// The environment's domain with this ID, or this hostname as management stores it: lowercase, without a trailing dot.
 async fn find(client: &Client, environment_id: &str, selector: &str) -> io::Result<Domain> {
     let domains = list(client, environment_id).await?;
-    choose(domains, Some(selector), "domain", |domain| [&domain.id, &domain.hostname])
+    let hostname = selector.trim_end_matches('.').to_ascii_lowercase();
+    choose(domains, Some(&hostname), "domain", |domain| [&domain.id, &domain.hostname])
 }
 
 async fn list(client: &Client, environment_id: &str) -> io::Result<Vec<Domain>> {

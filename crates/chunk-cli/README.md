@@ -190,9 +190,9 @@ environment holds up to 256 secrets. `chunk secrets list` shows names and versio
 
 `chunk domains add HOSTNAME --env E` claims a custom hostname and prints its state and the DNS records to create: a TXT
 ownership proof and an SRV record that routes players to the environment. A hostname routes only once it is verified:
-create the records, then run `chunk domains verify HOSTNAME`, which checks DNS right away. `chunk domains list` shows
-each domain's state, and `chunk domains remove HOSTNAME` removes a domain and its route. Commands that take a domain
-accept its hostname or its ID.
+create the records, then run `chunk domains verify HOSTNAME --env E`, which checks DNS right away. `chunk domains list`
+shows each domain's state, and `chunk domains remove HOSTNAME` removes a domain and its route. Commands that take a
+domain accept its hostname or its ID.
 
 ## Testing
 
