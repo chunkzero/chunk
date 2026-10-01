@@ -29,11 +29,15 @@ pub(super) fn forget(connection: &Connection, dropped: &[IndexDefinition]) -> Re
     Ok(())
 }
 
-/// Each part is length-prefixed, so distinct definitions never share a name.
+/// Each part is hex-encoded, so distinct definitions never share a name, even under SQLite's case-insensitive
+/// comparison.
 pub(super) fn name(index: &IndexDefinition) -> String {
     let mut name = String::from("_chunk_index");
     for part in [&index.table, &index.name].into_iter().chain(&index.fields) {
-        let _ = write!(name, "_{}_{part}", part.len());
+        name.push('_');
+        for byte in part.bytes() {
+            let _ = write!(name, "{byte:02x}");
+        }
     }
     name
 }

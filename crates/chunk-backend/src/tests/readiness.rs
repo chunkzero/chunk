@@ -111,6 +111,6 @@ async fn deployments_declaring_one_index_name_with_different_fields_each_read_th
     };
     assert_eq!(physical().len(), 2);
     assert!(backend.release(DeploymentId::new("one").unwrap()).await.unwrap());
-    assert_eq!(physical(), ["_chunk_index_6_scores_6_ranked_1_b"]);
+    assert_eq!(physical(), ["_chunk_index_73636f726573_72616e6b6564_62"]);
     assert_eq!(ranked(&backend, "two").await, "y,x");
 }

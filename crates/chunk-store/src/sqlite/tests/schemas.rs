@@ -183,7 +183,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         store
             .connection
             .execute_batch(
-                "DROP INDEX _chunk_index_8_profiles_8_by_coins_5_coins;
+                "DROP INDEX _chunk_index_70726f66696c6573_62795f636f696e73_636f696e73;
                  DROP TABLE _chunk_indexes;
                  DROP TABLE _chunk_work;",
             )
