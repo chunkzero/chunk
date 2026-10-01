@@ -106,7 +106,7 @@ fn failed_activation_rolls_back_metadata_ddl_catalog_and_revision() {
     expanded.insert("matches".into(), TableSchema::default());
     let deployment = chunk_contract::Deployment {
         contracts: chunk_contract::Contracts::default(),
-        contract_version: 3,
+        contract_version: chunk_contract::CONTRACT_VERSION,
         runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
         id: "new".into(),
         source: "export function get() { return null; }".into(),
@@ -169,7 +169,7 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         let path = directory.path().join("data.db");
         let deployment = chunk_contract::Deployment {
             contracts: chunk_contract::Contracts::default(),
-            contract_version: 3,
+            contract_version: chunk_contract::CONTRACT_VERSION,
             runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
             id: "old".into(),
             source: "export {};".into(),

@@ -44,6 +44,7 @@ pub(crate) fn declarations(journal: &Journal) -> String {
 /// A new migration's source: renamed fields are mapped both ways, and other new required fields are left to fill in.
 pub(crate) fn migration(
     id: &str,
+    previous: &DatabaseSchema,
     schema: &DatabaseSchema,
     changes: &BTreeMap<String, MigrationTable>,
     renames: &Renames,
@@ -57,7 +58,7 @@ pub(crate) fn migration(
         let mut missing = Vec::new();
         for field in &change.added {
             if let Some((old, _)) = renames.iter().find(|(_, new)| *new == field) {
-                to.push(format!("{field}: old.{old}"));
+                to.push(rename(field, "old", old, schema[table].fields[field].optional));
             } else if !schema[table].fields[field].optional {
                 missing.push(field.as_str());
             }
@@ -65,7 +66,9 @@ pub(crate) fn migration(
         let back: Vec<_> = change
             .removed
             .iter()
-            .map(|field| renames.get(field).map(|new| format!("{field}: row.{new}")))
+            .map(|field| {
+                renames.get(field).map(|new| rename(field, "row", new, previous[table].fields[field].optional))
+            })
             .collect::<Option<_>>()
             .unwrap_or_default();
         writeln!(source, "  {table}: {{").expect("string write");
@@ -80,6 +83,15 @@ pub(crate) fn migration(
     }
     source.push_str("});\n");
     source
+}
+
+/// Copies `from.source` to `target`, leaving `target` absent when an optional `source` is.
+fn rename(target: &str, from: &str, source: &str, optional: bool) -> String {
+    if optional {
+        format!("...({from}.{source} === undefined ? {{}} : {{ {target}: {from}.{source} }})")
+    } else {
+        format!("{target}: {from}.{source}")
+    }
 }
 
 fn document(table: &str, fields: &BTreeMap<String, Field>) -> String {

@@ -51,7 +51,7 @@ pub(crate) fn committed(result: &crate::Result<crate::Reply>) -> Revision {
 /// A retained deployment whose `work` action jobs may target.
 pub(crate) fn target() -> Deployment {
     Deployment {
-        contract_version: 3,
+        contract_version: chunk_contract::CONTRACT_VERSION,
         runtime_profile: RuntimeProfile::TransactionalV1,
         contracts: Contracts::default(),
         id: "v1".into(),

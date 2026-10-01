@@ -446,7 +446,7 @@ impl Harness {
         for index in 0..count {
             let bundle = chunk_contract::Deployment {
                 contracts: chunk_contract::Contracts::default(),
-                contract_version: 3,
+                contract_version: chunk_contract::CONTRACT_VERSION,
                 runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
                 id: format!("dep_abandoned_{index}"),
                 source: "export function status() { return 1; }".into(),

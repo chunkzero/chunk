@@ -77,13 +77,15 @@ pub fn create(pending: Pending, name: &str, renames: &Renames) -> io::Result<Str
     } else {
         MigrationKind::Expand
     };
-    let source = (kind == MigrationKind::Expand).then(|| source::migration(&id, &schema, &changes, renames));
+    let source =
+        (kind == MigrationKind::Expand).then(|| source::migration(&id, &journal.schema(), &schema, &changes, renames));
     let entry = Entry { id: id.clone(), kind, finishes: None, prev: String::new(), hash: String::new() };
     let mut snapshot = schema;
     for (table, shape) in journal.schema() {
         snapshot.entry(table).or_insert(shape);
     }
     journal.push(entry, snapshot, source.as_deref())?;
+    crate::sdk::generate_sdk(&project)?;
     Ok(id)
 }
 
@@ -110,6 +112,7 @@ pub fn finish(project: &Path, number: &str) -> io::Result<String> {
     };
     let schema = journal.schema();
     journal.push(entry, schema, None)?;
+    crate::sdk::generate_sdk(project)?;
     Ok(id)
 }
 
@@ -135,6 +138,7 @@ pub fn rehash(project: &Path, number: &str) -> io::Result<String> {
     journal.entries[index].hash = hash;
     journal.verify()?;
     journal.save()?;
+    crate::sdk::generate_sdk(project)?;
     Ok(journal.entries[index].id.clone())
 }
 
@@ -191,6 +195,7 @@ pub fn squash(project: &Path) -> io::Result<String> {
     for entry in &squashed[..end - 1] {
         remove(&journal.directory.join(format!("meta/{}.snapshot.json", journal::number(&entry.id))))?;
     }
+    crate::sdk::generate_sdk(project)?;
     Ok(id)
 }
 

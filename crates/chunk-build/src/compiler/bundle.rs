@@ -188,13 +188,21 @@ fn write_output(assets: &[Output], root: &Path, output: &Path) -> io::Result<()>
                 } else {
                     name.into()
                 };
-                *source = relative.replace('\\', "/").into();
+                *source = staged_migration(&relative.replace('\\', "/")).into();
             }
         }
     }
     fs::write(output.join("source.mjs"), &chunk.code)?;
     fs::write(output.join("source.mjs.map"), serde_json::to_vec(&map).map_err(error)?)?;
     Ok(())
+}
+
+/// Names a migration staged at `.chunk/compile-*/migrations/<id>.ts` by its place in the project.
+fn staged_migration(path: &str) -> String {
+    match path.strip_prefix(".chunk/compile-").and_then(|rest| rest.split_once("/migrations/")) {
+        Some((_, file)) => format!("server/migrations/{file}"),
+        None => path.to_owned(),
+    }
 }
 
 fn entry_source(

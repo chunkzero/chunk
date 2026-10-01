@@ -21,6 +21,8 @@ fn write_schema(project: &Path, fields: &str) {
 #[test]
 fn renames_write_mapped_transforms_and_edits_fail_their_hash() {
     let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("server/schema")).unwrap();
+    write_schema(project.path(), "name: v.string()");
     let pending =
         pending_from(project.path().to_owned(), Journal::read(project.path()).unwrap(), schema(&[("name", false)]));
     assert_eq!(create(pending, "init", &Renames::new()).unwrap(), "0001_init");
@@ -52,6 +54,21 @@ fn renames_write_mapped_transforms_and_edits_fail_their_hash() {
     assert_eq!(squash(project.path()).unwrap(), "0003_baseline");
     assert!(!path.exists());
     assert_eq!(Journal::read(project.path()).unwrap().schema(), schema(&[("displayName", false)]));
+}
+
+#[test]
+fn optional_renames_type_check_and_new_migrations_are_typed_at_once() {
+    let project = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("server/schema")).unwrap();
+    write_schema(project.path(), "name: v.optional(v.string())");
+    create(pending(project.path()).unwrap(), "init", &Renames::new()).unwrap();
+    write_schema(project.path(), "displayName: v.optional(v.string())");
+    let renames = [("fighters".into(), [("name".into(), "displayName".into())].into())].into();
+    let id = create(pending(project.path()).unwrap(), "display_name", &renames).unwrap();
+    let declarations = fs::read_to_string(project.path().join(".chunk/generated/migrations.ts")).unwrap();
+    assert!(declarations.contains(&id), "{declarations}");
+    crate::compile(project.path(), output.path()).unwrap();
 }
 
 #[test]
@@ -205,6 +222,8 @@ fn compilation_uses_the_captured_migrations_and_ignores_package_imports() {
 #[test]
 fn files_the_journal_doesnt_list_are_errors_and_squash_leftovers_are_deleted() {
     let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("server/schema")).unwrap();
+    write_schema(project.path(), "name: v.string()");
     create(
         pending_from(project.path().to_owned(), Journal::read(project.path()).unwrap(), schema(&[("name", false)])),
         "init",
@@ -238,6 +257,8 @@ fn tables_stay_in_history_and_the_journal_stops_at_the_contract_limit() {
     let both: DatabaseSchema =
         [("fighters".to_owned(), table(Schema::String)), ("stats".to_owned(), table(Schema::String))].into();
     let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("server/schema")).unwrap();
+    write_schema(project.path(), "name: v.string()");
     let start = |journal| pending_from(project.path().to_owned(), journal, both.clone());
     create(start(Journal::read(project.path()).unwrap()), "init", &Renames::new()).unwrap();
 

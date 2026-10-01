@@ -20,7 +20,7 @@ export function privateRead() { return 123; }
 pub(super) fn deployment(id: &str) -> Deployment {
     Deployment {
         contracts: Contracts::default(),
-        contract_version: 3,
+        contract_version: chunk_contract::CONTRACT_VERSION,
         runtime_profile: RuntimeProfile::TransactionalV1,
         id: id.into(),
         source: SOURCE.into(),
