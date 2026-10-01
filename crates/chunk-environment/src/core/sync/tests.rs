@@ -36,6 +36,8 @@ export function big(ctx) { return 'x'.repeat(900 * 1024) + get(ctx); }
 export async function bump(ctx, by) { return await ctx.runMutation('add', by); }
 export async function slow(ctx, by) { await ctx.runMutation('add', by); await ctx.sleep(1000); return await ctx.runMutation('add', by); }
 export async function nap(ctx, by) { await ctx.sleep(1000); return by; }
+export async function whoami(ctx) { await ctx.runMutation('add', 1); return JSON.stringify(ctx.caller); }
+export function hidden(ctx) { return 0; }
 export function fill(ctx, text) { return text; }
 export function login(ctx) { return {allow: true, reason: JSON.stringify(ctx.caller)}; }
 export function choices(ctx) { return ['one', 'two']; }
@@ -114,6 +116,8 @@ fn deployment() -> Deployment {
         ("bump", function(FunctionKind::Action, Schema::Integer)),
         ("slow", function(FunctionKind::Action, Schema::Integer)),
         ("nap", function(FunctionKind::Action, Schema::Integer)),
+        ("whoami", Function { result: Schema::String, ..function(FunctionKind::Action, Schema::Null) }),
+        ("hidden", Function { visibility: Visibility::Internal, ..function(FunctionKind::Action, Schema::Null) }),
         ("fill", Function { result: Schema::String, ..function(FunctionKind::Action, Schema::String) }),
         ("relocate", Function { result: Schema::String, ..function(FunctionKind::Action, Schema::String) }),
         (

@@ -4,6 +4,7 @@ import chunk.sync.v1.CoreOuterClass.CallResponse;
 
 import com.google.protobuf.ByteString;
 
+import dev.chunkzero.backend.api.ActionRef;
 import dev.chunkzero.backend.api.FunctionRef;
 import dev.chunkzero.backend.api.JsonType;
 import dev.chunkzero.backend.api.MutationRef;
@@ -37,6 +38,7 @@ public final class BackendSession implements AutoCloseable {
     final Dispatcher dispatcher = new Dispatcher();
     final AtomicBoolean closed = new AtomicBoolean();
     private final Set<CompletableFuture<?>> calls = ConcurrentHashMap.newKeySet();
+    private final Set<ActionCall<?>> actions = ConcurrentHashMap.newKeySet();
     private final Set<BackendSession> children = ConcurrentHashMap.newKeySet();
     private final Duration deadline;
 
@@ -92,6 +94,21 @@ public final class BackendSession implements AutoCloseable {
     public <A, R> CompletableFuture<R> mutate(
             MutationRef<A, R> reference, A arguments, OperationId operation) {
         return call(reference.result(), invocation(reference, arguments), operation.value());
+    }
+
+    /**
+     * Runs a public action at most once, under an operation ID core issues, repeating the call
+     * while core can't be reached or its reply is lost, for up to 65 seconds. Fails with {@link
+     * OutcomeUnknownException} when the action may or may not have run, including when the session
+     * closes after sending it. Cancelling the future only stops waiting; the action runs on.
+     */
+    public <A, R> CompletableFuture<R> perform(ActionRef<A, R> reference, A arguments) {
+        var action = new ActionCall<>(this, invocation(reference, arguments), reference.result());
+        actions.add(action);
+        action.result.whenComplete((value, error) -> actions.remove(action));
+        if (closed.get()) action.result.cancel(false);
+        else action.start();
+        return action.result;
     }
 
     public <A, R> BoundQuery<R> bind(QueryRef<A, R> reference, A arguments) {
@@ -179,7 +196,7 @@ public final class BackendSession implements AutoCloseable {
         return result;
     }
 
-    private static String json(CallResponse response) {
+    static String json(CallResponse response) {
         if (response == null) throw new IllegalStateException("Missing backend result");
         return switch (response.getOutcomeCase()) {
             case ERROR -> throw CoreTransport.status(response.getError()).asRuntimeException();
@@ -235,6 +252,7 @@ public final class BackendSession implements AutoCloseable {
         var thread = dispatcher.stop();
         if (thread != null) threads.add(thread);
         calls.forEach(call -> call.cancel(false));
+        actions.forEach(ActionCall::close);
     }
 
     private boolean finished() {

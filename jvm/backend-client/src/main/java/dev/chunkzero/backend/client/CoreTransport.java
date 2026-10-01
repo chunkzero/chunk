@@ -51,6 +51,12 @@ final class CoreTransport implements Transport {
     }
 
     @Override
+    public void prepare(Duration deadline, StreamObserver<CallResponse> response) {
+        var request = CallRequest.newBuilder().setMethod("chunk:prepare").build();
+        stub.withDeadlineAfter(deadline.toNanos(), TimeUnit.NANOSECONDS).call(request, response);
+    }
+
+    @Override
     public void call(
             Invocation call,
             SessionIdentity caller,

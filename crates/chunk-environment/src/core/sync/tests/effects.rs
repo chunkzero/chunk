@@ -133,6 +133,32 @@ async fn effects_require_prepared_operation_ids_which_mutations_reject() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_jvm_runs_a_public_action_once_as_its_session_and_player() {
+    let (mut fixture, jvm) = runtime::with_jvm().await;
+    let assignment = fixture.control.claim(runtime::login()).await.unwrap();
+    let session = assignment.delivery.and_then(|delivery| delivery.session).unwrap().id;
+    let player = Caller { session: session.clone(), player: runtime::PLAYER.into() };
+    let operation = fixture.prepare(JVM).await;
+    let first = fixture.call_as(JVM, &operation, "whoami", "null", Some(player.clone())).await;
+    let Some(Outcome::Result(result)) = &first.outcome else { panic!("expected a result, got {first:?}") };
+    let caller: String = serde_json::from_slice(result).unwrap();
+    let caller: serde_json::Value = serde_json::from_str(&caller).unwrap();
+    assert_eq!(caller, serde_json::json!({"session": session, "app": "bridge", "player": runtime::PLAYER}));
+    // A retry returns the one run's outcome.
+    assert_eq!(fixture.call_as(JVM, &operation, "whoami", "null", Some(player)).await, first);
+    let cli = fixture.cli.clone();
+    assert_eq!(fixture.call(&cli, "", "get", "null").await.outcome, Some(Outcome::Result(b"1".to_vec())));
+
+    let own = Caller { session, player: String::new() };
+    let mismatch = fixture.call_as(JVM, &operation, "whoami", "null", Some(own.clone())).await;
+    assert_eq!(code(&mismatch), Code::OperationMismatch);
+    let internal = fixture.prepare(JVM).await;
+    assert_eq!(code(&fixture.call_as(JVM, &internal, "hidden", "null", Some(own)).await), Code::Contract);
+    fixture.stop().await;
+    jvm.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_gateway_without_the_players_claim_runs_a_hook_as_itself() {
     let mut fixture = Fixture::start().await;
     let gateway = fixture.gateway.clone();

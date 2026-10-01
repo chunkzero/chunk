@@ -1,5 +1,6 @@
 package dev.chunkzero.backend
 
+import dev.chunkzero.backend.api.ActionRef
 import dev.chunkzero.backend.api.MutationRef
 import dev.chunkzero.backend.api.QueryRef
 import dev.chunkzero.backend.client.BackendSession
@@ -44,6 +45,15 @@ class CoroutineBackend(
     ): R {
         check(job.isActive) { "Backend scope closed" }
         return client.mutate(reference, arguments, operation).await()
+    }
+
+    /** Cancelling the caller only stops waiting; the action runs on. */
+    suspend fun <A, R> perform(
+        reference: ActionRef<A, R>,
+        arguments: A,
+    ): R {
+        check(job.isActive) { "Backend scope closed" }
+        return client.perform(reference, arguments).await()
     }
 
     /** A slow collector fails at the buffer bound rather than silently losing stale transitions. */

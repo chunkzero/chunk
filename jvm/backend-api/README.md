@@ -1,8 +1,8 @@
 # Backend API
 
 The Java types that generated backend bindings are built from: function references (`QueryRef`, `MutationRef`,
-`SessionMethodRef`), `JsonType` with its strict Jackson configuration (`BackendJson`), and the platform ID types
-`PlayerId` and `SessionId`. It is a Java 21 library whose only runtime dependency is Jackson; it has no Kotlin
+`ActionRef`, `SessionMethodRef`), `JsonType` with its strict Jackson configuration (`BackendJson`), and the platform ID
+types `PlayerId` and `SessionId`. It is a Java 21 library whose only runtime dependency is Jackson; it has no Kotlin
 dependency. Apps don't use it directly: they call functions through the generated
 [`BackendClient`](../backend-client/README.md).
 
@@ -13,10 +13,10 @@ dependency. Apps don't use it directly: they call functions through the generate
 project the [Gradle plugin](../gradle-plugin/README.md) does this before compilation, so running it by hand is rarely
 needed. `--target kotlin` adds the coroutine client, and `--target typescript` writes TypeScript references instead.
 
-Public queries and mutations get a reference and argument and result types in `BackendTypes`, nested by function path:
-`shared/players/stats` becomes `BackendTypes.Shared.Players.stats`, with `StatsArgs` and `StatsResult` records beside it
-when those are objects. Actions and internal functions get none. Names that clash with Java or Kotlin keywords get a
-trailing underscore; ambiguous names fail generation. Wire paths and JSON field names are unchanged.
+Public queries, mutations and actions get a reference and argument and result types in `BackendTypes`, nested by
+function path: `shared/players/stats` becomes `BackendTypes.Shared.Players.stats`, with `StatsArgs` and `StatsResult`
+records beside it when those are objects. Internal functions get none. Names that clash with Java or Kotlin keywords get
+a trailing underscore; ambiguous names fail generation. Wire paths and JSON field names are unchanged.
 
 | Validator                               | Java type                                                                        |
 | --------------------------------------- | -------------------------------------------------------------------------------- |

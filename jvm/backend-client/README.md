@@ -1,10 +1,10 @@
 # Backend client
 
-The Java client gameplay code uses to call the project's queries and mutations and to watch queries. `BackendSession`
-carries one caller identity (a session of an app, optionally one of its players) and calls core's `chunk.sync.v1` `Core`
-service with the JVM's credential. Core checks that the JVM runs that session in the deployment and derives the `caller`
-the TypeScript function sees, so arguments can never change who is calling. It is a Java 21 library; the Kotlin adapter
-lives in `jvm/backend-client-kotlin`.
+The Java client gameplay code uses to call the project's queries, mutations and actions and to watch queries.
+`BackendSession` carries one caller identity (a session of an app, optionally one of its players) and calls core's
+`chunk.sync.v1` `Core` service with the JVM's credential. Core checks that the JVM runs that session in the deployment
+and derives the `caller` the TypeScript function sees, so arguments can never change who is calling. It is a Java 21
+library; the Kotlin adapter lives in `jvm/backend-client-kotlin`.
 
 Sessions get their `BackendSession` from `scope.getBackend()` (see the
 [Minestom runtime](../runtime-minestom/README.md)) and wrap it in the generated `BackendClient`, which follows the
@@ -17,6 +17,7 @@ var backend =
                 scope.own(player, scope.getBackend().forPlayer(new PlayerId(player.getUuid().toString()))));
 CompletableFuture<StatsResult> stats = backend.shared().players().stats();
 backend.shared().players().coin(scope.operationId(player, "coin-1"));
+CompletableFuture<PurchaseResult> receipt = backend.shared().shop().purchase(new PurchaseArgs("sword"));
 AutoCloseable watch = backend.shared().players().watchStats(state -> { ... });
 ```
 
@@ -35,6 +36,21 @@ AutoCloseable watch = backend.shared().players().watchStats(state -> { ... });
 - `forPlayer(playerId)` returns a child `BackendSession` that names that player as the caller. Closing a session cancels
   its calls, watches and player children; closing a child affects only the child.
 
+## Actions
+
+- Public actions return a `CompletableFuture` of their result and take no `OperationId`: core issues one for each call,
+  and the client repeats the call under it while core can't be reached, is busy or loses the reply, so a call runs the
+  action at most once. Core stops an action after 30 seconds; the client stops waiting after 65.
+- An action that threw completes the future with a `StatusRuntimeException` whose description starts with
+  `CODE_APPLICATION`. One that never ran, because core refused the call or issued no operation ID in time, completes it
+  with the matching gRPC code.
+- `OutcomeUnknownException` means the action may or may not have run: core lost its outcome, time ran out after the call
+  was sent, the session or player left before a retry, or the session closed after sending it. Cancelling the future, or
+  the coroutine awaiting it, only stops waiting, and the action runs on. Closing the session cancels actions it never
+  sent.
+- Core's operation IDs don't outlive a restart of the JVM or core. When an effect must not repeat even then, such as a
+  payment, pass an idempotency key in the arguments, such as a purchase ID, and have the action check it before acting.
+
 ## Watches
 
 `watchStats`-style methods deliver a complete `WatchState<R>` each time the result changes: the latest snapshot (a
@@ -52,7 +68,7 @@ wait.
 
 ## Kotlin
 
-`jvm/backend-client-kotlin` wraps a `BackendSession` as `CoroutineBackend`, with suspending calls and
+`jvm/backend-client-kotlin` wraps a `BackendSession` as `CoroutineBackend`, with suspending calls, actions included, and
 `Flow<WatchState<R>>` watches, bound to an owned `CoroutineScope` that closes its calls and watches when it ends. With
 the `dev.chunkzero.chunk.kotlin` plugin, projects also get a generated `CoroutineBackendClient` with property-style
 namespaces:

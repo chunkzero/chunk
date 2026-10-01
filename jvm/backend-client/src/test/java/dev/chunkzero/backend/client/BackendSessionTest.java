@@ -209,6 +209,68 @@ class BackendSessionTest {
     }
 
     @Test
+    void anActionRepeatsUnderItsOneIssuedOperationAfterALostReply() throws Exception {
+        var result =
+                new BackendClient(session).shared().profile().purchase().get(2, TimeUnit.SECONDS);
+        assertTrue(result.ok());
+        assertEquals(new SessionId("s1"), result.session());
+        assertEquals(1, fixture.prepares.get());
+        assertEquals(3, fixture.calls.size());
+        var prepare = fixture.calls.get(0);
+        assertEquals("chunk:prepare", prepare.getMethod());
+        assertFalse(prepare.hasCaller());
+        var call = fixture.calls.get(1);
+        assertEquals(call, fixture.calls.get(2));
+        assertEquals("prep:1", call.getOperationId());
+        assertEquals("shared/profile/purchase", call.getMethod());
+        assertEquals(
+                Caller.newBuilder().setSession("s1").setPlayer("trusted").build(),
+                call.getCaller());
+    }
+
+    @Test
+    void closingAfterSendingAnActionLeavesItsOutcomeUnknown() throws Exception {
+        var pending =
+                session.perform(new ActionRef<Void, Long>("shared/hang", NULL, INTEGER), null);
+        assertTrue(fixture.hanging.await(2, TimeUnit.SECONDS));
+        session.close();
+        var error = assertThrows(ExecutionException.class, () -> pending.get(2, TimeUnit.SECONDS));
+        assertInstanceOf(OutcomeUnknownException.class, error.getCause());
+        assertTrue(
+                session.perform(new ActionRef<Void, Long>("shared/hang", NULL, INTEGER), null)
+                        .isCancelled());
+    }
+
+    @Test
+    void closingWhileALostActionRepeatsLeavesItsOutcomeUnknown() throws Exception {
+        var pending =
+                session.perform(new ActionRef<Void, Long>("shared/lost", NULL, INTEGER), null);
+        assertTrue(fixture.lost.await(2, TimeUnit.SECONDS));
+        session.close();
+        var error = assertThrows(ExecutionException.class, () -> pending.get(2, TimeUnit.SECONDS));
+        assertInstanceOf(OutcomeUnknownException.class, error.getCause());
+    }
+
+    @Test
+    void anActionCorePreparesNoOperationForNeverRuns() throws Exception {
+        fixture.prepareError = Error.Code.CODE_DENIED;
+        var error =
+                assertThrows(
+                        ExecutionException.class,
+                        () ->
+                                new BackendClient(session)
+                                        .shared()
+                                        .profile()
+                                        .purchase()
+                                        .get(2, TimeUnit.SECONDS));
+        assertEquals(
+                Status.Code.PERMISSION_DENIED, Status.fromThrowable(error.getCause()).getCode());
+        assertEquals(
+                List.of("chunk:prepare"),
+                fixture.calls.stream().map(CallRequest::getMethod).toList());
+    }
+
+    @Test
     void unaryResultWaitsForFinalStatusAndRemainsSessionOwned() throws Exception {
         var reference = new QueryRef<Void, Long>("shared/partial", NULL, INTEGER);
         var result = session.query(reference, null);
@@ -750,20 +812,40 @@ class BackendSessionTest {
         final ConcurrentHashMap<String, CallResponse> saved = new ConcurrentHashMap<>();
         final CopyOnWriteArrayList<CallRequest> calls = new CopyOnWriteArrayList<>();
         final CountDownLatch hanging = new CountDownLatch(1);
+        final CountDownLatch lost = new CountDownLatch(1);
         final CountDownLatch cancelled = new CountDownLatch(1);
         final LinkedBlockingQueue<StreamObserver<CallResponse>> partial =
                 new LinkedBlockingQueue<>();
         final LinkedBlockingQueue<Watch> watches = new LinkedBlockingQueue<>();
+        final AtomicInteger prepares = new AtomicInteger();
         volatile boolean deadlineObserved;
+        volatile Error.Code prepareError;
 
         @Override
         public void call(CallRequest request, StreamObserver<CallResponse> response) {
             deadlineObserved = Context.current().getDeadline() != null;
             calls.add(request);
             switch (request.getMethod()) {
+                case "chunk:prepare" -> {
+                    var prepared = CallResponse.newBuilder();
+                    if (prepareError != null)
+                        prepared.setError(Error.newBuilder().setCode(prepareError));
+                    else
+                        prepared.setResult(
+                                PrepareResult.newBuilder()
+                                        .setOperationId("prep:" + prepares.incrementAndGet())
+                                        .build()
+                                        .toByteString());
+                    response.onNext(prepared.build());
+                    response.onCompleted();
+                }
                 case "shared/partial" -> {
                     response.onNext(result("3"));
                     partial.add(response);
+                }
+                case "shared/lost" -> {
+                    lost.countDown();
+                    response.onError(Status.UNAVAILABLE.asRuntimeException());
                 }
                 case "shared/hang" -> {
                     ((ServerCallStreamObserver<CallResponse>) response)

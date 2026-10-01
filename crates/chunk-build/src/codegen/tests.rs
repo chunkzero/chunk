@@ -136,12 +136,16 @@ fn kotlin_target_reuses_java_sources_and_removes_its_facade_when_disabled() {
 }
 
 #[test]
-fn action_references_are_generated_for_typescript_without_becoming_jvm_mutations() {
+fn public_actions_get_jvm_bindings_and_internal_functions_none() {
     use serde_json::json;
     let root = tempfile::tempdir().unwrap();
     let mut contract: serde_json::Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
     contract["functions"]["shared/tasks/work"] = json!({
         "kind":"action", "visibility":"public", "export":"actionWork",
+        "arguments":{"type":"object", "fields":{}}, "result":{"type":"integer"}
+    });
+    contract["functions"]["shared/tasks/hidden"] = json!({
+        "kind":"action", "visibility":"internal", "export":"actionHidden",
         "arguments":{"type":"null"}, "result":{"type":"integer"}
     });
     contract["functions"]["shared/tasks/read"] = json!({
@@ -157,13 +161,23 @@ fn action_references_are_generated_for_typescript_without_becoming_jvm_mutations
     assert!(source.contains("export const internal ="));
     assert!(source.contains("shared/tasks/read"));
     generate(&path, &output, GenerationTarget::Kotlin { package: "example" }).unwrap();
-    for file in [
-        "java/example/BackendTypes.java",
-        "java-client/example/BackendClient.java",
-        "kotlin/example/CoroutineBackendClient.kt",
-    ] {
-        let source = fs::read_to_string(output.join(file)).unwrap();
-        assert!(!source.contains("shared/tasks/work"));
+    let read = |file: &str| fs::read_to_string(output.join(file)).unwrap();
+    let types = read("java/example/BackendTypes.java");
+    assert!(
+        types.contains(
+            "ActionRef<BackendTypes.Shared.Tasks.WorkArgs, Long> work = new ActionRef<>(\"shared/tasks/work\""
+        )
+    );
+    let client = read("java-client/example/BackendClient.java");
+    assert!(client.contains(
+        "public CompletableFuture<Long> work(BackendTypes.Shared.Tasks.WorkArgs args) { return session.perform(BackendTypes.Shared.Tasks.work, args); }"
+    ));
+    assert!(client.contains("public CompletableFuture<Long> work() {"));
+    let kotlin = read("kotlin/example/CoroutineBackendClient.kt");
+    assert!(kotlin.contains("suspend fun work(): Long = work(BackendTypes.Shared.Tasks.WorkArgs())"));
+    assert!(kotlin.contains("_backend.perform(BackendTypes.Shared.Tasks.work, args)"));
+    for source in [types, client, kotlin] {
+        assert!(!source.contains("shared/tasks/hidden") && !source.contains("hidden("));
         assert!(!source.contains("shared/tasks/read"));
     }
 }

@@ -34,7 +34,16 @@ fn methods(function: &Function) -> String {
     let result = &function.result.ty;
     let reference = &function.reference;
     match function.kind {
-        FunctionKind::Action => unreachable!("actions are not JVM transaction bindings"),
+        FunctionKind::Action => {
+            let mut methods = format!(
+                "public CompletableFuture<{result}> {name}({args} args) {{ return session.perform({reference}, args); }}"
+            );
+            if function.empty_arguments {
+                write!(methods, "\npublic CompletableFuture<{result}> {name}() {{ return {name}(new {args}()); }}")
+                    .expect("write to String");
+            }
+            methods
+        }
         FunctionKind::Mutation => {
             let mut methods = format!(
                 "public CompletableFuture<{result}> {name}({args} args, OperationId operation) {{ return session.mutate({reference}, args, operation); }}"

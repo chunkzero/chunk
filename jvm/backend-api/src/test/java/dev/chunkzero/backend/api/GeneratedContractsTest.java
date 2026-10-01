@@ -37,6 +37,7 @@ class GeneratedContractsTest {
         assertEquals(List.of("one"), reference.result().read("[\"one\"]"));
         assertEquals("shared/names/class", reference.path());
         assertEquals("same/same/read", BackendTypes.Same.Same_.read.path());
+        assertEquals("shared/profile/purchase", BackendTypes.Shared.Profile.purchase.path());
         assertReadableNames(BackendTypes.class);
     }
 
