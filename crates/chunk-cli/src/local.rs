@@ -298,12 +298,11 @@ pub(crate) fn runner_lock(path: &Path) -> io::Result<fs::File> {
 }
 
 async fn java_version(java: &Path, required: u32) -> io::Result<()> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new(java).arg("-version").kill_on_drop(true).output(),
-    )
-    .await
-    .map_err(io::Error::other)??;
+    let mut command = tokio::process::Command::new(java);
+    chunk_service::withhold_platform_env(command.as_std_mut());
+    let output = tokio::time::timeout(Duration::from_secs(5), command.arg("-version").kill_on_drop(true).output())
+        .await
+        .map_err(io::Error::other)??;
     let version = format!("{}\n{}", String::from_utf8_lossy(&output.stderr), String::from_utf8_lossy(&output.stdout));
     let major = version.lines().find_map(|line| {
         let version = line

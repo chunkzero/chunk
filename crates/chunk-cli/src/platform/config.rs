@@ -1,4 +1,5 @@
-//! The saved platform and token, and the environment variables that override them.
+//! The saved platform and token, and the environment variables that override them. The token is saved in the OS
+//! keychain, or in the configuration file where there is none.
 
 use std::{
     fmt, io,
@@ -7,6 +8,8 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use url::Url;
+
+use super::keychain;
 
 /// Chunk Cloud's management API.
 pub(super) const CLOUD_URL: &str = "https://api.chunkzero.com";
@@ -27,7 +30,7 @@ impl Target {
         }
     }
 
-    /// The URL without a trailing slash, equal for targets that reach the same API.
+    /// The URL without a trailing slash, equal for targets that reach the same API. It names the token's keychain entry.
     fn endpoint(&self) -> &str {
         self.url().trim_end_matches('/')
     }
@@ -63,7 +66,8 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// What `chunk auth login` saves: the platform, and the token it issued, which only ever goes to that platform.
+/// What `chunk auth login` saves: the platform, and the token it issued, which only ever goes to that platform. The
+/// file holds the token only where there is no keychain.
 #[derive(Default, Serialize, Deserialize, PartialEq, Debug)]
 pub(super) struct Config {
     #[serde(default)]
@@ -94,7 +98,7 @@ pub(super) fn parse_url(value: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn path() -> io::Result<PathBuf> {
+pub(super) fn path() -> io::Result<PathBuf> {
     let directory = match std::env::var_os("CHUNK_CONFIG_DIR") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         Some(_) => return Err(io::Error::other("CHUNK_CONFIG_DIR must not be empty")),
@@ -106,11 +110,27 @@ fn path() -> io::Result<PathBuf> {
 }
 
 pub(super) fn load() -> io::Result<Config> {
-    load_from(&path()?)
+    load_at(&path()?)
 }
 
-pub(super) fn save(config: &Config) -> io::Result<()> {
-    save_to(&path()?, config)
+/// Saves the login, with the token in the keychain if there is one. Returns whether it is.
+pub(super) fn save(target: &Target, token: Secret) -> io::Result<bool> {
+    save_at(&path()?, target, token)
+}
+
+pub(super) fn load_at(path: &Path) -> io::Result<Config> {
+    let mut config = load_from(path)?;
+    if config.token.is_none() {
+        config.token = keychain::get(config.target.endpoint())?;
+    }
+    Ok(config)
+}
+
+pub(super) fn save_at(path: &Path, target: &Target, token: Secret) -> io::Result<bool> {
+    let keychain = keychain::set(target.endpoint(), &token).is_ok();
+    let token = (!keychain).then_some(token);
+    save_to(path, &Config { target: target.clone(), token })?;
+    Ok(keychain)
 }
 
 pub(super) fn load_from(path: &Path) -> io::Result<Config> {
@@ -143,11 +163,18 @@ fn make_private(path: &Path) -> io::Result<()> {
 
 /// Forgets the saved token if it is still `token`, so a login since it was loaded stays.
 pub(super) fn forget(token: &Secret) -> io::Result<()> {
-    let path = path()?;
-    let mut config = load_from(&path)?;
+    forget_at(&path()?, token)
+}
+
+pub(super) fn forget_at(path: &Path, token: &Secret) -> io::Result<()> {
+    let mut config = load_from(path)?;
     if config.token.as_ref() == Some(token) {
         config.token = None;
-        save_to(&path, &config)?;
+        return save_to(path, &config);
+    }
+    let account = config.target.endpoint();
+    if keychain::get(account)?.as_ref() == Some(token) {
+        keychain::delete(account)?;
     }
     Ok(())
 }
@@ -166,7 +193,9 @@ pub(super) fn save_to(path: &Path, config: &Config) -> io::Result<()> {
 pub(super) fn credentials() -> io::Result<Credentials> {
     let url = chunk_service::optional::<String>("CHUNK_API_URL")?;
     let token = chunk_service::optional::<String>("CHUNK_TOKEN")?.filter(|token| !token.is_empty());
-    resolve(url.as_deref(), token, load)
+    // A `CHUNK_TOKEN` needs only the saved platform, so the keychain stays unread.
+    let target_only = token.is_some();
+    resolve(url.as_deref(), token, || if target_only { load_from(&path()?) } else { load() })
 }
 
 /// `CHUNK_TOKEN` beats the saved token, and the saved token goes only to the platform it was issued by.

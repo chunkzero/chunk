@@ -39,6 +39,7 @@ pub(super) async fn run(
     let mut property = OsString::from("-Pchunk.executable=");
     property.push(executable);
     let mut command = CommandWrap::with_new(&wrapper, |command| {
+        chunk_service::withhold_platform_env(command.as_std_mut());
         command
             .current_dir(project)
             .arg("chunkArtifacts")

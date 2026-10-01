@@ -11,6 +11,7 @@ use clap::{Args, Subcommand};
 mod auth;
 mod config;
 mod deploy;
+mod keychain;
 mod resources;
 
 use auth::{Auth, Login};

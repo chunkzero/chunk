@@ -160,6 +160,7 @@ impl ProcessHost {
         let child = (|| {
             let log = chunk_service::private_file(&log_path)?;
             let mut command = Command::new("/bin/sh");
+            chunk_service::withhold_platform_env(command.as_std_mut());
             command
                 .args(["-c", GATE, "sh"])
                 .arg(&self.config.java)

@@ -15,6 +15,17 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// The variables that point the CLI at a platform and sign it in.
+pub const PLATFORM_ENV: [&str; 2] = ["CHUNK_API_URL", "CHUNK_TOKEN"];
+
+/// Keeps the CLI's platform credentials from the child `command` starts, which may run third-party code.
+pub fn withhold_platform_env(command: &mut std::process::Command) -> &mut std::process::Command {
+    for name in PLATFORM_ENV {
+        command.env_remove(name);
+    }
+    command
+}
+
 /// Reads a required service environment variable.
 /// # Errors
 /// Reports missing, non-Unicode or invalid values without exposing their contents.
@@ -167,4 +178,21 @@ pub fn shutdown_signal() -> io::Result<impl Future<Output = io::Result<()>>> {
         wait.await;
         Ok(())
     })
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn children_do_not_inherit_platform_credentials() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "printf '%s' \"${CHUNK_TOKEN-}${CHUNK_API_URL-}${KEPT-}\""]);
+        for name in PLATFORM_ENV {
+            command.env(name, "secret");
+        }
+        command.env("KEPT", "kept");
+        withhold_platform_env(&mut command);
+        assert_eq!(command.output().unwrap().stdout, b"kept");
+    }
 }
