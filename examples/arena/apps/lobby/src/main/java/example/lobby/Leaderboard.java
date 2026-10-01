@@ -13,7 +13,6 @@ import net.kyori.adventure.text.format.TextDecoration;
 import net.minestom.server.coordinate.Pos;
 import net.minestom.server.entity.Entity;
 import net.minestom.server.entity.EntityType;
-import net.minestom.server.entity.metadata.display.AbstractDisplayMeta;
 import net.minestom.server.entity.metadata.display.TextDisplayMeta;
 import net.minestom.server.instance.Instance;
 
@@ -26,8 +25,9 @@ import java.util.List;
  */
 final class Leaderboard {
     private static final int ROWS = 10;
-    // Text grows upward from the entity; twelve lines at this scale centre on y = 67.5.
-    private static final Pos POSITION = new Pos(0.5, 66.0, -10.5);
+    // Text grows upward from the entity; twelve lines at this scale centre on y = 67.5. It sits
+    // just in front of the notice board, whose face is at z = -10, and faces south toward spawn.
+    private static final Pos POSITION = new Pos(0.5, 66.0, -9.95, 0, 0);
 
     private Leaderboard() {}
 
@@ -36,8 +36,6 @@ final class Leaderboard {
         board.editEntityMeta(
                 TextDisplayMeta.class,
                 meta -> {
-                    meta.setBillboardRenderConstraints(
-                            AbstractDisplayMeta.BillboardConstraints.VERTICAL);
                     meta.setLineWidth(240);
                     meta.setText(render(List.of(), false));
                 });
