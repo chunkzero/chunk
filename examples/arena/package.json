@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "imports": {
+    "#chunk": "./.chunk/generated/index.ts",
+    "#chunk/schema": "./.chunk/sdk/schema.ts",
+    "#chunk/apps": "./.chunk/generated/apps.ts"
+  }
+}

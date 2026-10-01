@@ -64,5 +64,5 @@ backend.shared.players.coin(operation = scope.operationId(player, "coin-1"))
 backend.shared.players.watchStats().collect { state -> ... }
 ```
 
-The [local example](../../examples/local/README.md) uses it; the [Java example](../../examples/java/README.md) uses the
-Java client.
+The [local example](../../examples/local/README.md) uses it; the [arena example](../../examples/arena/README.md) uses
+the Java client.

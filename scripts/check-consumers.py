@@ -15,7 +15,7 @@ from zipfile import ZipFile
 EXCLUDED = (".git", "build", ".chunk", ".gradle", ".kotlin", "target", "dist", "node_modules")
 INPUTS = (
     "gradlew", "gradlew.bat", "gradle", "gradle.properties", "settings.gradle.kts", "build.gradle.kts",
-    "buildSrc", "jvm", "proto", "examples/java", "examples/local",
+    "buildSrc", "jvm", "proto", "examples/arena", "examples/local",
 )
 PROVIDER = "META-INF/services/dev.chunkzero.runtime.SessionProvider"
 
@@ -124,7 +124,7 @@ def main():
             subprocess.run([str(executable), "build", str(project)], check=True)
             verify_release(project, "dev.chunkzero.generated", {"lobby"}, language == "kotlin")
         for name, package, apps, kotlin in (
-            ("java", "dev.chunkzero.generated", {"lobby"}, False),
+            ("arena", "dev.chunkzero.generated", {"arena", "lobby"}, False),
             ("local", "dev.chunkzero.example.generated", {"arena", "lobby"}, True),
         ):
             project = checkout / "examples" / name

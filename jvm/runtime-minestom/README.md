@@ -143,11 +143,17 @@ request for a few seconds, under the same operation so a repeat can't move the p
 
 Declare shared dependencies as public static `@Component` factories instead of wiring them by hand. The return type is
 the component's identity and the parameters are its dependencies. From the
-[Java example](../../examples/java/apps/lobby/src/main/java/example/LobbyComponents.java):
+[arena example](../../examples/arena/apps/arena/src/main/java/example/arena/ArenaComponents.java), which parses its
+world once per JVM and gives each session its own backend client:
 
 ```java
-public final class LobbyComponents {
-    private LobbyComponents() {}
+public final class ArenaComponents {
+    private ArenaComponents() {}
+
+    @Component(Component.Scope.PROCESS)
+    public static PolarWorld world() {
+        return PolarWorlds.read("/worlds/arena.polar");
+    }
 
     @Component(Component.Scope.SESSION)
     public static BackendClient backend(BackendSession session) {
