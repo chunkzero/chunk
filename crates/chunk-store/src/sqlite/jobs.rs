@@ -128,7 +128,16 @@ pub(super) fn apply(connection: &Connection, intents: &[JobIntent], limits: &Job
                 if exists {
                     return Err(Error::Invalid("scheduled job ID reused"));
                 }
-                save(connection, job)?;
+                let retiring: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _chunk_retired_deployments WHERE id=?1)",
+                    [&job.deployment],
+                    |row| row.get(0),
+                )?;
+                if retiring {
+                    save(connection, &Job { state: JobState::Cancelled, ..job.clone() })?;
+                } else {
+                    save(connection, job)?;
+                }
             }
             JobIntent::Cancel { id, caller } => {
                 let mut job = get(connection, id)?;

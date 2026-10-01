@@ -128,6 +128,11 @@ impl Actor {
         match &result {
             Ok(snapshot) => {
                 self.scheduled.snapshot = snapshot.clone();
+                if let JobCommand::CancelDeployment { deployment } = &command
+                    && let Ok(id) = DeploymentId::new(deployment)
+                {
+                    self.fence(&id);
+                }
                 if let JobCommand::Claim { id, attempt, .. } = command
                     && let Some(job) = snapshot
                         .records

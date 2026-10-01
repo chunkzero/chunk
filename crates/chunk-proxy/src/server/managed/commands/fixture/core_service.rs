@@ -68,6 +68,11 @@ impl Service {
                 };
                 ClaimResult { outcome: Some(outcome) }.encode_to_vec()
             }
+            "chunk:reconnect" => {
+                let returned = self.placement.lock().unwrap().returns.clone();
+                let (deployment, destination) = returned.map_or((String::new(), None), |(d, demand)| (d, Some(demand)));
+                sync::ReservationResult { deployment, destination }.encode_to_vec()
+            }
             "chunk:reservation" => {
                 let reserved = self.placement.lock().unwrap().reserved.clone();
                 let (deployment, destination) = reserved.map_or((String::new(), None), |(d, demand)| (d, Some(demand)));

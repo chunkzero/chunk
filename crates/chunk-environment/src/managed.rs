@@ -85,6 +85,8 @@ pub(crate) struct Managed<'a> {
     /// The gateway to start once a deployment is active.
     gateway_config: Option<GatewayConfig>,
     deployments: Mutex<Deployments>,
+    /// The backend retirements in flight.
+    retirements: retire::Retirements,
     reporter: status::Reporter,
     alarm: alarm::Alarm,
     idle: idle::Idle,
@@ -201,6 +203,7 @@ impl<'a> Managed<'a> {
             gateway,
             gateway_config,
             deployments: Mutex::default(),
+            retirements: retire::Retirements::default(),
             stopping,
         }
     }

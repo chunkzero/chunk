@@ -338,7 +338,6 @@ impl Actor {
             Command::Ready { id, reply } => self.await_ready(id, reply),
             Command::Readiness { id, reply } => reply.finish(self.readiness(&id)),
             Command::Release { id, reply } => self.start_release(id, reply),
-            Command::Fence { id, reply } => self.fence(&id, reply),
             Command::CheckDeployment { id, reply } => reply.finish(self.check_deployment(&id)),
             Command::Deployments { reply } => reply.finish(Ok(self.installed.clone())),
             Command::Query { mut call, reply } => match self.normalize_call(&mut call) {
@@ -447,6 +446,11 @@ impl Actor {
 
     pub fn activity(&self) -> chunk_service::Activity {
         self.actions.activity.clone()
+    }
+
+    /// The resident deployments whose retirement is durable but not yet complete.
+    pub fn retiring(&self) -> Vec<DeploymentId> {
+        self.retired.iter().cloned().collect()
     }
 
     pub fn lane(&self) -> Arc<crate::system::Lane> {

@@ -58,7 +58,7 @@ impl Control {
         let deployment = &state.host_release(&session.host)?.deployment;
         let runtime = self.runtime(&session.host).await?;
         let config = self.jvm_configuration(deployment, &runtime)?;
-        let destination = destination(&state, claim, &session.host);
+        let destination = destination(&state, &claim.session, &session.host);
         if let Some(bytes) = &claim.assignment {
             let mut assignment = Assignment::decode(bytes.as_slice())?;
             assignment.configuration = Some(config);
@@ -165,9 +165,9 @@ fn delivery(
     }
 }
 
-/// The destination `claim`'s session on `host` serves.
-pub(crate) fn destination(state: &State, claim: &Claim, host: &str) -> SessionDemand {
-    let session = &state.sessions[&claim.session];
+/// The destination `session` on `host` serves.
+pub(crate) fn destination(state: &State, session: &str, host: &str) -> SessionDemand {
+    let session = &state.sessions[session];
     let profile = state.hosts.get(host).map(|host| host.profile.clone()).unwrap_or_default();
     SessionDemand {
         key: session.demand_key.clone(),

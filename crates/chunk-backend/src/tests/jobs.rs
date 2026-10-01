@@ -304,14 +304,14 @@ async fn retiring_a_deployment_frees_its_slot_despite_a_scheduled_job_and_a_subs
 }
 
 #[tokio::test]
-async fn a_restart_after_the_retirement_committed_never_runs_the_deployments_due_job() {
+async fn a_restart_after_the_retirement_committed_completes_it_and_cancels_a_late_job() {
     let directory = tempfile::tempdir().unwrap();
     let first = backend(&directory);
     first.deploy(deployment("old", 1)).await.unwrap();
     drop(first);
-    // Work admitted before the fence schedules a job after the retirement committed.
     let mut store = SqliteStore::open(directory.path().join("jobs.db"), "jobs").unwrap();
     store.job_command(chunk_store::JobCommand::CancelDeployment { deployment: "old".into() }).unwrap();
+    // Work admitted before the retirement schedules a job after it committed.
     let late = Job {
         id: "late".into(),
         deployment: "old".into(),
@@ -329,9 +329,12 @@ async fn a_restart_after_the_retirement_committed_never_runs_the_deployments_due
     store.commit_with_jobs(commit, vec![chunk_store::JobIntent::Schedule(late)]).unwrap();
     drop(store);
     let restarted = backend(&directory);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(job(&restarted, "late").await.state, JobState::Pending);
-    assert!(matches!(restarted.query(call("old", "read", "alice", json!(null))).await, Err(Error::Retired)));
-    assert!(restarted.retire(DeploymentId::new("old").unwrap()).await.unwrap());
+    for _ in 0..100 {
+        if restarted.deployments().await.unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(restarted.deployments().await.unwrap().is_empty());
     assert_eq!(job(&restarted, "late").await.state, JobState::Cancelled);
 }

@@ -289,11 +289,12 @@ fn publish(root: &Path, status: u8) -> std::path::PathBuf {
         format!(
             "export function status() {{ return {status}; }}\n\
              export function hold(ctx, args) {{ return ctx.scheduler.runAt(args.at, 'flow', null); }}\n\
-             export async function flow() {{ return null; }}"
+             export async function flow() {{ return null; }}\n\
+             export async function wait(ctx) {{ await ctx.sleep(30000); return null; }}"
         ),
     )
     .unwrap();
-    fs::write(backend.join("contract.json"), r#"{"contract_version":3,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}},"hold":{"kind":"mutation","visibility":"public","export":"hold","arguments":{"type":"object","fields":{"at":{"schema":{"type":"integer"}}}},"result":{"type":"string"}},"flow":{"kind":"action","visibility":"internal","export":"flow","arguments":{"type":"null"},"result":{"type":"null"}}}}"#).unwrap();
+    fs::write(backend.join("contract.json"), r#"{"contract_version":3,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}},"hold":{"kind":"mutation","visibility":"public","export":"hold","arguments":{"type":"object","fields":{"at":{"schema":{"type":"integer"}}}},"result":{"type":"string"}},"flow":{"kind":"action","visibility":"internal","export":"flow","arguments":{"type":"null"},"result":{"type":"null"}},"wait":{"kind":"action","visibility":"public","export":"wait","arguments":{"type":"null"},"result":{"type":"null"}}}}"#).unwrap();
     let mut jar = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let class = vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 69, 1];
     for (name, bytes) in [

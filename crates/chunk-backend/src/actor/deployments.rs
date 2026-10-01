@@ -99,13 +99,13 @@ impl Actor {
         }
     }
 
-    /// Refuses new work for `id` and closes its subscriptions, so only work already running keeps it resident.
-    pub(super) fn fence(&mut self, id: &DeploymentId, reply: Request<()>) {
+    /// Refuses new work for `id` and closes its subscriptions, so only work already running keeps it resident. Applied
+    /// once the retirement is durable.
+    pub(super) fn fence(&mut self, id: &DeploymentId) {
         if self.versions.contains_key(id) {
             self.retired.insert(id.clone());
             self.watches.retire(id, &Error::Retired);
         }
-        reply.finish(Ok(()));
     }
 
     pub(super) fn start_release(&mut self, id: DeploymentId, reply: Request<bool>) {

@@ -51,29 +51,36 @@ fn hooks(fixture: &Fixture) -> Vec<(String, String)> {
 }
 
 #[tokio::test]
-async fn a_login_returned_to_an_earlier_deployments_session_is_admitted_and_bound_there_or_placed_anew() {
+async fn a_login_returned_to_an_earlier_deployments_session_is_admitted_only_there_or_placed_anew() {
     let fixture = Fixture::new().await;
     deployments(&fixture, "b");
-    fixture.service.placement.lock().unwrap().returns = Some(("a".into(), demand("arena")));
+    {
+        let mut placement = fixture.service.placement.lock().unwrap();
+        placement.returns = Some(("a".into(), demand("arena")));
+        placement.denying.insert("b".into());
+    }
     let current = retarget(&fixture, "b");
     let login = Claim { operation_id: "login".into(), ..fixture.claim.clone() };
 
-    // Routed to the hub, the player returns to the arena, which only the earlier deployment declares.
+    // The current deployment denies every login, but the player returns to the arena, which only the earlier one
+    // declares and admits; the current deployment's hooks never run.
     let (mut guard, assignment) = claim_destination(&login, &current).await.unwrap();
     assert_eq!(guard.platform.target.deployment, "a");
     assert_eq!(guard.claim.demand.session_type, "arena/default");
     let mut commands = Commands::new(&guard.platform).await.unwrap();
     commands.bind(&guard.claim, &assignment.identity).unwrap();
-    let admitted = |name: &str| (name.to_owned(), "login".to_owned());
-    assert_eq!(hooks(&fixture), [admitted("b"), ("b".into(), "route".into()), admitted("a")]);
+    assert_eq!(hooks(&fixture), [("a".to_owned(), "login".to_owned())]);
     {
         let placement = fixture.service.placement.lock().unwrap();
-        assert_eq!(placement.hooks[2].2["destination"]["session_type"], "arena/default");
+        assert_eq!(placement.hooks[0].2["destination"]["session_type"], "arena/default");
     }
     guard.armed = false;
 
-    // The earlier deployment denies the player, so the reservation is released and the login placed on the current one.
-    fixture.service.placement.lock().unwrap().denying.insert("a".into());
+    // The earlier deployment denies the player, so the login is routed and placed on the current one.
+    {
+        let mut placement = fixture.service.placement.lock().unwrap();
+        placement.denying = ["a".to_owned()].into();
+    }
     let login = Claim { operation_id: "denied".into(), ..fixture.claim.clone() };
     let (mut guard, assignment) = claim_destination(&login, &current).await.unwrap();
     assert_eq!((guard.platform.target.deployment.as_str(), assignment.deployment.as_str()), ("b", "b"));
@@ -81,10 +88,9 @@ async fn a_login_returned_to_an_earlier_deployments_session_is_admitted_and_boun
     {
         let logins = fixture.service.logins.lock().unwrap();
         let denied: Vec<_> = logins.claims.iter().filter(|(operation, _)| operation != "login").collect();
-        assert_eq!(denied.len(), 2);
-        assert!(!denied[0].1.decline_reconnect && denied[0].0 == "denied");
-        assert!(denied[1].1.decline_reconnect && denied[1].0 != "denied");
-        assert_eq!(logins.cancels, ["denied"]);
+        assert_eq!(denied.len(), 1);
+        assert!(denied[0].1.decline_reconnect && denied[0].0 == "denied");
+        assert!(logins.cancels.is_empty());
     }
     guard.armed = false;
     fixture.close().await;

@@ -215,10 +215,6 @@ pub(crate) enum Command {
         id: DeploymentId,
         reply: Request<bool>,
     },
-    Fence {
-        id: DeploymentId,
-        reply: Request<()>,
-    },
     CheckDeployment {
         id: DeploymentId,
         reply: Request<()>,
@@ -264,7 +260,6 @@ impl Command {
             #[cfg(test)]
             Self::Register { reply, .. } => reply.finish(Err(error)),
             Self::Release { reply, .. } => reply.finish(Err(error)),
-            Self::Fence { reply, .. } => reply.finish(Err(error)),
             Self::Deployments { reply } => reply.finish(Err(error)),
             Self::Query { reply, .. } | Self::Mutate { reply, .. } => reply.finish(Err(error)),
             Self::Subscribe { reply, .. } => reply.finish(Err(error)),
@@ -461,7 +456,7 @@ impl Backend {
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
             match Actor::new(store, outgoing, effects, action_bytes, readers, dequeued, retained) {
                 Ok(actor) => {
-                    if ready.send(Ok((actor.lane(), actor.activity()))).is_ok() {
+                    if ready.send(Ok((actor.lane(), actor.activity(), actor.retiring()))).is_ok() {
                         actor.run(incoming, &stop);
                     }
                 }
@@ -470,14 +465,14 @@ impl Backend {
                 }
             }
         })?;
-        let (lane, activity) = match initialized.recv().map_err(|_| Error::Closed).and_then(|ready| ready) {
+        let (lane, activity, retiring) = match initialized.recv().map_err(|_| Error::Closed).and_then(|ready| ready) {
             Ok(ready) => ready,
             Err(error) => {
                 let _ = thread.join();
                 return Err(error);
             }
         };
-        Ok(Self(Arc::new(Owner {
+        let owner = Arc::new(Owner {
             environment,
             moves,
             secrets,
@@ -489,7 +484,25 @@ impl Backend {
             activity,
             stopped,
             thread: std::sync::Mutex::new(Some(thread)),
-        })))
+        });
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            for id in retiring {
+                runtime.spawn(Self::finish_retirement(Arc::downgrade(&owner), id));
+            }
+        }
+        Ok(Self(owner))
+    }
+
+    /// Completes a retirement a restart found committed, until the version is released or the backend is dropped.
+    async fn finish_retirement(owner: std::sync::Weak<Owner>, id: DeploymentId) {
+        let mut cancelled = false;
+        loop {
+            let Some(owner) = owner.upgrade() else { return };
+            if !matches!(Self(owner).retire_step(&id, &mut cancelled).await, Ok(None)) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     /// Serves the moves actions ask for with `moves`, instead of any served before. Until then, an action's move fails.
@@ -652,25 +665,35 @@ impl Backend {
         self.submit(|reply| Command::Release { id, reply }).await
     }
 
-    /// Retires `id`: refuses its new calls, reads and subscriptions with [`Error::Retired`], closes its subscriptions,
-    /// cancels its jobs and durably records it as retiring in the same commit, so a restart keeps refusing its work and
-    /// never runs its jobs, waits for its running mutations and actions, then releases its version. Returns whether it
-    /// was resident.
+    /// Retires `id`. One commit cancels its jobs and durably records it as retiring, and only then does the backend
+    /// refuse its new calls, reads and subscriptions with [`Error::Retired`] and close its subscriptions, so a restart
+    /// keeps refusing its work, never runs its jobs and completes the retirement itself. A job scheduled later by work
+    /// admitted earlier is cancelled when it commits. Waits for the running mutations and actions, then releases the
+    /// version. Returns whether it was resident.
     /// # Errors
     /// Reports an unavailable service or a failure to release.
     pub async fn retire(&self, id: DeploymentId) -> Result<bool> {
-        self.submit(|reply| Command::Fence { id: id.clone(), reply }).await?;
+        let mut cancelled = false;
         loop {
-            // Work admitted before the fence may schedule more jobs until it finishes.
-            match self.cancel_deployment_jobs(id.clone()).await {
-                Ok(()) => match self.release(id.clone()).await {
-                    Err(Error::Busy) => {}
-                    result => return result,
-                },
-                Err(Error::Busy) => {}
-                Err(error) => return Err(error),
+            if let Some(resident) = self.retire_step(&id, &mut cancelled).await? {
+                return Ok(resident);
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// One attempt to commit the retirement of `id`, then to release it; `None` while either is busy.
+    async fn retire_step(&self, id: &DeploymentId, cancelled: &mut bool) -> Result<Option<bool>> {
+        if !*cancelled {
+            match self.cancel_deployment_jobs(id.clone()).await {
+                Ok(()) => *cancelled = true,
+                Err(Error::Busy) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        match self.release(id.clone()).await {
+            Err(Error::Busy) => Ok(None),
+            result => result.map(Some),
         }
     }
 
@@ -784,10 +807,9 @@ impl Backend {
         .map(|_| ())
     }
 
-    /// Cancels `deployment`'s pending jobs and marks its running ones unknown, so none keeps it from being released.
-    /// # Errors
-    /// Reports a busy or unavailable service and persistence failures.
-    pub async fn cancel_deployment_jobs(&self, deployment: DeploymentId) -> Result<()> {
+    /// Commits `deployment`'s retirement: its pending jobs cancelled, its running ones unknown, and it recorded as
+    /// retiring, which the actor then fences.
+    async fn cancel_deployment_jobs(&self, deployment: DeploymentId) -> Result<()> {
         let bytes = deployment.as_str().len();
         let command = chunk_store::JobCommand::CancelDeployment { deployment: deployment.as_str().into() };
         self.submit_sized(bytes, |reply| Command::JobControl { command, reply }).await.map(|_| ())

@@ -147,3 +147,55 @@ async fn releasable_deployments_free_the_slots_so_an_occupied_older_one_is_not_f
     claiming.abort();
     core.stop(|| {}).await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn waiting_to_retire_one_deployment_does_not_delay_the_retirement_of_another() {
+    let harness = Harness::new().await;
+    let core = Core::start(harness.core(), || {}).await.unwrap();
+    let (gateway, lease) = (OnceLock::new(), watch::Sender::new(crate::managed::Lease::Waiting));
+    let registration = crate::managed::Registration::local("env_test");
+    let managed =
+        Managed::new(&harness.management_config(), lease, registration, &harness.state(), &core, &gateway, None);
+    let desired = |id: &str| AttachResponse {
+        deployment_id: id.into(),
+        release: Some(harness.valid()),
+        ..AttachResponse::default()
+    };
+    let cancel = CancellationToken::new();
+    for id in ["dep_a", "dep_b", "dep_c"] {
+        assert!(managed.deploy(&desired(id), &cancel).await.unwrap());
+    }
+    {
+        let mut deployments = crate::managed::lock(&managed.deployments);
+        deployments.desired = Some("dep_c".into());
+        deployments.serving = Some("dep_c".into());
+        deployments.unacknowledged = None;
+    }
+
+    // An action holds dep_a's version while dep_a is asked to stop, so retiring it in the backend waits for the action.
+    let backend = core.backend().unwrap();
+    let call = Call {
+        deployment: DeploymentId::new("dep_a").unwrap(),
+        function: "wait".into(),
+        arguments: serde_json::json!(null).into(),
+        caller: serde_json::json!({"player": "alice"}).into(),
+    };
+    let id = backend.allocate_action_id().await.unwrap();
+    let _action = backend.start_action(id, call).await.unwrap();
+    core.control().unwrap().stop_release("dep_a").unwrap();
+
+    // The tick returns at once, and dep_b, which is due, is released while dep_a still waits.
+    tokio::time::timeout(Duration::from_secs(5), managed.retire()).await.unwrap();
+    let resident = |backend: chunk_backend::Backend| async move {
+        let ids = backend.deployments().await.unwrap();
+        ids.iter().map(|id| id.as_str().to_owned()).collect::<Vec<_>>()
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while resident(backend.clone()).await.contains(&"dep_b".to_owned()) {
+        assert!(tokio::time::Instant::now() < deadline, "dep_b was never released");
+        managed.retire().await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(resident(backend.clone()).await.contains(&"dep_a".to_owned()));
+    core.stop(|| {}).await.unwrap();
+}

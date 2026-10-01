@@ -107,6 +107,8 @@ message ActiveArguments {
 // - `chunk:abandon_move` takes AbandonMoveArguments and returns WithdrawResult.
 // - `chunk:depart` takes no arguments and returns DepartResult.
 // - `chunk:reservation` takes no arguments and returns ReservationResult.
+// - `chunk:reconnect` takes ReconnectArguments and returns ReservationResult. Its operation ID is the login's, which
+//   it creates nothing under.
 
 // Arguments of `chunk:claim`.
 message ClaimArguments {
@@ -213,10 +215,16 @@ message WithdrawResult {
   bool unknown = 1;
 }
 
-// The result of `chunk:reservation`.
+// Arguments of `chunk:reconnect`.
+message ReconnectArguments {
+  // The UUID of the player logging in, lowercase and hyphenated.
+  string player = 1;
+}
+
+// The result of `chunk:reservation` and `chunk:reconnect`.
 message ReservationResult {
-  // The deployment whose session holds the operation's live claim; empty when it holds none, and then the claim is
-  // admitted in the current deployment.
+  // The deployment whose session holds the operation's live claim, or for a reconnect the session the player may
+  // return to; empty when there is none, and then the claim is admitted in the current deployment.
   string deployment = 1;
   // The reserved session's destination.
   SessionDemand destination = 2;

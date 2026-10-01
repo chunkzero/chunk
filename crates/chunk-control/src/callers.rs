@@ -120,8 +120,21 @@ impl Control {
         };
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
         let deployment = state.host_release(&session.host)?.deployment.deployment.clone();
-        let destination = crate::placement::destination(&state, claim, &session.host);
+        let destination = crate::placement::destination(&state, &claim.session, &session.host);
         Ok(Some(Reservation { deployment, destination }))
+    }
+
+    /// The deployment and destination of the session a login of `player` returns to, as a login's claim would, unless
+    /// it declines.
+    /// # Errors
+    /// Reports unreadable state.
+    pub fn reconnect(&self, player: &str) -> Result<Option<Reservation>> {
+        let state = self.state()?;
+        let unavailable = self.unavailable()?;
+        let Some(session) = crate::draining::rejoin(&state, player, &unavailable) else { return Ok(None) };
+        let host = &state.sessions[&session].host;
+        let deployment = state.host_release(host)?.deployment.deployment.clone();
+        Ok(Some(Reservation { deployment, destination: crate::placement::destination(&state, &session, host) }))
     }
 
     /// The claim or queued move stored under `operation`, if any.

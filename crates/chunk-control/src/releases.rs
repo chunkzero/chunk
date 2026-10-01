@@ -121,6 +121,21 @@ impl Control {
         self.release_stopped(deployment)
     }
 
+    /// Durably asks `deployment` to stop at once, which stays so until [`Self::forget_stopping`], and retires its
+    /// release as [`Self::retire_release`] does.
+    /// # Errors
+    /// Rejects the current release and reports a stopped store.
+    pub fn stop_release(&self, deployment: &str) -> Result<bool> {
+        self.update(|state| {
+            if state.current.as_deref() == Some(deployment) {
+                return Err(Error::Invalid("the current release cannot retire"));
+            }
+            state.stopping.insert(deployment.to_owned());
+            Ok(())
+        })?;
+        self.retire_release(deployment)
+    }
+
     /// Whether `deployment`'s release retired and every one of its hosts has stopped, as for an unknown release, and no
     /// launch of an unknown release may still run.
     /// # Errors

@@ -4,7 +4,52 @@
 use super::{Managed, lock};
 use chunk_control::{Control, DrainPolicy};
 use chunk_management::v1;
-use std::{collections::BTreeSet, convert::Infallible, time::Duration};
+use std::{
+    collections::BTreeSet,
+    convert::Infallible,
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
+use tokio::task::JoinSet;
+
+/// The backend retirements in flight, each its own task so that waiting for a deployment's running work never delays
+/// the tick, and so at most one runs per deployment. Dropping it aborts them.
+#[derive(Default)]
+pub(super) struct Retirements {
+    tasks: Mutex<JoinSet<()>>,
+    running: Arc<Mutex<BTreeSet<String>>>,
+}
+
+/// Removes its deployment from the running set once its task ends, however it ends.
+struct Running {
+    running: Arc<Mutex<BTreeSet<String>>>,
+    deployment: String,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.deployment);
+    }
+}
+
+impl Retirements {
+    /// Retires `id` in `backend` in the background, unless that is already under way.
+    fn start(&self, backend: chunk_backend::Backend, id: chunk_js::DeploymentId) {
+        let deployment = id.as_str().to_owned();
+        if !self.running.lock().unwrap_or_else(PoisonError::into_inner).insert(deployment.clone()) {
+            return;
+        }
+        let running = Running { running: self.running.clone(), deployment };
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(async move {
+            let _running = running;
+            if let Err(error) = backend.retire(id.clone()).await {
+                tracing::warn!(%error, deployment = id.as_str(), "backend version not retired");
+            }
+        });
+    }
+}
 
 /// How replaced deployments drain, from `desired`'s settings; unset, they stop at once.
 pub(super) fn drain_policy(desired: &v1::AttachResponse) -> DrainPolicy {
@@ -45,8 +90,11 @@ impl Managed<'_> {
         };
         let stopped = self.retire_resident(&control, &resident);
         for (id, asked) in &stopped {
-            let released = if *asked { backend.retire(id.clone()).await } else { backend.release(id.clone()).await };
-            match released {
+            if *asked {
+                self.retirements.start(backend.clone(), id.clone());
+                continue;
+            }
+            match backend.release(id.clone()).await {
                 Ok(_) | Err(chunk_backend::Error::Busy) => {}
                 Err(error) => tracing::warn!(%error, deployment = id.as_str(), "backend version not released"),
             }
@@ -100,8 +148,8 @@ impl Managed<'_> {
     }
 
     /// While a deployment loads and the backend, read again after this tick's releases, still holds as many as it can,
-    /// retires the oldest resident deployment that management no longer asks for, and fences it in the backend once its
-    /// JVMs have exited, wherever its jobs and subscriptions stand.
+    /// retires the oldest resident deployment that management no longer asks for, durably asking it to stop, and fences it
+    /// in the backend once its JVMs have exited, wherever its jobs and subscriptions stand.
     async fn make_room(&self, control: &Control, backend: &chunk_backend::Backend) {
         let resident = match backend.deployments().await {
             Ok(resident) => resident,
@@ -120,16 +168,14 @@ impl Managed<'_> {
             let candidate =
                 resident.iter().find(|id| !deployments.kept(id.as_str()) && current.as_deref() != Some(id.as_str()));
             let Some(candidate) = candidate else { return };
-            match control.retire_release(candidate.as_str()) {
+            match control.stop_release(candidate.as_str()) {
                 Ok(true) => candidate.clone(),
                 Ok(false) => return,
                 Err(error) => return tracing::warn!(%error, "no deployment retired to make room"),
             }
         };
         tracing::debug!(deployment = oldest.as_str(), "oldest deployment retiring to make room");
-        if let Err(error) = backend.retire(oldest.clone()).await {
-            tracing::warn!(%error, deployment = oldest.as_str(), "backend version not retired");
-        }
+        self.retirements.start(backend.clone(), oldest);
     }
 
     /// Removes the unpacked releases and their archives that neither control, whose JVMs run from them, nor a load

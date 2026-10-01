@@ -11,8 +11,8 @@ use chunk_proto::{
     control::v1 as control,
     sync::v1::{
         AbandonMoveArguments, ActivateResult, CallRequest, ClaimArguments, ClaimAssignment, ClaimRefusal, ClaimResult,
-        DepartResult, Error, GatewayLogin, Position, ReservationResult, SessionDemand, WithdrawResult,
-        claim_result::Outcome, error::Code,
+        DepartResult, Error, GatewayLogin, Position, ReconnectArguments, ReservationResult, SessionDemand,
+        WithdrawResult, claim_result::Outcome, error::Code,
     },
 };
 use prost::Message;
@@ -25,6 +25,7 @@ pub(super) enum Method {
     AbandonMove,
     Depart,
     Reservation,
+    Reconnect,
 }
 
 impl Method {
@@ -36,6 +37,7 @@ impl Method {
             "abandon_move" => Self::AbandonMove,
             "depart" => Self::Depart,
             "reservation" => Self::Reservation,
+            "reconnect" => Self::Reconnect,
             _ => return None,
         })
     }
@@ -65,6 +67,7 @@ pub(super) async fn call(
         }
         Method::Depart => depart(service, gateway, operation).await?.encode_to_vec(),
         Method::Reservation => reservation(service, gateway, operation)?.encode_to_vec(),
+        Method::Reconnect => reconnect(service, &decode(arguments)?)?.encode_to_vec(),
     };
     Ok(result)
 }
@@ -147,14 +150,24 @@ async fn depart(service: &SyncService, gateway: &str, operation: &str) -> Result
 fn reservation(service: &SyncService, gateway: &str, operation: &str) -> Result<ReservationResult, Error> {
     held(service, gateway, operation)?;
     let reserved = service.control.reservation(operation).map_err(|failure| errors::operation(&failure))?;
-    Ok(reserved.map_or_else(ReservationResult::default, |reserved| ReservationResult {
+    Ok(reservation_result(reserved))
+}
+
+/// The deployment and destination of the session `arguments`' player's login returns to, if any.
+fn reconnect(service: &SyncService, arguments: &ReconnectArguments) -> Result<ReservationResult, Error> {
+    let target = service.control.reconnect(&arguments.player).map_err(|failure| errors::operation(&failure))?;
+    Ok(reservation_result(target))
+}
+
+fn reservation_result(reserved: Option<chunk_control::Reservation>) -> ReservationResult {
+    reserved.map_or_else(ReservationResult::default, |reserved| ReservationResult {
         deployment: reserved.deployment,
         destination: Some(SessionDemand {
             key: reserved.destination.key,
             session_type: reserved.destination.session_type,
             machine_profile: reserved.destination.machine_profile,
         }),
-    }))
+    })
 }
 
 /// The claim or queued move stored under `operation`, which must be `gateway`'s.
