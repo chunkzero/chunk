@@ -268,7 +268,11 @@ fn tables_stay_in_history_and_the_journal_stops_at_the_contract_limit() {
     let start = |journal| pending_from(project.path().to_owned(), journal, both.clone());
     create(start(Journal::read(project.path()).unwrap()), "init", &Renames::new()).unwrap();
 
-    let stats: DatabaseSchema = [("stats".to_owned(), table(Schema::Number))].into();
+    let score = TableSchema {
+        fields: [("score".to_owned(), Field { schema: Schema::Number, optional: false })].into(),
+        indexes: BTreeMap::new(),
+    };
+    let stats: DatabaseSchema = [("stats".to_owned(), score)].into();
     let next = pending_from(project.path().to_owned(), Journal::read(project.path()).unwrap(), stats.clone());
     create(next, "stats", &Renames::new()).unwrap();
     let journal = Journal::read(project.path()).unwrap();

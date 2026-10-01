@@ -259,8 +259,10 @@ fn migration_snapshots_must_follow_their_declared_changes() {
 
     let undeclared = schema(&[("name", Schema::Number)]);
     let wrong_table = [("players", table(&["displayName"], &["name"], true))];
+    let retyped = [("fighters", table(&["name"], &["name"], true))];
     let rejected = [
-        vec![baseline.clone(), expand(undeclared, &rename)],
+        vec![baseline.clone(), expand(undeclared.clone(), &rename)],
+        vec![baseline.clone(), expand(undeclared, &retyped)],
         vec![baseline.clone(), expand(new.clone(), &[("fighters", table(&["displayName"], &[], true))])],
         vec![baseline.clone(), expand(new.clone(), &wrong_table)],
         vec![

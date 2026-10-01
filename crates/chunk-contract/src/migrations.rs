@@ -168,6 +168,9 @@ fn require_declared_changes(before: &DatabaseSchema, expand: &Migration) -> Resu
                 .collect()
         };
         let (added, removed) = (differing(&table.fields, &old.fields), differing(&old.fields, &table.fields));
+        if added.iter().any(|field| old.fields.get(field).is_some_and(|old| old.schema != table.fields[field].schema)) {
+            return Err("changing a field's type in place isn't supported; rename the field instead");
+        }
         match expand.tables.get(name) {
             Some(declared) => {
                 if declared.added != added || declared.removed != removed || (added.is_empty() && removed.is_empty()) {
