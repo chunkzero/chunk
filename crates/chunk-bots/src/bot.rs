@@ -1,6 +1,7 @@
 //! One bot: an offline-mode client that logs in, answers what chunk's gateway and Minestom expect of a client, then
 //! walks a small circle, pings and optionally runs a command until the run stops it.
 use std::{
+    net::SocketAddr,
     sync::{Arc, atomic::Ordering::Relaxed},
     time::Duration,
 };
@@ -21,7 +22,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::OwnedSemaphorePermit,
-    time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout, timeout_at},
+    time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -85,6 +86,8 @@ struct Bot {
     config: Arc<Config>,
     stats: Arc<Stats>,
     stream: TcpStream,
+    /// When the bot must be in play by.
+    deadline: Instant,
     decoder: wire::Decoder,
     encoder: wire::Encoder,
     phase: Phase,
@@ -105,6 +108,7 @@ struct Bot {
 pub async fn run(
     index: u32,
     config: Arc<Config>,
+    address: SocketAddr,
     stats: Arc<Stats>,
     permit: OwnedSemaphorePermit,
     stop: CancellationToken,
@@ -116,7 +120,7 @@ pub async fn run(
         let deadline = connected + Duration::from_secs(config.login_timeout);
         let stream = tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            stream = timeout_at(deadline, TcpStream::connect(&config.address)) => {
+            stream = timeout_at(deadline, TcpStream::connect(address)) => {
                 stream.context("connect timed out")?.context("connect")?
             }
         };
@@ -125,6 +129,7 @@ pub async fn run(
         let mut bot = Bot {
             index,
             stream,
+            deadline,
             decoder: wire::Decoder::new(),
             encoder: wire::Encoder::new(),
             phase: Phase::Login,
@@ -142,9 +147,10 @@ pub async fn run(
         };
         let result = tokio::select! {
             () = stop.cancelled() => Ok(()),
-            result = bot.drive(deadline) => result,
+            result = bot.drive() => result,
         };
         spawned = bot.spawned;
+        bot.leave_play();
         result
     }
     .await;
@@ -152,25 +158,23 @@ pub async fn run(
 }
 
 impl Bot {
-    /// Plays until the connection fails, or until `deadline` if the bot isn't in play by then.
-    async fn drive(&mut self, deadline: Instant) -> Result<()> {
+    /// Plays until the connection fails, or until the deadline if the bot isn't in play by then.
+    async fn drive(&mut self) -> Result<()> {
         let name = self.config.name(self.index);
         self.encoder.packet(&Handshake {
             protocol_version: VarInt(VERSION.protocol),
             server_address: McString::new(self.config.hostname())?,
-            server_port: self.config.address.rsplit_once(':').and_then(|(_, port)| port.parse().ok()).unwrap_or(25565),
+            server_port: self.stream.peer_addr()?.port(),
             next_state: VarInt(2),
         })?;
         self.encoder.packet(&LoginStart { username: McString::new(&name)?, player_uuid: Uuid([0; 16]) })?;
-        timeout_at(deadline, self.flush())
-            .await
-            .with_context(|| format!("not in play after {}s", self.config.login_timeout))??;
+        self.flush().await?;
         let period = Duration::from_secs(1) / self.config.move_hz.max(1);
         let mut ticks = interval_at(self.connected + period.mul_f64(spread(self.index, 4)), period);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
-                () = sleep_until(deadline), if !self.spawned => bail!("not in play after {}s", self.config.login_timeout),
+                () = sleep_until(self.deadline), if !self.spawned => bail!("not in play after {}s", self.config.login_timeout),
                 read = self.stream.read_buf(&mut self.decoder.buffer) => {
                     let read = read.context("read")?;
                     if read == 0 {
@@ -189,9 +193,15 @@ impl Bot {
         }
     }
 
+    /// Writes what's queued, within the login deadline until the bot has spawned and `WRITE_TIMEOUT` after.
     async fn flush(&mut self) -> Result<()> {
         if !self.encoder.output.is_empty() {
-            timeout(WRITE_TIMEOUT, self.stream.write_all(&self.encoder.output)).await.context("write timed out")??;
+            let (until, failure) = if self.spawned {
+                (Instant::now() + WRITE_TIMEOUT, "write timed out".to_string())
+            } else {
+                (self.deadline, format!("not in play after {}s", self.config.login_timeout))
+            };
+            timeout_at(until, self.stream.write_all(&self.encoder.output)).await.context(failure)??;
             self.encoder.output.clear();
         }
         Ok(())
@@ -248,7 +258,7 @@ impl Bot {
             (Phase::Play, StartConfiguration::ID) => {
                 self.encoder.packet(&ConfigurationAcknowledged)?;
                 self.phase = Phase::Configuration;
-                self.positioned = false;
+                self.leave_play();
                 self.pings.clear();
                 self.settings()?;
                 self.stats.reconfigurations.fetch_add(1, Relaxed);
@@ -267,6 +277,13 @@ impl Bot {
             _ => {}
         }
         Ok(())
+    }
+
+    fn leave_play(&mut self) {
+        if self.positioned {
+            self.positioned = false;
+            self.stats.left_play();
+        }
     }
 
     fn settings(&mut self) -> Result<()> {
@@ -293,7 +310,10 @@ impl Bot {
         }
         self.encoder.packet(&ConfirmTeleport { teleport_id: position.teleport_id })?;
         self.encoder.packet(&PlayerLoaded)?;
-        self.positioned = true;
+        if !self.positioned {
+            self.positioned = true;
+            self.stats.entered_play();
+        }
         if !self.spawned {
             self.spawned = true;
             self.stats.spawned(self.connected.elapsed());

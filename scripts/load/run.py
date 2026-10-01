@@ -5,12 +5,14 @@ Each host gets an even, disjoint slice of the bots (by `--first`), a copy of the
 chunk-bots arguments, so `--login-rate` applies per host. `local` runs on this machine instead of over SSH. Summaries and
 logs land in `--output`, with `summary.json` combining their counts; latency percentiles stay per host. Ctrl-C, or a
 failure while starting, stops this invocation's bots on every host, which still print their summaries; other runs on
-the same hosts are left alone.
+the same hosts are left alone. Remote bots also end on their own: they run under `timeout` and an SSH session with a
+terminal, so a lost connection hangs them up. Remote hosts therefore need a finite `--hold`.
 
     scripts/load/run.py --hosts bots-1,bots-2,bots-3 --bots 5000 -- --address play.example.com:25565 --hold 600
 """
 import argparse
 import json
+import math
 from pathlib import Path
 import shlex
 import subprocess
@@ -19,29 +21,55 @@ import time
 import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
-# Seconds the bots get to print their summaries after being told to stop.
+# Seconds the bots get to print their summaries after being told to stop, and to finish after their expected end.
 STOP_WAIT = 30
+GRACE = 60
+# Bound for each cleanup command, so a stalled host can't hold up the others.
+CLEANUP_TIMEOUT = 30
+SSH_OPTIONS = ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=5', '-o',
+               'ServerAliveCountMax=3']
 COUNTS = ('started', 'logged_in', 'spawned', 'playing', 'failed', 'disconnects', 'reconfigurations', 'pings', 'pongs',
           'ping_timeouts', 'commands', 'bytes_in', 'cpu_seconds')
 
 
 def command(host, script):
-    """Runs a POSIX shell script on `host`."""
+    """Runs a POSIX shell script on `host`; remotely under a terminal, which hangs the script up if SSH drops."""
     if host == 'local':
         return ['sh', '-c', script]
-    return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, shlex.join(['sh', '-c', script])]
+    return ['ssh', '-tt', *SSH_OPTIONS, host, shlex.join(['sh', '-c', script])]
+
+
+def cleanup(host, script, **kwargs):
+    """Runs a bounded command on `host`, returning whether it succeeded."""
+    try:
+        return subprocess.run(command(host, script), stdin=subprocess.DEVNULL, timeout=CLEANUP_TIMEOUT,
+                              **kwargs).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def stop(runs):
-    """Interrupts the bots of this invocation that are still running, by the PID each recorded at launch."""
-    live = [run for run in runs if run['process'].poll() is None]
-    for run in live:
-        subprocess.run(command(run['host'], f'kill -INT "$(cat {run["pidfile"]})" 2>/dev/null'))
-    for run in live:
-        try:
-            run['process'].wait(timeout=STOP_WAIT)
-        except subprocess.TimeoutExpired:
-            run['process'].kill()
+    """Interrupts this invocation's bots by the PID each recorded at launch, killing SSH sessions that don't finish."""
+    for run in runs:
+        cleanup(run['host'], f'kill -INT "$(cat {run["base"]}.pid)"', stderr=subprocess.DEVNULL)
+    for run in runs:
+        if run['process'] is not None:
+            try:
+                run['process'].wait(timeout=STOP_WAIT)
+            except subprocess.TimeoutExpired:
+                run['process'].kill()
+
+
+def collect(run, output):
+    """Copies the run's results to `output`, then removes its files from the host once its bots are gone."""
+    for extension in ('json', 'log'):
+        with open(output / f'{run["name"]}.{extension}', 'w') as file:
+            cleanup(run['host'], f'cat {run["base"]}.{extension}', stdout=file, stderr=subprocess.DEVNULL)
+    if cleanup(run['host'], f'! kill -0 "$(cat {run["base"]}.pid)" 2>/dev/null'):
+        files = ' '.join(f'{run["base"]}{suffix}' for suffix in ('', '.pid', '.json', '.log'))
+        cleanup(run['host'], f'rm -f {files}')
+    else:
+        print(f'{run["host"]}: bots may still be running; their PID is in {run["base"]}.pid', file=sys.stderr)
 
 
 def main():
@@ -54,41 +82,43 @@ def main():
     options = parser.parse_args()
     hosts = options.hosts.split(',')
     arguments = [argument for argument in options.args if argument != '--']
+    timing = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    timing.add_argument('--hold', type=int, default=60)
+    timing.add_argument('--login-rate', type=float, default=20)
+    timing = timing.parse_known_args(arguments)[0]
+    if timing.hold == 0 and any(host != 'local' for host in hosts):
+        parser.error('remote hosts need a finite --hold, so their bots end on their own')
     options.output.mkdir(parents=True, exist_ok=True)
 
     marker = uuid.uuid4().hex[:8]
-    touched = []
     runs = []
     try:
         for index, host in enumerate(hosts):
             first = options.bots * index // len(hosts)
             count = options.bots * (index + 1) // len(hosts) - first
+            base = f'/tmp/chunk-bots-{marker}-{index}'
+            run = {'host': host, 'name': f'{index}-{host}', 'base': base, 'process': None}
+            runs.append(run)
             binary = str(options.binary.resolve())
-            pidfile = f'/tmp/chunk-bots-{marker}-{index}.pid'
-            touched.append((host, pidfile))
             if host != 'local':
-                remote = f'/tmp/chunk-bots-{marker}-{index}'
-                touched.append((host, remote))
-                subprocess.run(['scp', '-q', binary, f'{host}:{remote}'], check=True)
-                binary = remote
+                subprocess.run(['scp', '-q', *SSH_OPTIONS, binary, f'{host}:{base}'], check=True)
+                binary = base
             bots = shlex.join([binary, '--json', '--bots', str(count), '--first', str(first), *arguments])
-            script = f'ulimit -n "$(ulimit -Hn)"; echo $$ > {pidfile}; exec {bots}'
-            name = f'{index}-{host}'
-            with (open(options.output / f'{name}.json', 'w') as stdout,
-                  open(options.output / f'{name}.log', 'w') as stderr):
-                process = subprocess.Popen(command(host, script), stdout=stdout, stderr=stderr, start_new_session=True)
-            runs.append({'host': host, 'name': name, 'process': process, 'pidfile': pidfile})
+            if timing.hold > 0:
+                limit = math.ceil(timing.hold + count / timing.login_rate + GRACE)
+                bots = f'timeout --signal=INT --kill-after=10 {limit} {bots}'
+            script = f'ulimit -n "$(ulimit -Hn)"; echo $$ > {base}.pid; exec {bots} > {base}.json 2> {base}.log'
+            run['process'] = subprocess.Popen(command(host, script), stdin=subprocess.DEVNULL, start_new_session=True)
             print(f'{host}: bots {first}..{first + count - 1}', flush=True)
         for run in runs:
             run['process'].wait()
-    except KeyboardInterrupt:
+    except BaseException as error:
         stop(runs)
-    except BaseException:
-        stop(runs)
-        raise
+        if not isinstance(error, KeyboardInterrupt):
+            raise
     finally:
-        for host, path in touched:
-            subprocess.run(command(host, f'rm -f {path}'))
+        for run in runs:
+            collect(run, options.output)
 
     total = dict.fromkeys(COUNTS, 0)
     hosts_summary = {}
@@ -97,7 +127,8 @@ def main():
         try:
             summary = json.loads((options.output / f'{name}.json').read_text())['summary']
         except (ValueError, KeyError):
-            print(f'{host}: no summary (exit {run["process"].returncode}); see {options.output / (name + ".log")}')
+            code = run['process'].returncode if run['process'] else 'never started'
+            print(f'{host}: no summary (exit {code}); see {options.output / (name + ".log")}')
             continue
         hosts_summary[name] = summary
         for key in COUNTS:

@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::{
@@ -31,7 +31,11 @@ fn main() -> Result<()> {
     if let Some(threads) = config.threads {
         runtime.worker_threads(threads);
     }
-    runtime.enable_all().build()?.block_on(run(Arc::new(config)))
+    let runtime = runtime.enable_all().build()?;
+    let result = runtime.block_on(run(Arc::new(config)));
+    // Don't wait on blocking work, such as a resolver, that outlives the run.
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    result
 }
 
 /// This process's CPU time since it started, in seconds.
@@ -51,6 +55,10 @@ impl Cpu {
 }
 
 async fn run(config: Arc<Config>) -> Result<()> {
+    let address = tokio::net::lookup_host(&config.address)
+        .await?
+        .next()
+        .with_context(|| format!("{} resolves to no address", config.address))?;
     let stats = Arc::new(Stats::new());
     let stop = CancellationToken::new();
     let mut cpu = Cpu { system: System::new(), pid: Pid::from_u32(std::process::id()) };
@@ -65,7 +73,7 @@ async fn run(config: Arc<Config>) -> Result<()> {
         for index in 0..config.bots {
             logins.tick().await;
             let permit = pending.clone().acquire_owned().await?;
-            bots.spawn(bot::run(index, config.clone(), stats.clone(), permit, stop.clone()));
+            bots.spawn(bot::run(index, config.clone(), address, stats.clone(), permit, stop.clone()));
         }
         anyhow::Ok(())
     };

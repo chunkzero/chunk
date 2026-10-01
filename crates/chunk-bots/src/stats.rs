@@ -16,7 +16,7 @@ pub struct Stats {
     pub logged_in: AtomicU64,
     /// Bots that reached play at least once.
     pub spawned: AtomicU64,
-    /// Bots in play now.
+    /// Bots in play now, not counting those between sessions.
     pub playing: AtomicU64,
     /// Bots that ended before reaching play.
     pub failed: AtomicU64,
@@ -123,8 +123,15 @@ impl Stats {
 
     pub fn spawned(&self, login: Duration) {
         self.spawned.fetch_add(1, Relaxed);
-        self.playing.fetch_add(1, Relaxed);
         lock(&self.login).saturating_record(micros(login));
+    }
+
+    pub fn entered_play(&self) {
+        self.playing.fetch_add(1, Relaxed);
+    }
+
+    pub fn left_play(&self) {
+        self.playing.fetch_sub(1, Relaxed);
     }
 
     pub fn pong(&self, rtt: Duration) {
@@ -136,9 +143,6 @@ impl Stats {
 
     /// Records how a bot ended: `reason` is None when the run stopped it.
     pub fn ended(&self, spawned: bool, reason: Option<String>) {
-        if spawned {
-            self.playing.fetch_sub(1, Relaxed);
-        }
         let Some(reason) = reason else { return };
         let counter = if spawned { &self.disconnects } else { &self.failed };
         if counter.fetch_add(1, Relaxed) < 5 {
@@ -207,8 +211,11 @@ mod tests {
         let stats = Stats::new();
         for ms in 1..=100 {
             stats.spawned(Duration::from_millis(ms * 10));
+            stats.entered_play();
             stats.pong(Duration::from_millis(ms));
         }
+        stats.left_play();
+        stats.left_play();
         stats.ended(true, None);
         stats.ended(true, Some("kicked: Timed out".into()));
         stats.ended(false, Some("connection refused".into()));
