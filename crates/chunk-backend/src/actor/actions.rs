@@ -23,6 +23,8 @@ use crate::{
 const RETENTION: Duration = Duration::from_hours(24);
 /// Retained bytes each record or prepared identity charges beyond its call and result.
 const ENTRY_BYTES: usize = 256;
+/// How long an action runs at most, as long as its engine allows any invocation.
+const ACTION_LIMIT: Duration = Duration::from_secs(30);
 
 struct Record {
     operation_prefix: String,
@@ -421,8 +423,7 @@ impl Actor {
         let scope = Arc::new(Scope(cancellation.clone()));
         let (status, receiver) = watch::channel(ActionStatus::Running);
         let events = self.actions.events.clone();
-        let deadline =
-            std::time::Instant::now() + if hook { crate::hooks::HOOK_TIMEOUT } else { Duration::from_secs(30) };
+        let deadline = std::time::Instant::now() + if hook { crate::hooks::HOOK_TIMEOUT } else { ACTION_LIMIT };
         let host = self.actions.host(&id, &invocation_identity, &cancellation, deadline, &purpose, hook);
         let invocation = ActionInvocation {
             id: invocation_identity,

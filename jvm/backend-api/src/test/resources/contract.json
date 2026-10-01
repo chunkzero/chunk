@@ -284,6 +284,32 @@
         }
       }
     },
+    "shared/profile/purchase": {
+      "kind": "action",
+      "visibility": "public",
+      "export": "purchase",
+      "arguments": {
+        "type": "object",
+        "fields": {}
+      },
+      "result": {
+        "type": "object",
+        "fields": {
+          "ok": {
+            "schema": {
+              "type": "boolean"
+            },
+            "optional": false
+          },
+          "session": {
+            "schema": {
+              "type": "session"
+            },
+            "optional": false
+          }
+        }
+      }
+    },
     "shared/names/class": {
       "kind": "query",
       "visibility": "public",

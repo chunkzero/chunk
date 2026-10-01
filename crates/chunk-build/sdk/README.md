@@ -228,7 +228,8 @@ export const checkout = action({
 ## Actions and function references
 
 `action` and `internalAction` run outside a transaction. Their context has `caller`, `env`, `fetch`, `runQuery`,
-`runMutation`, `sleep(ms)`, `invocationId` and `routing`.
+`runMutation`, `sleep(ms)`, `invocationId` and `routing`. An action runs for at most 30 seconds. Gameplay JVMs call
+public actions through the generated [client](../../../jvm/backend-client/README.md#actions).
 
 `ctx.fetch(url, init)` sends one HTTP request to a public URL, much like the web's `fetch`. `init` takes `method`,
 `headers` and a string `body`; the response has `url`, `status`, `ok`, lowercase `headers`, `text()` and `json()`.

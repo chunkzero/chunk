@@ -16,7 +16,13 @@ import java.util.List;
  * gRPC context a call or watch starts in cancels it.
  */
 interface Transport {
-    /** Starts one query, or a mutation when {@code operation} is not empty. */
+    /** Asks core for the operation ID of one action, which answers in a {@code PrepareResult}. */
+    void prepare(Duration deadline, StreamObserver<CallResponse> response);
+
+    /**
+     * Starts one query, a mutation when {@code operation} is not empty, or an action when it is an
+     * ID {@link #prepare} issued.
+     */
     void call(
             Invocation call,
             SessionIdentity caller,

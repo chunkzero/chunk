@@ -19,9 +19,12 @@
 //   committed nothing, so its retry runs again, as does a retry after expiry or after a restore lost the commit.
 // - Effectful methods (actions, hooks, commands, session methods) may act outside the log, so each runs at most once.
 //   Their operation IDs are issued by core through `chunk:prepare`. Core returns an outcome, success or failure,
-//   until it retires it. An action runs on after its call is dropped, so a retry finds its outcome; a hook is
-//   cancelled when its call is dropped, and a retry then finds it cancelled. A retry whose outcome is unknown,
-//   retired, or from before core restarted or restored gets OUTCOME_UNKNOWN.
+//   until it retires it. An action runs for at most 30 seconds, and runs on after its call is dropped, so a retry
+//   finds its outcome; a hook is cancelled when its call is dropped, and a retry then finds it cancelled. A retry
+//   whose outcome is unknown, retired, or from before core restarted or restored gets OUTCOME_UNKNOWN. Core checks
+//   a retry's caller again, as it does every call's, so once its session or player is gone the retry gets DENIED or
+//   STOPPED whether or not the operation ran; a client that may have sent an earlier attempt treats either as an
+//   unknown outcome.
 //
 // Positions. A position names a commit in the environment's log, ordered by epoch, then revision. Both start at 1,
 // and an unset position means none. A restore starts a new epoch, whose revisions may repeat numbers from a lost tail
