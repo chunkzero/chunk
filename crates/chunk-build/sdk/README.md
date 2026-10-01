@@ -198,7 +198,9 @@ in the release, so never put secrets there. Secret values are set per environmen
 `NAME=value` per line with optional quotes and `#` comments; `chunk dev --env NAME` selects `[env.NAME.vars]`. Queries,
 mutations and hooks see the variables only; actions and commands also see every secret of their environment, whose value
 is copied in only when read. A secret set while an action runs reaches the actions that start afterwards. Names are
-letters, digits and underscores, not starting with a digit, and values are at most 64 KiB.
+letters, digits and underscores, not starting with a digit, and values are at most 64 KiB. Chunk redacts the secret
+values it recognises in logs and error messages on a best-effort basis, but code that logs a secret, even transformed or
+nested in other data, can still expose it, so don't log secrets.
 
 `codegen` types `ctx.env` from `chunk.toml` in `.chunk/generated/env.ts`: variables every environment has are strings,
 those only some environments set may be missing, and required secrets are strings in actions.

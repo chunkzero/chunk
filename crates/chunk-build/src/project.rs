@@ -111,7 +111,8 @@ pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
 /// `inspect`, keeping the scopes and authored modules discovered along the way.
 pub(crate) fn inspect_inventory(root: &Path) -> io::Result<Inventory> {
     let manifest_path = root.join("chunk.toml");
-    let manifest: ProjectManifest = read_manifest(&manifest_path)?;
+    // Room for the variables `[vars]` and `[env.<name>.vars]` may hold.
+    let manifest: ProjectManifest = read_manifest(&manifest_path, 1024 * 1024)?;
     let mut inventory = discover(root)?;
     if let Some(local) = &manifest.local {
         local.validate(&manifest_path)?;
@@ -203,7 +204,7 @@ fn legacy_apps(root: &Path, inventory: &mut Inventory) -> io::Result<()> {
         if !names.insert(id.to_ascii_lowercase()) {
             return Err(invalid(&manifest_path, "app IDs must not differ only by case"));
         }
-        let manifest: AppManifest = read_manifest(&manifest_path)?;
+        let manifest: AppManifest = read_manifest(&manifest_path, 65_536)?;
         if manifest.sessions.len() > 128 || manifest.sessions.keys().any(|id| !valid_id(id)) {
             return Err(invalid(&manifest_path, "sessions requires at most 128 valid session type IDs"));
         }
@@ -279,9 +280,9 @@ fn require_file(path: &Path) -> io::Result<()> {
     }
 }
 
-fn read_manifest<T: DeserializeOwned>(path: &Path) -> io::Result<T> {
+fn read_manifest<T: DeserializeOwned>(path: &Path, limit: u64) -> io::Result<T> {
     require_file(path)?;
-    let bytes = super::read_limited(path, 65_536).map_err(|error| invalid(path, error))?;
+    let bytes = super::read_limited(path, limit).map_err(|error| invalid(path, error))?;
     let source = std::str::from_utf8(&bytes).map_err(|error| invalid(path, error))?;
     toml::from_str(source).map_err(|error| invalid(path, error))
 }
