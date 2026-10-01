@@ -9,7 +9,7 @@ const definition = Symbol.for("@chunk/command");
 const routeDefinition = Symbol.for("@chunk/command-route");
 declare const argumentValue: unique symbol;
 
-export interface CommandContext extends ActionContext {
+export interface CommandContext extends Omit<ActionContext, "routing"> {
   readonly player: Readonly<CommandPlayer>;
   readonly session: CommandSession;
   readonly routing: CommandRouting;
@@ -191,14 +191,10 @@ export function isCommand(value: unknown): value is CommandDefinition {
   return value !== null && typeof value === "object" && definition in value && value[definition] === true;
 }
 
-interface RawCommandContext extends RawActionContext {
-  platform(request: unknown): Promise<unknown>;
-}
-
 /** Compiler adapter. The platform supplies the authorized route and authenticated player. */
 export async function invokeCommand(
   descriptor: CommandDefinition,
-  raw: RawCommandContext,
+  raw: RawActionContext,
   payload: { route: number; arguments: Record<string, unknown>; player: PlayerIdentity },
 ): Promise<null> {
   if (!Number.isInteger(payload.route) || payload.route < 0 || payload.route >= descriptor.routes.length)

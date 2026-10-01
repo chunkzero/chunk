@@ -2,7 +2,7 @@ use super::*;
 use crate::{RosterMember, RosterMove};
 use chunk_proto::control::v1::ClaimIdentity;
 
-/// Sessions of capacity 4, and one `arena` session at most.
+/// Sessions of capacity 4 in a declared lobby, and one `arena` session at most.
 fn fixture() -> Fixture {
     let mut fixture = Fixture::new();
     let app: chunk_contract::AppArtifact = serde_json::from_value(serde_json::json!({"id":"bridge","jar":"app.jar",
@@ -14,7 +14,9 @@ fn fixture() -> Fixture {
     fixture.release.contracts.destinations = Some(
         serde_json::from_value(serde_json::json!({"version":1,"entries":{"shared/destinations/arena":{
             "destination":{"key":"arena","session_type":"bridge/default","machine_profile":"local"},
-            "overflow":"reject","empty_timeout_seconds":60}}}))
+            "overflow":"reject","empty_timeout_seconds":60},"shared/destinations/lobby":{
+            "destination":{"key":"lobby","session_type":"bridge/default","machine_profile":"local"},
+            "overflow":"replicate","empty_timeout_seconds":60}}}))
         .unwrap(),
     );
     fixture
@@ -71,7 +73,10 @@ async fn simultaneous_group_and_single_demand_never_split_a_roster_or_overfill_a
         });
     }
     while let Some(result) = tasks.join_next().await {
-        assert!(matches!(result.unwrap(), Ok(()) | Err(Error::Capacity)));
+        assert!(matches!(
+            result.unwrap(),
+            Ok(()) | Err(Error::Capacity | Error::Refused(chunk_contract::MoveRefusal::Full))
+        ));
     }
     let state = control.state().unwrap();
     let arena: Vec<_> =
@@ -225,5 +230,16 @@ async fn canceling_a_roster_before_preparation_releases_its_reservations() {
         assert_eq!(state.players[player].current.as_ref(), Some(&source.operation_id));
         assert!(state.players[player].pending.is_none());
     }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn moves_to_undeclared_destinations_are_unknown() {
+    let fixture = fixture();
+    let control = fixture.control().await;
+    let (player_id, _) = arrive(&fixture, &control, "lobby-0").await;
+    let demand = SessionDemand { key: "arena-typo".into(), ..arena() };
+    let moved = control.move_player(MoveRequest { operation_id: "typo".into(), player_id, demand, source: None });
+    assert!(matches!(moved, Err(Error::Refused(chunk_contract::MoveRefusal::UnknownDestination))), "{moved:?}");
     fixture.close().await;
 }

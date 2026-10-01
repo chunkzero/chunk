@@ -179,9 +179,23 @@ not arguments or results, and nothing is cached between invocations.
 ## Actions and function references
 
 `action` and `internalAction` run outside a transaction. Their context has `caller`, `runQuery`, `runMutation`,
-`sleep(ms)`, `invocationId`, `http(binding, request)` and `secret(name)`. `http` and `secret` are deny-by-default: they
-only reach bindings and secrets the host grants the deployment, and neither `chunk dev` nor management grants any, so
-they currently reject.
+`sleep(ms)`, `invocationId`, `http(binding, request)`, `secret(name)` and `routing`. `http` and `secret` are
+deny-by-default: they only reach bindings and secrets the host grants the deployment, and neither `chunk dev` nor
+management grants any, so they currently reject.
+
+`ctx.routing.move(player, destination)` sends any online player to a destination, through its capacity and overflow
+policy like a command's `ctx.routing.enter`:
+
+```ts
+const result = await ctx.routing.move(player, apps.arena.destinations.large);
+if (result.state === "refused") console.log(result.reason);
+```
+
+It resolves to `{ state: "accepted", operationId }` once the move is queued; the player's gateway then carries it out,
+and the destination's login and `player.beforeMove` hooks may still turn the player away. Otherwise it resolves to
+`{ state: "refused", reason }`, where `reason` is `"offline"`, `"stale"` (the player is still arriving or already
+moving), `"full"` (a `"reject"` destination whose one session is full) or `"unknown_destination"` (the release declares
+no such destination). Only actions move players; queries, mutations, hooks and commands can't.
 
 `runQuery`, `runMutation`, the scheduler, hooks and command permissions take a function reference: an object with the
 function's `path`, `kind` and argument and result validators. Write it next to the code that uses it:
@@ -322,8 +336,8 @@ arguments take `suggestions`: a list, or a query reference taking `{ input, curs
 are `aliases`, `permission` (a query reference taking `{}` and returning `boolean`, rechecked on every run) and
 `followPlayer`.
 
-Handlers get the action context plus `ctx.player` (`uuid`, `username`, `message(text)`, `actionBar(text)`,
-`title(title, subtitle?)`), `ctx.routing.enter(destination)`, and `ctx.session.call(method, args)` or
+Handlers get the action context, without `routing.move`, plus `ctx.player` (`uuid`, `username`, `message(text)`,
+`actionBar(text)`, `title(title, subtitle?)`), `ctx.routing.enter(destination)`, and `ctx.session.call(method, args)` or
 `ctx.session.send(method, args)` for session methods. Effects resolve to `{ state: "accepted", operationId }`, which
 means the gateway accepted them, not that the player saw them. A backend command must not share a name or alias with the
 app's JVM commands; on a clash the gateway logs a warning and players see only the JVM's commands.

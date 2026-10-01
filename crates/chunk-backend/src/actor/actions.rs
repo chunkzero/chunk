@@ -370,6 +370,7 @@ impl Actor {
             events: events.clone(),
             slots: self.actions.slots.clone(),
             cancellation: cancellation.clone(),
+            moves: matches!(purpose, crate::commands::Purpose::Function).then(|| self.actions.effects.moves.clone()),
         };
         let invocation = ActionInvocation {
             id: invocation_identity,

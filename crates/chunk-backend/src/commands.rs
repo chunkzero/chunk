@@ -169,8 +169,8 @@ pub(crate) struct PlatformEffect {
     pub reply: Request<Arc<str>>,
 }
 
-/// The operation ID effect `sequence` of command invocation `invocation` names in its receipt.
-fn effect_operation(invocation: &str, sequence: u32) -> String {
+/// The operation ID effect `sequence` of action invocation `invocation` names in its receipt.
+pub(crate) fn effect_operation(invocation: &str, sequence: u32) -> String {
     format!("action/{invocation}/platform/{sequence}")
 }
 

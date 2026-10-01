@@ -365,6 +365,8 @@ async fn moves_keep_membership_and_fence_unknown_source_outcomes_before_activati
     // The restarted control learns from the JVM's first report that the withdrawal completed.
     let control = fixture.control().await;
     assert_eq!(control.inspect(&source).unwrap().phase, ClaimPhase::Released as i32);
+    let between = control.move_player(MoveRequest { operation_id: "between".into(), ..command.clone() });
+    assert!(matches!(between, Err(Error::Refused(chunk_contract::MoveRefusal::Stale))), "{between:?}");
     assert!(control.claim(request("new-login", &uuid)).await.is_err());
     control.activate(activation).await.unwrap();
     fixture.arrive(&control, "move").await;
@@ -707,6 +709,7 @@ mod destinations;
 mod gateway;
 mod launch;
 mod log;
+mod moves;
 mod recovery;
 mod releases;
 mod retention;

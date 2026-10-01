@@ -58,6 +58,8 @@ test("compiled command adapters preserve authenticated context and route identit
         handler: async (ctx, args) => {
           assert.equal(Object.isFrozen(ctx.player), true);
           assert.deepEqual(ctx.caller, { player: "trusted" });
+          assert.equal(typeof ctx.routing.enter, "function");
+          assert.equal("move" in ctx.routing, false);
           await ctx.runMutation(
             {
               path: "shared/invite",

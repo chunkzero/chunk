@@ -43,6 +43,7 @@ test("the compiler adapter preserves trusted capabilities and validates decision
   const hook = createHook("player.login", async (ctx) => {
     assert.deepEqual(ctx.caller, { kind: "gateway", player: "trusted" });
     assert.equal(Object.isFrozen(ctx.player), true);
+    assert.equal("routing" in ctx, false);
     const allow = await ctx.runQuery({ path: "shared/allowed" }, {});
     return { allow };
   });

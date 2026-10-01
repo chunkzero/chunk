@@ -305,6 +305,7 @@ pub(crate) enum Event {
 
 struct Owner {
     environment: String,
+    moves: crate::moves::Slot,
     events: queue::Sender<Event>,
     memory: Arc<Semaphore>,
     send: SendBudget,
@@ -352,6 +353,7 @@ impl Backend {
         let memory = Arc::new(Semaphore::new(REQUEST_BYTES));
         let backend = Self(Arc::new(Owner {
             environment: "test".into(),
+            moves: Arc::default(),
             events,
             memory: memory.clone(),
             send: SendBudget::new(send_bytes()),
@@ -416,6 +418,7 @@ impl Backend {
             return Err(Error::Invalid("environment identity"));
         }
         chunk_js::Engine::init_platform();
+        let moves = effects.moves.clone();
         let (events, incoming) = queue::channel(EVENTS);
         let engine_queue = Arc::new(EngineQueue::default());
         let dequeued = engine_queue.clone();
@@ -446,6 +449,7 @@ impl Backend {
         };
         Ok(Self(Arc::new(Owner {
             environment,
+            moves,
             events,
             memory,
             send: SendBudget::new(send_bytes()),
@@ -455,6 +459,11 @@ impl Backend {
             stopped,
             thread: std::sync::Mutex::new(Some(thread)),
         })))
+    }
+
+    /// Serves the moves actions ask for with `moves`, instead of any served before. Until then, an action's move fails.
+    pub fn serve_moves(&self, moves: Arc<dyn crate::PlayerMoves>) {
+        *self.0.moves.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(moves);
     }
 
     /// Stops admitting requests, drains accepted commits and joins both threads,

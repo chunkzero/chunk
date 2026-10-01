@@ -73,7 +73,7 @@ message JvmMethodCall {
 }
 
 // Methods a JVM calls with its own credential; core takes the JVM's host from that credential. Each carries no
-// deployment or caller, and takes no operation ID.
+// deployment or caller, and takes no operation ID unless it says otherwise.
 // - `chunk:register` takes JvmRegistration and returns JvmRegistered. The JVM calls it before subscribing, so it names
 //   no stream. The first registration is frozen: repeating it returns the same result, and one that differs fails
 //   with INVALID. A JVM that outlived a core restart re-attaches through it, and until then its credential may call
@@ -84,6 +84,11 @@ message JvmMethodCall {
 // - `chunk:method_result` takes JvmMethodResult and returns nothing. Its operation ID is the method's, as in its
 //   `method/<op>` key, and it names the JVM's current stream like `chunk:report`. Core records the first result for
 //   each method and then removes its key. A repeat, or a result for a key core no longer sends, changes nothing.
+// - `chunk:move` takes JvmMove and returns JvmMoveResult. It asks core to move a player the JVM holds to another
+//   session, which the gateway holding the player's claim carries out like the operator's `chunk:move_player`, through
+//   the destination's admission policy. It names no stream. Its operation ID, which the JVM chooses in at most 128
+//   bytes, becomes the destination claim's. A retry finds the move queued while it's pending, and is refused as STALE
+//   once the player left the claim it named. The result's position is control's state after the call.
 
 // Arguments of `chunk:register`: who the JVM is, as its launch environment told it.
 message JvmRegistration {
@@ -189,6 +194,38 @@ enum JvmMethodPhase {
   JVM_METHOD_PHASE_CANCELLED = 2;
   // The method threw or returned an invalid result. It may have changed state.
   JVM_METHOD_PHASE_FAILED = 3;
+}
+
+// Arguments of `chunk:move`.
+message JvmMove {
+  // The player's delivery, as in its `delivery/<op>` key, and its generation. Core refuses the move as STALE unless
+  // the delivery is the player's current claim, arrived, with this generation and no move pending. A delivery another
+  // host serves is DENIED.
+  string delivery = 1;
+  Position generation = 2;
+  // Where to move the player, within their claim's release.
+  SessionDemand destination = 3;
+}
+
+// The result of `chunk:move`.
+message JvmMoveResult {
+  // Why core refused the move, which queued nothing. Unset once the move is queued, which doesn't mean the player
+  // arrives: the destination's hooks may still turn them away, as the operator's `players` topic records.
+  MoveRefusal refusal = 1;
+}
+
+// Why core refused to move a player.
+enum MoveRefusal {
+  MOVE_REFUSAL_UNSPECIFIED = 0;
+  // The player holds no claim.
+  MOVE_REFUSAL_OFFLINE = 1;
+  // The claim the move names is no longer the player's arrived claim, or the player is still arriving or already
+  // moving.
+  MOVE_REFUSAL_STALE = 2;
+  // The destination admits one session, and that session is full.
+  MOVE_REFUSAL_FULL = 3;
+  // The player's release declares no such destination.
+  MOVE_REFUSAL_UNKNOWN_DESTINATION = 4;
 }
 
 // A sample of the JVM's health.

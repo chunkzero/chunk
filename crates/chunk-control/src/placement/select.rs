@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use chunk_contract::MoveRefusal;
 use chunk_proto::control::v1::SessionDemand;
 
 use crate::{
@@ -7,14 +8,21 @@ use crate::{
     state::{HostState, Phase, SessionState, State},
 };
 
-pub(crate) fn validate_demand(release: &Release, demand: &SessionDemand) -> Result<()> {
+/// Refuses a move to `demand` that release `name` doesn't declare, or whose destination admits one session, which is full.
+pub(crate) fn admit_move(state: &State, name: &str, release: &Release, demand: &SessionDemand) -> Result<()> {
+    let unknown = || Error::Refused(MoveRefusal::UnknownDestination);
     if demand.key.is_empty() || demand.key.len() > 128 {
-        return Err(Error::Invalid("invalid destination key"));
+        return Err(unknown());
     }
-    let spec = release.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
-    let policy =
-        release.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
-    resolve_creation(release, demand, spec, policy).map(|_| ())
+    let spec = release.session_types.get(&demand.session_type).ok_or_else(unknown)?;
+    let policy = policy(release, demand);
+    let creation = resolve_creation(release, demand, spec, policy).map_err(|_| unknown())?;
+    if reuse_session(state, name, demand, &creation, &BTreeSet::new(), 1).is_none()
+        && single(state, name, demand, policy)
+    {
+        return Err(Error::Refused(MoveRefusal::Full));
+    }
+    Ok(())
 }
 
 /// Reuses a compatible session of release `name` with room, or creates one on a compatible host or a new host.
@@ -38,20 +46,12 @@ pub(crate) fn select_room(
     slots: usize,
 ) -> Result<String> {
     let spec = release.session_types.get(&demand.session_type).ok_or(Error::Invalid("unknown session type"))?;
-    let policy =
-        release.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key));
+    let policy = policy(release, demand);
     let creation = resolve_creation(release, demand, spec, policy)?;
     if let Some(id) = reuse_session(state, name, demand, &creation, unavailable, slots) {
         return Ok(id);
     }
-    if policy.is_some_and(|policy| policy.overflow == chunk_contract::DestinationOverflow::Reject)
-        && state.sessions.values().any(|session| {
-            !session.finished
-                && session.session_type == demand.session_type
-                && session.demand_key == demand.key
-                && state.hosts.get(&session.host).is_some_and(|host| host.release == name)
-        })
-    {
+    if single(state, name, demand, policy) {
         return Err(Error::Capacity);
     }
     if state.sessions.len() >= 256 || (creation.capacity as usize) < slots {
@@ -74,6 +74,26 @@ pub(crate) fn select_room(
         },
     );
     Ok(id)
+}
+
+fn policy<'a>(release: &'a Release, demand: &SessionDemand) -> Option<&'a chunk_contract::DestinationPolicy> {
+    release.contracts.destinations.as_ref().and_then(|policies| policies.policy(&demand.session_type, &demand.key))
+}
+
+/// Whether `demand`'s destination admits one session, and release `name` already runs it.
+fn single(
+    state: &State,
+    name: &str,
+    demand: &SessionDemand,
+    policy: Option<&chunk_contract::DestinationPolicy>,
+) -> bool {
+    policy.is_some_and(|policy| policy.overflow == chunk_contract::DestinationOverflow::Reject)
+        && state.sessions.values().any(|session| {
+            !session.finished
+                && session.session_type == demand.session_type
+                && session.demand_key == demand.key
+                && state.hosts.get(&session.host).is_some_and(|host| host.release == name)
+        })
 }
 
 fn reuse_session(
@@ -147,6 +167,9 @@ fn resolve_creation<'a>(
     spec: &'a crate::SessionType,
     policy: Option<&'a chunk_contract::DestinationPolicy>,
 ) -> Result<Creation<'a>> {
+    if policy.is_none() && release.contracts.destinations.is_some() {
+        return Err(Error::Invalid("undeclared destination"));
+    }
     let profile = policy.map_or(spec.machine_profile.as_str(), |policy| policy.destination.machine_profile.as_str());
     if (policy.is_some() || !demand.machine_profile.is_empty()) && demand.machine_profile != profile {
         return Err(Error::Invalid("destination profile mismatch"));

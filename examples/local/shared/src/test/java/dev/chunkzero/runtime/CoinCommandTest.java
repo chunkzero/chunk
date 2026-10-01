@@ -143,7 +143,8 @@ class CoinCommandTest {
                         };
                 connection.setClientState(ConnectionState.PLAY);
                 var player = new ManagedPlayer(connection, new GameProfile(uuid, "player"));
-                player.setBinding(JvmDelivery.newBuilder().setGeneration(at(generation)).build());
+                player.setBinding(
+                        "delivery", JvmDelivery.newBuilder().setGeneration(at(generation)).build());
                 var managed = manager.get(destination);
                 try {
                     await(ticks, managed.join(player));

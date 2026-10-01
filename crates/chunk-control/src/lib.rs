@@ -85,6 +85,9 @@ pub const MOVE_NAMES_CLAIM: &str = "move operation already names a claim";
 /// Control's reply to an operator's operation ID first used for another method or other arguments.
 pub const OPERATOR_CALL_CHANGED: &str = "operator operation first used for another call";
 
+/// Control's reply to a JVM's move of a player whose claim another host serves.
+pub const NOT_HOSTED: &str = "the player's claim is not on this host";
+
 /// The environment one control authority serves.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -297,6 +300,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub enum Error {
     #[error("invalid control request: {0}")]
     Invalid(&'static str),
+    #[error("move refused: {0:?}")]
+    Refused(chunk_contract::MoveRefusal),
     #[error("ownership or provisioning remains unresolved: {0}")]
     Unresolved(&'static str),
     #[error("local control capacity reached")]

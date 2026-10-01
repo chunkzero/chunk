@@ -1,5 +1,5 @@
-//! A JVM's registration, reports and method results, `chunk:register`, `chunk:report` and `chunk:method_result`, which
-//! control applies. The JVM's host comes from its credential.
+//! A JVM's registration, reports, method results and moves, `chunk:register`, `chunk:report`, `chunk:method_result`
+//! and `chunk:move`, which control applies. The JVM's host comes from its credential.
 
 use super::{
     super::{
@@ -10,8 +10,12 @@ use super::{
     decode,
 };
 use chunk_js::DeploymentId;
-use chunk_proto::sync::v1::{
-    CallRequest, Error, JvmMethodResult, JvmRegistered, JvmRegistration, JvmReport, Position, error::Code,
+use chunk_proto::{
+    control::v1::SessionDemand,
+    sync::v1::{
+        CallRequest, Error, JvmMethodResult, JvmMove, JvmMoveResult, JvmRegistered, JvmRegistration, JvmReport,
+        MoveRefusal, Position, error::Code,
+    },
 };
 use chunk_store::Revision;
 use prost::Message;
@@ -22,6 +26,7 @@ pub(super) enum Method {
     Register,
     Report,
     Result,
+    Move,
 }
 
 impl Method {
@@ -30,12 +35,14 @@ impl Method {
             "register" => Self::Register,
             "report" => Self::Report,
             "method_result" => Self::Result,
+            "move" => Self::Move,
             _ => return None,
         })
     }
 }
 
-/// Runs `method` for the JVM `principal` names, returning its encoded result and control's position after a report.
+/// Runs `method` for the JVM `principal` names, returning its encoded result and control's position after a report or
+/// move.
 pub(super) async fn call(
     service: &SyncService,
     principal: &Principal,
@@ -91,8 +98,42 @@ pub(super) async fn call(
             recorded.map_err(|failure| errors::operation(&failure))?;
             Ok((None, Vec::new()))
         }
+        Method::Move => {
+            if !request.stream.is_empty() {
+                return Err(errors::invalid("chunk:move names no stream"));
+            }
+            if request.operation_id.is_empty() || request.operation_id.len() > MOVE_OPERATION_BYTES {
+                return Err(errors::invalid("chunk:move requires an operation ID of at most 128 bytes"));
+            }
+            app::reject_reserved(&request.operation_id)?;
+            let JvmMove { delivery, generation, destination } = decode(&request.arguments)?;
+            let generation = generation.ok_or_else(|| errors::invalid("chunk:move names the delivery's generation"))?;
+            let generation = chunk_control::Generation { epoch: generation.epoch, revision: generation.revision };
+            let destination = destination.ok_or_else(|| errors::invalid("chunk:move names a destination"))?;
+            let demand = SessionDemand {
+                key: destination.key,
+                session_type: destination.session_type,
+                machine_profile: destination.machine_profile,
+            };
+            let (control, operation) = (service.control.clone(), request.operation_id.clone());
+            let moved = service
+                .operations
+                .admit(async move { control.move_hosted(&host, &operation, &delivery, generation, demand) })
+                .await;
+            let refusal = match moved {
+                Ok(()) => MoveRefusal::Unspecified,
+                Err(chunk_control::Error::Refused(refusal)) => super::super::moves::refusal(refusal),
+                Err(failure) => return Err(errors::operation(&failure)),
+            };
+            let generation = *service.control.subscribe().borrow();
+            let result = JvmMoveResult { refusal: refusal.into() }.encode_to_vec();
+            Ok((position(generation.epoch, Revision(generation.revision)), result))
+        }
     }
 }
+
+/// Moves name control's destination claims, whose operation IDs are at most 128 bytes.
+const MOVE_OPERATION_BYTES: usize = 128;
 
 /// Requires a player endpoint with a port that gateways may dial: a JVM connecting from another machine names the
 /// address it connects from, and one connecting over loopback runs on core's machine, so it names loopback or that

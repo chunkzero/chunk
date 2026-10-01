@@ -16,6 +16,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("command-effects.ts", include_str!("../sdk/src/command-effects.ts")),
     ("hooks.ts", include_str!("../sdk/src/hooks.ts")),
     ("jobs.ts", include_str!("../sdk/src/jobs.ts")),
+    ("routing.ts", include_str!("../sdk/src/routing.ts")),
     ("functions.ts", include_str!("../sdk/src/functions.ts")),
     ("sessions.ts", include_str!("../sdk/src/sessions.ts")),
     ("validators.ts", include_str!("../sdk/src/validators.ts")),

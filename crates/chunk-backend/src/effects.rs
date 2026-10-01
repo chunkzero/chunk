@@ -126,6 +126,7 @@ impl ActionGrants {
 pub struct ActionEffects {
     environment: String,
     grants: BTreeMap<DeploymentId, Arc<ActionGrants>>,
+    pub(crate) moves: crate::moves::Slot,
 }
 
 impl ActionEffects {
@@ -136,7 +137,7 @@ impl ActionEffects {
         if environment.is_empty() || environment.len() > 128 {
             return Err(Error::Invalid("effect environment"));
         }
-        Ok(Self { environment, grants: BTreeMap::new() })
+        Ok(Self { environment, grants: BTreeMap::new(), moves: Arc::default() })
     }
 
     /// # Errors

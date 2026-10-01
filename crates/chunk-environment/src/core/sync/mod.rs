@@ -6,6 +6,7 @@ mod auth;
 mod caller;
 mod errors;
 mod liveness;
+mod moves;
 mod platform;
 mod runs;
 mod streams;
@@ -52,6 +53,7 @@ pub(crate) fn services(
     private_address: Option<IpAddr>,
 ) -> chunk_control::server::Services {
     Box::new(move |control, token, stop, operations| {
+        backend.serve_moves(Arc::new(moves::ActionMoves(Arc::downgrade(control))));
         let service = SyncService {
             credentials: Arc::new(auth::Credentials {
                 gateways: gateways.clone(),

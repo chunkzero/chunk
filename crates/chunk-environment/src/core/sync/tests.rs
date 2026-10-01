@@ -5,6 +5,7 @@ mod hooks;
 mod jvm;
 mod jvm_effects;
 mod jvm_methods;
+mod moves;
 mod network;
 mod operator;
 mod ownership;
@@ -81,6 +82,11 @@ export async function say(ctx, {arguments: {text}}) {
   return null;
 }
 export function follow(ctx, input) { return say(ctx, input); }
+export async function relocate(ctx, key) {
+  const destination = {key, session_type: 'bridge/default', machine_profile: 'small'};
+  const moved = await ctx.platform({kind: 'move', player: '00000000-0000-0000-0000-000000000001', destination});
+  return moved.state === 'accepted' ? moved.operationId : moved.reason;
+}
 ";
 const LOGIN: &str = "shared/domains/hooks/login";
 const SAY: &str = "scopes/commands/say";
@@ -109,6 +115,7 @@ fn deployment() -> Deployment {
         ("slow", function(FunctionKind::Action, Schema::Integer)),
         ("nap", function(FunctionKind::Action, Schema::Integer)),
         ("fill", Function { result: Schema::String, ..function(FunctionKind::Action, Schema::String) }),
+        ("relocate", Function { result: Schema::String, ..function(FunctionKind::Action, Schema::String) }),
         (
             "choices",
             Function {

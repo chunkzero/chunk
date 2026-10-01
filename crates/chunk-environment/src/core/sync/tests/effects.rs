@@ -10,7 +10,7 @@ impl Fixture {
         self.client.call(authorized(message, credential)).await.unwrap().into_inner()
     }
 
-    async fn prepare(&mut self, credential: &str) -> String {
+    pub(super) async fn prepare(&mut self, credential: &str) -> String {
         match self.platform_call(credential, "chunk:prepare", "").await.outcome {
             Some(Outcome::Result(result)) => PrepareResult::decode(result.as_slice()).unwrap().operation_id,
             outcome => panic!("expected an operation ID, got {outcome:?}"),

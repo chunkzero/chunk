@@ -51,6 +51,7 @@ public final class SessionManager {
 
     private Function<String, CompletionStage<Void>> withdraw =
             ignored -> CompletableFuture.completedFuture(null);
+    private SessionScope.Mover mover = SessionScope.Mover.UNAVAILABLE;
 
     SessionManager(
             ServerProcess process, TickExecutor ticks, Map<String, Supplier<Session>> factories) {
@@ -105,6 +106,10 @@ public final class SessionManager {
 
     public void setWithdraw(Function<String, CompletionStage<Void>> withdraw) {
         this.withdraw = withdraw;
+    }
+
+    void setMover(SessionScope.Mover mover) {
+        this.mover = mover;
     }
 
     /**
@@ -289,7 +294,9 @@ public final class SessionManager {
                             ticks,
                             this::finish,
                             registration.backend(id, backend),
-                            components);
+                            components,
+                            (delivery, generation, destination) ->
+                                    mover.move(delivery, generation, destination));
         }
 
         public String getSessionType() {

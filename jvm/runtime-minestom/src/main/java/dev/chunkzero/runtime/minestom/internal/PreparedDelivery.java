@@ -97,7 +97,7 @@ final class PreparedDelivery {
             throw new IllegalStateException("Delivery closed");
         if (session.getPhase() != JvmSessionPhase.JVM_SESSION_PHASE_READY)
             throw new IllegalStateException("Session unavailable");
-        current.setBinding(delivery);
+        current.setBinding(operation, delivery);
         player = current;
         return session.getScope().getInstances().getFirst();
     }

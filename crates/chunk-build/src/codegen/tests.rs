@@ -212,6 +212,13 @@ fn session_configuration_providers_are_scoped_to_their_app_and_detect_java_colli
     assert!(provider.contains("return SessionConfigs.Duels.Default.TYPE;"));
     let models = fs::read_to_string(output.join("java/example/SessionConfigs.java")).unwrap();
     assert!(!models.contains("dev.chunkzero.runtime"));
+    let destinations = fs::read_to_string(output.join("java/example/Destinations.java")).unwrap();
+    assert!(destinations.contains(
+        "public static final class Lobby {\nprivate Lobby() {}\npublic static final dev.chunkzero.backend.api.Destination main = new dev.chunkzero.backend.api.Destination(\"main\", \"lobby/default\", \"small\");"
+    ));
+    // An app's class may be named `Destination`, so generated code never names the API type unqualified.
+    assert!(destinations.contains("public static final class Destination {"));
+    assert!(!destinations.contains(" Destination main") && !destinations.contains("new Destination("));
     let mut contract: serde_json::Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
     let mut other = contract["session_configurations"]["configurations"][0].clone();
     other["session"] = json!("some_name");

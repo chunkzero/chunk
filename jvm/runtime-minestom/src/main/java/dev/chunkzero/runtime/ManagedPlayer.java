@@ -14,6 +14,7 @@ import java.util.concurrent.CompletableFuture;
 
 @ApiStatus.Internal
 public final class ManagedPlayer extends Player {
+    private @Nullable String operation;
     private @Nullable JvmDelivery binding;
     private @Nullable CompletableFuture<Void> initialization;
 
@@ -26,7 +27,15 @@ public final class ManagedPlayer extends Player {
         return binding;
     }
 
-    public void setBinding(JvmDelivery binding) {
+    /** The delivery's operation ID, as in its {@code delivery/<op>} key. */
+    String getOperation() {
+        if (operation == null)
+            throw new IllegalStateException("Player delivery has not been bound");
+        return operation;
+    }
+
+    public void setBinding(String operation, JvmDelivery binding) {
+        this.operation = Objects.requireNonNull(operation);
         this.binding = Objects.requireNonNull(binding);
     }
 
