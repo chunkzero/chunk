@@ -480,3 +480,12 @@ fn text_encoding_and_cloning_share_the_aggregate_buffer_budget() {
         assert_eq!(value(&call(&mut engine).unwrap()), json!(42));
     }
 }
+
+#[test]
+fn structured_clone_rejects_host_object_brands_without_aborting() {
+    let execution =
+        run(r#"try { structuredClone({ [Symbol.for("Deno.core.hostObject")]() { return { type: "missing" }; } }); }
+        catch (error) { return error.name; }"#)
+        .unwrap();
+    assert_eq!(value(&execution), json!("DataCloneError"));
+}

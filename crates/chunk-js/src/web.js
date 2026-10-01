@@ -4,11 +4,128 @@
   const encoding = core.loadExtScript("ext:deno_web/08_text_encoding.js");
   const url = core.loadExtScript("ext:deno_web/00_url.js");
   const base64 = core.loadExtScript("ext:deno_web/05_base64.js");
-  const clone = core.structuredClone;
+  const { DOMException } = core.loadExtScript("ext:deno_web/01_dom_exception.js");
   const random = core.ops.op_chunk_random;
   const log = core.ops.op_chunk_log;
   const digest = core.ops.op_chunk_digest;
   const Uint8 = Uint8Array;
+  // A JavaScript clone, since V8's serializer runs host-object hooks keyed by
+  // the global Symbol.for("Deno.core.hostObject") brand.
+  const clone = (() => {
+    const uncurry = (fn) => Function.prototype.call.bind(fn);
+    const getter = (prototype, name) => uncurry(Object.getOwnPropertyDescriptor(prototype, name).get);
+    const { defineProperty, getPrototypeOf, ownKeys } = Reflect;
+    const { isArray } = Array;
+    const [NativeMap, NativeSet, NativeDate, NativeRegExp, NativeArrayBuffer] = [Map, Set, Date, RegExp, ArrayBuffer];
+    const mapGet = uncurry(Map.prototype.get);
+    const mapSet = uncurry(Map.prototype.set);
+    const mapHas = uncurry(Map.prototype.has);
+    const mapEach = uncurry(Map.prototype.forEach);
+    const mapSize = getter(Map.prototype, "size");
+    const setAdd = uncurry(Set.prototype.add);
+    const setEach = uncurry(Set.prototype.forEach);
+    const setSize = getter(Set.prototype, "size");
+    const push = uncurry(Array.prototype.push);
+    const time = uncurry(Date.prototype.getTime);
+    const source = getter(RegExp.prototype, "source");
+    const bufferLength = getter(ArrayBuffer.prototype, "byteLength");
+    const TypedArray = getPrototypeOf(Uint8).prototype;
+    const viewName = getter(TypedArray, Symbol.toStringTag);
+    const viewBuffer = getter(TypedArray, "buffer");
+    const viewOffset = getter(TypedArray, "byteOffset");
+    const viewLength = getter(TypedArray, "length");
+    const viewSet = uncurry(TypedArray.set);
+    const enumerable = uncurry(Object.prototype.propertyIsEnumerable);
+    const ObjectPrototype = Object.prototype;
+    const views = { __proto__: null };
+    for (const View of [
+      Int8Array,
+      Uint8Array,
+      Uint8ClampedArray,
+      Int16Array,
+      Uint16Array,
+      Int32Array,
+      Uint32Array,
+      Float16Array,
+      Float32Array,
+      Float64Array,
+      BigInt64Array,
+      BigUint64Array,
+    ])
+      views[View.name] = View;
+    const fail = (kind) => {
+      throw new DOMException(`${kind} could not be cloned`, "DataCloneError");
+    };
+    const branded = (check, value) => {
+      try {
+        check(value);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const copy = (value, memory) => {
+      if (typeof value === "function") fail("Function");
+      if (typeof value === "symbol") fail("Symbol");
+      if (typeof value !== "object" || value === null) return value;
+      if (mapHas(memory, value)) return mapGet(memory, value);
+      const remember = (result) => {
+        mapSet(memory, value, result);
+        return result;
+      };
+      const array = isArray(value);
+      const prototype = getPrototypeOf(value);
+      if (array || prototype === ObjectPrototype || prototype === null) {
+        const result = remember(array ? [] : {});
+        if (array) result.length = value.length;
+        const keys = ownKeys(value);
+        for (let i = 0; i < keys.length; i++) {
+          const key = keys[i];
+          if (typeof key === "symbol") fail("Symbol-keyed property");
+          if (enumerable(value, key)) {
+            const item = copy(value[key], memory);
+            defineProperty(result, key, {
+              __proto__: null,
+              value: item,
+              writable: true,
+              enumerable: true,
+              configurable: true,
+            });
+          }
+        }
+        return result;
+      }
+      const name = viewName(value);
+      if (name !== undefined) {
+        const buffer = copy(viewBuffer(value), memory);
+        return remember(new views[name](buffer, viewOffset(value), viewLength(value)));
+      }
+      if (branded(time, value)) return remember(new NativeDate(time(value)));
+      if (branded(source, value)) return remember(new NativeRegExp(value));
+      if (branded(bufferLength, value)) {
+        const result = new NativeArrayBuffer(bufferLength(value));
+        viewSet(new Uint8(result), new Uint8(value));
+        return remember(result);
+      }
+      if (branded(mapSize, value)) {
+        const result = remember(new NativeMap());
+        const entries = [];
+        mapEach(value, (item, key) => push(entries, key, item));
+        for (let i = 0; i < entries.length; i += 2)
+          mapSet(result, copy(entries[i], memory), copy(entries[i + 1], memory));
+        return result;
+      }
+      if (branded(setSize, value)) {
+        const result = remember(new NativeSet());
+        const items = [];
+        setEach(value, (item) => push(items, item));
+        for (let i = 0; i < items.length; i++) setAdd(result, copy(items[i], memory));
+        return result;
+      }
+      return fail("Object");
+    };
+    return (value) => copy(value, new NativeMap());
+  })();
   const encoder = new encoding.TextEncoder();
   const encodeInto = encoder.encodeInto.bind(encoder);
   class TextEncoder {
