@@ -22,6 +22,8 @@ pub(crate) struct Source {
     pub limits: Limits,
     /// What `ctx.env` reads.
     pub env: chunk_js::Json,
+    /// Redacts what queries log.
+    pub secrets: crate::effects::SecretSlot,
 }
 
 pub(crate) enum Ticket {
@@ -188,7 +190,12 @@ fn run(engine: &mut Engine, loaded: &mut BTreeSet<DeploymentId>, read: &Read) ->
         loaded.insert(deployment.clone());
     }
     let timer = Timer::start();
-    let target = Target { call: &read.call, function: read.function.as_ref(), contract: read.contract.clone() };
+    let target = Target {
+        call: &read.call,
+        function: read.function.as_ref(),
+        contract: read.contract.clone(),
+        secrets: &read.source.secrets,
+    };
     let (result, reads) = evaluate(engine, target, Mode::Query, read.view.clone(), &read.cancellation, None);
     timer.stop(match read.ticket {
         Ticket::Query { .. } => Phase::Query,

@@ -35,7 +35,9 @@ impl Actor {
         }
         let env = self.actions.effects.env(deployment);
         self.js.register_with_env(id.clone(), deployment.source.clone(), Limits::default(), env.clone())?;
-        let source = super::readers::Source { code: deployment.source.clone(), limits: Limits::default(), env };
+        let secrets = self.actions.effects.secrets.clone();
+        let source =
+            super::readers::Source { code: deployment.source.clone(), limits: Limits::default(), env, secrets };
         self.sources.insert(id.clone(), Arc::new(source));
         if let Err(error) = self.send(Job::Activate { deployment: deployment.clone() }) {
             self.sources.remove(&id);

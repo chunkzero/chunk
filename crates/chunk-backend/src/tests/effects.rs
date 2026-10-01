@@ -123,10 +123,14 @@ export async function leak(ctx) { throw Error(ctx.env.TOKEN); }
 export async function held(ctx) { const token=ctx.env.TOKEN; await ctx.sleep(300); return String(token)+':'+String(ctx.env.TOKEN); }
 export async function env(ctx) { return JSON.stringify(ctx.env); }
 export function pure(ctx) { return typeof ctx.fetch+':'+JSON.stringify(ctx.env)+':'+typeof fetch; }
+export function echo(ctx,args) { console.log('echoed', args.url); return 'echoed'; }
+export async function logs(ctx) { console.log({body:JSON.stringify({token:ctx.env.TOKEN})}); return ctx.runQuery('echo',{url:ctx.env.TOKEN}); }
+export function later(ctx,args) { return ctx.scheduler.runAt(Date.now()+200,'env',null); }
 ".into(),
-        functions:["run","credential","fanout","leak","held","env","pure"].into_iter().map(|name| (name.into(),Function {
-            kind:if name=="pure" {FunctionKind::Query} else {FunctionKind::Action},visibility:Visibility::Public,export:name.into(),
-            arguments:if matches!(name, "run" | "credential" | "fanout") {Schema::Object { fields:fields.clone() }} else {Schema::Null},result:Schema::String,
+        functions:["run","credential","fanout","leak","held","env","pure","echo","logs","later"].into_iter().map(|name| (name.into(),Function {
+            kind:match name { "pure" | "echo" => FunctionKind::Query, "later" => FunctionKind::Mutation, _ => FunctionKind::Action },
+            visibility:Visibility::Public,export:name.into(),
+            arguments:if matches!(name, "run" | "credential" | "fanout" | "echo") {Schema::Object { fields:fields.clone() }} else {Schema::Null},result:Schema::String,
         })).collect(),
     }
 }
@@ -224,6 +228,76 @@ async fn env_holds_vars_everywhere_and_secrets_in_actions_only() {
     assert!(Backend::with_action_effects("test".into(), Box::new(store), effects).is_err());
     drop(backend);
     fixture.close().await;
+}
+
+/// What every test in this process has logged through `console`.
+fn console_logs() -> String {
+    static LOGS: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    let logs = LOGS.get_or_init(|| {
+        let logs = std::sync::Arc::<std::sync::Mutex<Vec<u8>>>::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || Capture(writer.clone()))
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+        logs
+    });
+    String::from_utf8_lossy(&logs.lock().unwrap()).into_owned()
+}
+struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for Capture {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buffer);
+        Ok(buffer.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn logs_redact_secrets_inside_nested_json_and_nested_calls() {
+    console_logs();
+    let directory = tempfile::tempdir().unwrap();
+    let backend = configured(&directory, ACTION_BYTES);
+    backend.set_secrets(secrets("nested\nredaction-secret"));
+    backend.deploy(deployment("allowed")).await.unwrap();
+    assert_eq!(&*finish(&backend, call("allowed", "logs", json!(null))).await.unwrap(), r#""echoed""#);
+    let logs = console_logs();
+    assert!(logs.contains("function=\"echo\""), "{logs}");
+    assert!(!logs.contains("redaction-secret"), "{logs}");
+    drop(backend);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restored_jobs_read_the_secrets_installed_at_startup() {
+    let directory = tempfile::tempdir().unwrap();
+    let open = |secrets: crate::Secrets| {
+        let effects = ActionEffects::new("test".into()).unwrap().with_secrets(secrets);
+        let store = SqliteStore::open(directory.path().join("jobs.db"), "test").unwrap();
+        Backend::with_action_bytes("test".into(), Box::new(store), effects, ACTION_BYTES).unwrap()
+    };
+    let first = open(crate::Secrets::default());
+    first.deploy(deployment("allowed")).await.unwrap();
+    let scheduled = first.mutate("later".into(), call("allowed", "later", json!(null))).await.unwrap();
+    let id: String = serde_json::from_str(&scheduled.json).unwrap();
+    drop(first);
+    let restored = open(secrets("restored-secret"));
+    let job = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let job = restored.job(id.clone(), json!({"player":"alice"}).into()).await.unwrap();
+            if job.state == chunk_store::JobState::Succeeded {
+                return job;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(job.result.unwrap().to_string().contains("restored-secret"));
+    drop(restored);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

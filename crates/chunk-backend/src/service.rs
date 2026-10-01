@@ -355,7 +355,7 @@ impl Backend {
         let backend = Self(Arc::new(Owner {
             environment: "test".into(),
             moves: Arc::default(),
-            secrets: Arc::default(),
+            secrets: crate::effects::SecretSlot::default(),
             events,
             memory: memory.clone(),
             send: SendBudget::new(send_bytes()),
@@ -472,7 +472,7 @@ impl Backend {
     /// Replaces the environment's secrets. Actions and commands that start afterwards read `secrets` in `ctx.env`;
     /// running ones keep the secrets they started with.
     pub fn set_secrets(&self, secrets: crate::Secrets) {
-        *self.0.secrets.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(secrets);
+        self.0.secrets.set(secrets);
     }
 
     /// Stops admitting requests, drains accepted commits and joins both threads,
