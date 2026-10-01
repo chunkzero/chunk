@@ -12,27 +12,30 @@ covers the packaged SDK.
 
 ## Commands
 
-| Command                            | What it does                                                                                |
-| ---------------------------------- | ------------------------------------------------------------------------------------------- |
-| `chunk create DIR`                 | Creates a project with one `lobby` app. `--language java` or `kotlin` (the default).        |
-| `chunk codegen [PROJECT]`          | Writes the schema-aware TypeScript SDK into `PROJECT/.chunk/` for editors, without a build. |
-| `chunk build [PROJECT]`            | Builds the backend and every app into a release, `dist/<release id>.tar.gz`.                |
-| `chunk dev [PROJECT]`              | Builds the project and runs it locally, rebuilding on change. `chunk local` is an alias.    |
-| `chunk clean [PROJECT]`            | Deletes `dist/` and `.chunk/` output, keeping `chunk dev` backend data unless `--data`.     |
-| `chunk gen [PROJECT] --target T`   | Compiles the backend and generates a `java`, `kotlin` or `typescript` client for it.        |
-| `chunk inspect [PROJECT]`          | Prints the project and app manifests as JSON, without building.                             |
-| `chunk players --player UUID ...`  | Moves a player to another session, or drains the JVM they are on, in a running `chunk dev`. |
-| `chunk nodes ...`                  | Lists the JVMs of a running `chunk dev` as JSON, or shuts one down.                         |
-| `chunk auth login`, `chunk login`  | Logs in to a platform, approving the login in its dashboard.                                |
-| `chunk auth status`                | Shows the platform and who you are logged in as.                                            |
-| `chunk auth logout`                | Revokes the CLI's token and forgets it.                                                     |
-| `chunk projects [create NAME]`     | Lists the platform's projects, or creates one.                                              |
-| `chunk environments [create NAME]` | Lists a project's environments with their state and join address, or creates one.           |
-| `chunk environments delete E`      | Deletes an environment, destroying its machines and data.                                   |
-| `chunk deploy [PROJECT] --env E`   | Builds the project, uploads and deploys its release, and waits until it is active.          |
-| `chunk deployments --env E`        | Lists an environment's recent deployments, newest first.                                    |
-| `chunk apps --env E`               | Lists the apps and session types the environment's active release runs.                     |
-| `chunk logs --env E`               | Prints an environment's logs; `--follow` keeps printing new ones.                           |
+| Command                             | What it does                                                                                |
+| ----------------------------------- | ------------------------------------------------------------------------------------------- |
+| `chunk create DIR`                  | Creates a project with one `lobby` app. `--language java` or `kotlin` (the default).        |
+| `chunk codegen [PROJECT]`           | Writes the schema-aware TypeScript SDK into `PROJECT/.chunk/` for editors, without a build. |
+| `chunk build [PROJECT]`             | Builds the backend and every app into a release, `dist/<release id>.tar.gz`.                |
+| `chunk dev [PROJECT]`               | Builds the project and runs it locally, rebuilding on change. `chunk local` is an alias.    |
+| `chunk clean [PROJECT]`             | Deletes `dist/` and `.chunk/` output, keeping `chunk dev` backend data unless `--data`.     |
+| `chunk gen [PROJECT] --target T`    | Compiles the backend and generates a `java`, `kotlin` or `typescript` client for it.        |
+| `chunk inspect [PROJECT]`           | Prints the project and app manifests as JSON, without building.                             |
+| `chunk players --player UUID ...`   | Moves a player to another session, or drains the JVM they are on, in a running `chunk dev`. |
+| `chunk nodes ...`                   | Lists the JVMs of a running `chunk dev` as JSON, or shuts one down.                         |
+| `chunk auth login`, `chunk login`   | Logs in to a platform, approving the login in its dashboard.                                |
+| `chunk auth status`                 | Shows the platform and who you are logged in as.                                            |
+| `chunk auth logout`                 | Revokes the CLI's token and forgets it.                                                     |
+| `chunk projects [create NAME]`      | Lists the platform's projects, or creates one.                                              |
+| `chunk environments [create NAME]`  | Lists a project's environments with their state and join address, or creates one.           |
+| `chunk environments delete E`       | Deletes an environment, destroying its machines and data.                                   |
+| `chunk deploy [PROJECT] --env E`    | Builds the project, uploads and deploys its release, and waits until it is active.          |
+| `chunk deployments --env E`         | Lists an environment's recent deployments, newest first.                                    |
+| `chunk apps --env E`                | Lists the apps and session types the environment's active release runs.                     |
+| `chunk logs --env E`                | Prints an environment's logs; `--follow` keeps printing new ones.                           |
+| `chunk secrets put NAME --env E`    | Sets a secret from a hidden prompt, or from stdin without a terminal.                       |
+| `chunk secrets list --env E`        | Lists an environment's secret names and versions, never their values.                       |
+| `chunk secrets delete NAME --env E` | Deletes a secret.                                                                           |
 
 `PROJECT` defaults to the current directory. The commands that take `PROJECT`, except `create` and `codegen`, need its
 `chunk.toml`. The commands from `auth` down call a platform's management API.
@@ -139,7 +142,7 @@ Two variables override the saved login, for scripts and CI. `CHUNK_API_URL` sele
 saved token unless it is the saved platform's. `CHUNK_TOKEN` is the token to use instead, sent to `CHUNK_API_URL` or
 else the saved platform; `chunk auth logout` never revokes it.
 
-### `deploy`, `projects`, `environments`, `deployments`, `apps` and `logs`
+### `deploy`, `projects`, `environments`, `deployments`, `apps`, `logs` and `secrets`
 
 ```sh
 chunk projects create my-server
@@ -155,7 +158,8 @@ hyphens, starting and ending with a letter or digit.
 `chunk deploy` builds the project as `chunk build` does, uploads the release unless the project already holds it,
 deploys it, and follows the deployment until it is active, then prints where players join. It fails if the deployment
 fails or a later one supersedes it first. Ctrl-C stops waiting but not the deployment; `chunk deployments` shows how it
-ends (`--limit`, default 20, lists up to 200).
+ends (`--limit`, default 20, lists up to 200). Before uploading, it warns about secrets `chunk.toml` requires that the
+environment has no value for.
 
 `chunk environments delete NAME_OR_ID` asks for confirmation on a terminal, and needs `--yes` without one, since it
 destroys the environment's machines and data. Deleting finishes in the background; `--wait` polls until the platform
@@ -164,6 +168,13 @@ reports the environment gone, for up to five minutes, and Ctrl-C stops waiting b
 `chunk logs` prints the most recent entries (`--limit`, default 200), and with `--follow` keeps printing new ones;
 `--app ID` keeps only that app's JVM entries. A self-hosted install has none to show yet, since its environments don't
 send their logs to management.
+
+`chunk secrets put NAME --env E` sets a secret's value, which backend actions read through `ctx.env.NAME`. It reads the
+value from a hidden prompt on a terminal, or else from stdin without its final line break, as in
+`printf %s "$TOKEN" | chunk secrets put API_TOKEN --env prod`. Each change is a new version, and running deployments
+receive it without a redeploy. Values are non-empty UTF-8 up to 64 KiB, and an environment holds up to 256 secrets.
+`chunk secrets list` shows names and versions only; no command prints a value. `chunk secrets delete NAME` asks for
+confirmation on a terminal and needs `--yes` without one.
 
 ## Testing
 

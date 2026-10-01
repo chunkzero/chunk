@@ -14,6 +14,7 @@ mod deploy;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod keychain;
 mod resources;
+mod secrets;
 
 use auth::{Auth, Login};
 use config::Target;
@@ -40,6 +41,8 @@ pub(crate) enum Command {
     Apps(resources::Apps),
     /// Print an environment's logs.
     Logs(resources::Logs),
+    /// Set, list or delete an environment's secrets.
+    Secrets(secrets::Secrets),
 }
 
 pub(crate) async fn run(command: Command) -> io::Result<()> {
@@ -52,6 +55,7 @@ pub(crate) async fn run(command: Command) -> io::Result<()> {
         Command::Deployments(options) => resources::deployments(options).await,
         Command::Apps(options) => resources::apps(options).await,
         Command::Logs(options) => resources::logs(options).await,
+        Command::Secrets(options) => secrets::run(options).await,
     }
 }
 
