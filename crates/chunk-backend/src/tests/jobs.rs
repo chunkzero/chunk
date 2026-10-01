@@ -302,3 +302,36 @@ async fn retiring_a_deployment_frees_its_slot_despite_a_scheduled_job_and_a_subs
     assert!(backend.query(call("old", "read", "alice", json!(null))).await.is_err());
     backend.deploy(deployment("next", 1)).await.unwrap();
 }
+
+#[tokio::test]
+async fn a_restart_after_the_retirement_committed_never_runs_the_deployments_due_job() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = backend(&directory);
+    first.deploy(deployment("old", 1)).await.unwrap();
+    drop(first);
+    // Work admitted before the fence schedules a job after the retirement committed.
+    let mut store = SqliteStore::open(directory.path().join("jobs.db"), "jobs").unwrap();
+    store.job_command(chunk_store::JobCommand::CancelDeployment { deployment: "old".into() }).unwrap();
+    let late = Job {
+        id: "late".into(),
+        deployment: "old".into(),
+        function: "flow".into(),
+        arguments: json!(0),
+        caller: json!({"player":"alice"}),
+        due_at: now(),
+        attempt: 1,
+        state: JobState::Pending,
+        result: None,
+    };
+    let operation = chunk_store::Operation { id: "late".into(), fingerprint: [0; 32] };
+    let expected = store.snapshot().unwrap().revision;
+    let commit = chunk_store::Commit { expected, operation, writes: vec![], result: json!(null) };
+    store.commit_with_jobs(commit, vec![chunk_store::JobIntent::Schedule(late)]).unwrap();
+    drop(store);
+    let restarted = backend(&directory);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(job(&restarted, "late").await.state, JobState::Pending);
+    assert!(matches!(restarted.query(call("old", "read", "alice", json!(null))).await, Err(Error::Retired)));
+    assert!(restarted.retire(DeploymentId::new("old").unwrap()).await.unwrap());
+    assert_eq!(job(&restarted, "late").await.state, JobState::Cancelled);
+}

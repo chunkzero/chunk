@@ -4,7 +4,7 @@ use chunk_proto::control::v1::{ClaimIdentity, ClaimPhase, ClaimRequest};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{Error, Release, Result};
 
@@ -74,6 +74,9 @@ pub(crate) struct Meta {
     /// The release new placements use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current: Option<String>,
+    /// The deployments asked to stop at once, rather than drain.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub stopping: BTreeSet<String>,
 }
 
 impl Stamp for Meta {

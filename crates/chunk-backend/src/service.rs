@@ -653,24 +653,24 @@ impl Backend {
     }
 
     /// Retires `id`: refuses its new calls, reads and subscriptions with [`Error::Retired`], closes its subscriptions,
-    /// cancels its jobs, waits for its running mutations and actions, then releases its version. Returns whether it was
-    /// resident.
+    /// cancels its jobs and durably records it as retiring in the same commit, so a restart keeps refusing its work and
+    /// never runs its jobs, waits for its running mutations and actions, then releases its version. Returns whether it
+    /// was resident.
     /// # Errors
     /// Reports an unavailable service or a failure to release.
     pub async fn retire(&self, id: DeploymentId) -> Result<bool> {
         self.submit(|reply| Command::Fence { id: id.clone(), reply }).await?;
         loop {
-            match self.release(id.clone()).await {
-                Err(Error::Busy) => {
-                    // Work admitted before the fence may have scheduled more jobs.
-                    match self.cancel_deployment_jobs(id.clone()).await {
-                        Ok(()) | Err(Error::Busy) => {}
-                        Err(error) => return Err(error),
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                result => return result,
+            // Work admitted before the fence may schedule more jobs until it finishes.
+            match self.cancel_deployment_jobs(id.clone()).await {
+                Ok(()) => match self.release(id.clone()).await {
+                    Err(Error::Busy) => {}
+                    result => return result,
+                },
+                Err(Error::Busy) => {}
+                Err(error) => return Err(error),
             }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 

@@ -11,7 +11,8 @@ use chunk_proto::{
     control::v1 as control,
     sync::v1::{
         AbandonMoveArguments, ActivateResult, CallRequest, ClaimArguments, ClaimAssignment, ClaimRefusal, ClaimResult,
-        DepartResult, Error, GatewayLogin, Position, SessionDemand, WithdrawResult, claim_result::Outcome, error::Code,
+        DepartResult, Error, GatewayLogin, Position, ReservationResult, SessionDemand, WithdrawResult,
+        claim_result::Outcome, error::Code,
     },
 };
 use prost::Message;
@@ -23,6 +24,7 @@ pub(super) enum Method {
     Withdraw,
     AbandonMove,
     Depart,
+    Reservation,
 }
 
 impl Method {
@@ -33,6 +35,7 @@ impl Method {
             "withdraw" => Self::Withdraw,
             "abandon_move" => Self::AbandonMove,
             "depart" => Self::Depart,
+            "reservation" => Self::Reservation,
             _ => return None,
         })
     }
@@ -47,7 +50,9 @@ pub(super) async fn call(
 ) -> Result<Vec<u8>, Error> {
     let operation = request.operation_id.as_str();
     let arguments = request.arguments.as_slice();
-    if matches!(method, Method::Activate | Method::Withdraw | Method::Depart) && !arguments.is_empty() {
+    if matches!(method, Method::Activate | Method::Withdraw | Method::Depart | Method::Reservation)
+        && !arguments.is_empty()
+    {
         return Err(errors::invalid("the method takes no arguments"));
     }
     let result = match method {
@@ -59,6 +64,7 @@ pub(super) async fn call(
             withdraw(service, gateway, operation, Some(reason)).await?.encode_to_vec()
         }
         Method::Depart => depart(service, gateway, operation).await?.encode_to_vec(),
+        Method::Reservation => reservation(service, gateway, operation)?.encode_to_vec(),
     };
     Ok(result)
 }
@@ -135,6 +141,20 @@ async fn depart(service: &SyncService, gateway: &str, operation: &str) -> Result
     let departed = service.operations.admit(async move { control.reconcile_departure(stored.request).await });
     let departed = departed.await.map_err(|failure| errors::operation(&failure))?;
     Ok(DepartResult { departed })
+}
+
+/// The deployment and destination of the live claim under `operation`, if it holds one.
+fn reservation(service: &SyncService, gateway: &str, operation: &str) -> Result<ReservationResult, Error> {
+    held(service, gateway, operation)?;
+    let reserved = service.control.reservation(operation).map_err(|failure| errors::operation(&failure))?;
+    Ok(reserved.map_or_else(ReservationResult::default, |reserved| ReservationResult {
+        deployment: reserved.deployment,
+        destination: Some(SessionDemand {
+            key: reserved.destination.key,
+            session_type: reserved.destination.session_type,
+            machine_profile: reserved.destination.machine_profile,
+        }),
+    }))
 }
 
 /// The claim or queued move stored under `operation`, which must be `gateway`'s.

@@ -24,6 +24,8 @@ pub(crate) struct State {
     pub config: Vec<u8>,
     /// The release new placements use.
     pub current: Option<String>,
+    /// The deployments asked to stop at once, rather than drain, until their backend versions are released.
+    pub stopping: BTreeSet<String>,
     pub releases: BTreeMap<String, ReleaseState>,
     pub hosts: BTreeMap<String, HostState>,
     pub sessions: BTreeMap<String, SessionState>,

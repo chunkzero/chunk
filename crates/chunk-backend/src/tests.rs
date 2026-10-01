@@ -230,6 +230,9 @@ impl Storage for ControlledStore {
     fn deployments(&self) -> chunk_store::Result<Vec<chunk_contract::Deployment>> {
         self.inner.deployments()
     }
+    fn retiring(&self) -> chunk_store::Result<Vec<String>> {
+        self.inner.retiring()
+    }
     fn retain_deployment(&mut self, deployment: &chunk_contract::Deployment) -> chunk_store::Result<()> {
         self.inner.retain_deployment(deployment)
     }

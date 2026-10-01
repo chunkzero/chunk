@@ -112,6 +112,11 @@ async fn shortened_limits_count_from_when_the_release_started_draining() {
     let state = control.state().unwrap();
     let drain = state.releases["build"].drain.as_ref().unwrap();
     assert_eq!((drain.reconnects_until, drain.stops_at), (Some(since + 3_600_000), Some(since + 7_200_000)));
+    // Settings only shorten each limit on its own: the longer maximum age changes nothing, the shorter deadline applies.
+    control.set_drain_policy(DrainPolicy { max_age: Some(6 * hour), deadline: Some(hour) }).unwrap();
+    let state = control.state().unwrap();
+    let drain = state.releases["build"].drain.as_ref().unwrap();
+    assert_eq!((drain.reconnects_until, drain.stops_at), (Some(since + 3_600_000), Some(since + 3_600_000)));
     fixture.close().await;
 }
 

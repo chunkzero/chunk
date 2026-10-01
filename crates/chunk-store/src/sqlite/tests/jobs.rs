@@ -104,7 +104,9 @@ fn cancelling_a_deployments_jobs_ends_its_pending_and_running_ones() {
     let jobs = store.job_command(JobCommand::CancelDeployment { deployment: job("running").deployment }).unwrap();
     let state = |id| jobs.records.iter().find(|job| job.id == id).unwrap().state;
     assert_eq!((state("running"), state("pending")), (JobState::Unknown, JobState::Cancelled));
+    assert_eq!(store.retiring().unwrap(), ["v1"]);
     assert!(store.release_deployment("v1").unwrap());
+    assert!(store.retiring().unwrap().is_empty());
 }
 
 #[test]

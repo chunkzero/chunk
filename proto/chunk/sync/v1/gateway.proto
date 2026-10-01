@@ -106,6 +106,7 @@ message ActiveArguments {
 // - `chunk:withdraw` takes no arguments and returns WithdrawResult.
 // - `chunk:abandon_move` takes AbandonMoveArguments and returns WithdrawResult.
 // - `chunk:depart` takes no arguments and returns DepartResult.
+// - `chunk:reservation` takes no arguments and returns ReservationResult.
 
 // Arguments of `chunk:claim`.
 message ClaimArguments {
@@ -210,6 +211,15 @@ message WithdrawResult {
   // Control holds no claim or queued move under the operation ID, such as while its claim is still reserving, so
   // nothing changed.
   bool unknown = 1;
+}
+
+// The result of `chunk:reservation`.
+message ReservationResult {
+  // The deployment whose session holds the operation's live claim; empty when it holds none, and then the claim is
+  // admitted in the current deployment.
+  string deployment = 1;
+  // The reserved session's destination.
+  SessionDemand destination = 2;
 }
 
 // The result of `chunk:depart`.

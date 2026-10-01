@@ -1,6 +1,6 @@
 use super::{Assignment, Claim, ClaimGuard, ClaimIdentity, Platform, Retarget, WAIT_TIMEOUT, claim, invalid_data};
 use crate::server::platform::{RPC_TIMEOUT, failure};
-use chunk_proto::sync::v1::{Position, error::Code};
+use chunk_proto::sync::v1::{Position, ReservationResult, SessionDemand, error::Code};
 use std::{io, time::Duration};
 use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
 
@@ -108,26 +108,32 @@ fn preparation_timeout(last_error: Option<&io::Error>) -> io::Error {
 }
 
 async fn attempt(source: &ClaimGuard, destination: &mut ClaimGuard, protocol: i32) -> io::Result<Option<Assignment>> {
+    check_move(&destination.platform, &destination.claim).await?;
+    // A reservation is admitted only by the deployment that placed it, whatever the current deployment says.
+    let (reservation, _): (ReservationResult, _) =
+        destination.platform.call("reservation", &destination.claim.operation_id, &(), RPC_TIMEOUT).await?;
+    if let Some(demand) = reservation.destination.filter(|_| !reservation.deployment.is_empty()) {
+        bind(destination, &reservation.deployment, demand);
+    }
     let platform = destination.platform.clone();
-    check_move(&platform, &destination.claim).await?;
     platform.approve_move(&source.platform, &source.claim, &destination.claim).await?;
     check_move(&platform, &destination.claim).await?;
     let Some(assignment) = claim(destination).await? else { return Ok(None) };
     if !assignment.deployment.is_empty() && assignment.deployment != destination.claim.deployment {
-        let placed = platform.bind(&assignment.deployment);
-        let claim = Claim {
-            deployment: assignment.deployment.clone(),
-            demand: assignment.destination.clone(),
-            ..destination.claim.clone()
-        };
-        placed.approve_move(&source.platform, &source.claim, &claim).await?;
-        (destination.platform, destination.claim) = (placed, claim);
+        bind(destination, &assignment.deployment, assignment.destination.clone());
+        destination.platform.approve_move(&source.platform, &source.claim, &destination.claim).await?;
     }
     if assignment.protocol != protocol {
         return Err(invalid_data("destination protocol differs from client"));
     }
     check_move(&destination.platform, &destination.claim).await?;
     Ok(Some(assignment))
+}
+
+/// Binds `destination` to `deployment` and the `demand` its session serves.
+fn bind(destination: &mut ClaimGuard, deployment: &str, demand: SessionDemand) {
+    destination.platform = destination.platform.bind(deployment);
+    destination.claim = Claim { deployment: deployment.into(), demand, ..destination.claim.clone() };
 }
 
 /// Whether `error` may pass on a retry under the same operation ID.

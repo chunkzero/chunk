@@ -166,7 +166,7 @@ fn delivery(
 }
 
 /// The destination `claim`'s session on `host` serves.
-fn destination(state: &State, claim: &Claim, host: &str) -> SessionDemand {
+pub(crate) fn destination(state: &State, claim: &Claim, host: &str) -> SessionDemand {
     let session = &state.sessions[&claim.session];
     let profile = state.hosts.get(host).map(|host| host.profile.clone()).unwrap_or_default();
     SessionDemand {

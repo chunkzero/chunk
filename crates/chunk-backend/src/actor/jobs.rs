@@ -241,6 +241,7 @@ impl Actor {
             .records
             .iter()
             .filter(|job| job.state == JobState::Pending && job.due_at <= now)
+            .filter(|job| !self.retired.iter().any(|retired| retired.as_str() == job.deployment))
             .min_by_key(|job| (job.due_at, &job.id))
         {
             self.send_scheduling(JobCommand::Claim { id: job.id.clone(), attempt: job.attempt, now });

@@ -230,6 +230,7 @@ pub(super) fn command(transaction: &Connection, command: JobCommand, limits: &Jo
             changed(transaction)?;
         }
         JobCommand::CancelDeployment { deployment } => {
+            super::deployments::retire(transaction, &deployment)?;
             let mut cancelled = false;
             for mut job in load(transaction)?.records.into_iter().filter(|job| job.deployment == deployment) {
                 match job.state {

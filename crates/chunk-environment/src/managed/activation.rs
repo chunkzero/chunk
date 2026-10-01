@@ -1,11 +1,9 @@
-//! The records core keeps in its state directory across a restart, written atomically: the activation management has
-//! not yet accepted, which keeps the deployment it replaced protected, and the deployments to stop. Each holds the
-//! committed value beside the one an activation in progress would replace it with, so a crash before control commits
-//! that activation loses nothing.
+//! The record core keeps in its state directory across a restart, written atomically: the activation management has
+//! not yet accepted, which keeps the deployment it replaced protected. It holds the committed value beside the one an
+//! activation in progress would replace it with, so a crash before control commits that activation loses nothing.
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
-    collections::BTreeSet,
     fs,
     io::{self, Write},
     path::Path,
@@ -16,13 +14,6 @@ pub(super) struct Activation {
     /// Control's current deployment before `activated`, which management may still fall back to.
     pub predecessor: Option<String>,
     pub activated: String,
-}
-
-/// The deployments that stop at once instead of draining, as of control's `current` deployment.
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub(super) struct Stopping {
-    pub current: String,
-    pub deployments: BTreeSet<String>,
 }
 
 /// A record's committed value, and the one an activation that control may not have committed yet would make.

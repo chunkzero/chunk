@@ -30,6 +30,19 @@ impl Control {
     /// # Errors
     /// Rejects an invalid release, one of another environment, a changed or retired release, and a stopped store.
     pub fn activate_release(&self, release: Release, policy: DrainPolicy) -> Result<()> {
+        self.activate_release_stopping(release, policy, &BTreeSet::new())
+    }
+
+    /// Activates `release` like [`Self::activate_release`], and in the same commit adds `stop` to the deployments asked
+    /// to stop at once instead of draining. The activated deployment is never one of them.
+    /// # Errors
+    /// Rejects what [`Self::activate_release`] does.
+    pub fn activate_release_stopping(
+        &self,
+        release: Release,
+        policy: DrainPolicy,
+        stop: &BTreeSet<String>,
+    ) -> Result<()> {
         release.validate()?;
         if release.deployment.environment != self.config.environment {
             return Err(Error::Invalid("release belongs to another environment"));
@@ -57,7 +70,27 @@ impl Control {
                     release.start_draining(now, policy);
                 }
             }
+            state.stopping.extend(stop.iter().cloned());
+            state.stopping.remove(&name);
             state.current = Some(name);
+            Ok(())
+        })
+    }
+
+    /// The deployments asked to stop at once, rather than drain, which stay so across a restart and a restore until
+    /// [`Self::forget_stopping`].
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn stopping(&self) -> Result<BTreeSet<String>> {
+        Ok(self.state()?.stopping.clone())
+    }
+
+    /// Forgets the deployments asked to stop that are not among `resident`.
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn forget_stopping(&self, resident: &BTreeSet<String>) -> Result<()> {
+        self.update(|state| {
+            state.stopping.retain(|name| resident.contains(name));
             Ok(())
         })
     }

@@ -31,35 +31,40 @@ pub struct DrainPolicy {
 impl ReleaseState {
     /// Starts draining at `now` unless it drains already, and keeps the earlier of each limit.
     pub(crate) fn start_draining(&mut self, now: u64, policy: DrainPolicy) {
-        let drain = self.drain.get_or_insert(ReleaseDrain { since: now, reconnects_until: None, stops_at: None });
+        self.drain.get_or_insert(ReleaseDrain { since: now, reconnects_until: None, stops_at: None }).shorten(policy);
+    }
+}
+
+impl ReleaseDrain {
+    /// Sets each limit to the earlier of its own and `policy`'s, counted from `since`.
+    fn shorten(&mut self, policy: DrainPolicy) {
         let after = |limit: Option<Duration>| {
-            limit.map(|limit| drain.since.saturating_add(u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)))
+            limit.map(|limit| self.since.saturating_add(u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)))
         };
-        drain.reconnects_until = earliest(drain.reconnects_until, after(policy.max_age));
-        drain.stops_at = earliest(drain.stops_at, after(policy.deadline));
+        let limits =
+            (earliest(self.reconnects_until, after(policy.max_age)), earliest(self.stops_at, after(policy.deadline)));
+        (self.reconnects_until, self.stops_at) = limits;
     }
 }
 
 impl Control {
-    /// Sets the limits of every draining release to `policy`'s, counted from when it started draining, whether they
-    /// are shorter or longer than before.
+    /// Shortens the limits of every draining release to `policy`'s, counted from when it started draining. A limit
+    /// the policy would lengthen stays.
     /// # Errors
     /// Reports a stopped store.
     pub fn set_drain_policy(&self, policy: DrainPolicy) -> Result<()> {
-        let limits = |drain: &ReleaseDrain| {
-            let after = |limit: Option<Duration>| {
-                limit.map(|limit| drain.since.saturating_add(u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)))
-            };
-            (after(policy.max_age), after(policy.deadline))
+        let shortened = |drain: &ReleaseDrain| {
+            let mut shortened = drain.clone();
+            shortened.shorten(policy);
+            shortened != *drain
         };
-        let changed = |drain: &ReleaseDrain| limits(drain) != (drain.reconnects_until, drain.stops_at);
         let state = self.state()?;
-        if !state.releases.values().filter_map(|release| release.drain.as_ref()).any(changed) {
+        if !state.releases.values().filter_map(|release| release.drain.as_ref()).any(shortened) {
             return Ok(());
         }
         self.update(|state| {
             for drain in state.releases.values_mut().filter_map(|release| release.drain.as_mut()) {
-                (drain.reconnects_until, drain.stops_at) = limits(drain);
+                drain.shorten(policy);
             }
             Ok(())
         })

@@ -88,6 +88,8 @@ pub(super) struct Placement {
     pub current: Option<String>,
     /// Where a login's player returns unless it declines: the session's deployment and destination.
     pub returns: Option<(String, sync::SessionDemand)>,
+    /// The deployment and destination a move's operation already holds a reservation in.
+    pub reserved: Option<(String, sync::SessionDemand)>,
 }
 
 #[derive(Default)]

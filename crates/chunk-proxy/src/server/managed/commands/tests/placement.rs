@@ -168,6 +168,7 @@ async fn a_move_reserved_in_an_earlier_deployment_is_approved_there_before_it_is
     {
         let mut placement = fixture.service.placement.lock().unwrap();
         placement.returns = Some(("b".into(), demand("hub")));
+        placement.reserved = placement.returns.clone();
         placement.denying.insert("b".into());
     }
     let (_source, running) = moving(&fixture, &retarget(&fixture, "c"));
@@ -179,10 +180,28 @@ async fn a_move_reserved_in_an_earlier_deployment_is_approved_there_before_it_is
     })
     .await
     .unwrap();
-    // `c` approved the move, but `b`, which holds its reservation, denied it, so the reservation was withdrawn.
-    let deployments: Vec<_> = hooks(&fixture).into_iter().map(|(deployment, _)| deployment).collect();
-    assert_eq!(deployments.first().map(String::as_str), Some("c"));
-    assert_eq!(deployments.last().map(String::as_str), Some("b"));
+    // `b`, which holds the reservation, denied the move, so the reservation was withdrawn; `c` never saw it.
+    assert!(hooks(&fixture).iter().all(|(deployment, _)| deployment == "b"));
     running.abort();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_reserved_move_completes_in_its_deployment_though_the_current_one_dropped_its_app() {
+    let fixture = Fixture::new().await;
+    deployments(&fixture, "c");
+    {
+        let mut placement = fixture.service.placement.lock().unwrap();
+        placement.manifests.insert("c".into(), manifest("other"));
+        placement.denying.insert("c".into());
+        placement.returns = Some(("b".into(), demand("hub")));
+        placement.reserved = placement.returns.clone();
+    }
+    let (_source, running) = moving(&fixture, &retarget(&fixture, "c"));
+    let (mut destination, assignment) =
+        tokio::time::timeout(Duration::from_secs(5), running).await.unwrap().unwrap().unwrap();
+    destination.armed = false;
+    assert_eq!(assignment.deployment, "b");
+    assert!(hooks(&fixture).iter().all(|(deployment, _)| deployment == "b"));
     fixture.close().await;
 }

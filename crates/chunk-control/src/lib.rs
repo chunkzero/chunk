@@ -26,7 +26,7 @@ mod session_methods;
 mod sessions;
 mod state;
 mod sync;
-pub use callers::{ArrivedClaim, SessionScope, StoredClaim};
+pub use callers::{ArrivedClaim, Reservation, SessionScope, StoredClaim};
 pub use draining::{DrainPolicy, RECONNECT_GRACE};
 pub use nodes::NodeStatus;
 pub use session_methods::{CapturedSession, MethodOutcome, PreparedSessionMethod};

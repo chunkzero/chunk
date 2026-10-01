@@ -1,4 +1,4 @@
-use super::{activation, release};
+use super::release;
 use crate::{CoreConfig, GatewayConfig, ManagementConfig, core::Archives};
 use bytes::Bytes;
 use chunk_contract::ControlConnection;
@@ -458,6 +458,12 @@ impl Harness {
     /// Leaves `count` backend versions resident that control never ran, as a run that crashed after each commit would.
     async fn abandon(&self, count: usize) {
         let core = crate::Core::start(self.core(), || {}).await.unwrap();
+        self.abandon_in(&core, count).await;
+        core.stop(|| {}).await.unwrap();
+    }
+
+    /// Deploys `count` versions to `core` that nothing serves.
+    async fn abandon_in(&self, core: &crate::Core, count: usize) {
         let status = chunk_contract::Function {
             kind: chunk_contract::FunctionKind::Query,
             visibility: chunk_contract::Visibility::Public,
@@ -477,7 +483,6 @@ impl Harness {
             };
             core.deploy(bundle).await.unwrap();
         }
-        core.stop(|| {}).await.unwrap();
     }
 
     fn start(&self) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
@@ -603,25 +608,15 @@ async fn a_stop_previous_activation_stops_every_resident_deployment_even_across_
     harness.released("dep_a").await;
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(harness.serves("dep_b").await);
-    let record = harness.state().join("stopping.json");
-    let stopping = || -> BTreeSet<String> {
-        let record = fs::read(&record).unwrap();
-        let records = serde_json::from_slice::<activation::Records<activation::Stopping>>(&record).unwrap();
-        records.committed.map(|stopping| stopping.deployments).unwrap_or_default()
-    };
-    assert_eq!(stopping(), BTreeSet::from(["dep_b".to_owned()]));
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
 
-    // A crash after dep_d's records were written, before control activated it, leaves dep_b's stop and dep_c's
-    // predecessor as they were.
-    let (activations, stops) = (harness.state().join("managed.json"), record.clone());
+    // A crash after dep_d's record was written, before control activated it, leaves dep_c's predecessor as it was,
+    // and control keeps dep_b's stop.
+    let activations = harness.state().join("managed.json");
     let mut recorded: serde_json::Value = serde_json::from_slice(&fs::read(&activations).unwrap()).unwrap();
     recorded["pending"] = serde_json::json!({"predecessor": "dep_c", "activated": "dep_d"});
     fs::write(&activations, recorded.to_string()).unwrap();
-    let mut recorded: serde_json::Value = serde_json::from_slice(&fs::read(&stops).unwrap()).unwrap();
-    recorded["pending"] = serde_json::json!({"current": "dep_d", "deployments": ["dep_b", "dep_c"]});
-    fs::write(&stops, recorded.to_string()).unwrap();
 
     // Restarted, the core still stops dep_b once management accepts dep_c.
     let (stop, running) = harness.start();
@@ -634,8 +629,6 @@ async fn a_stop_previous_activation_stops_every_resident_deployment_even_across_
     harness.expect(4, "dep_d", DeploymentState::Failed).await;
     harness.expect(5, "dep_c", DeploymentState::Active).await;
     harness.released("dep_b").await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(stopping().is_empty());
 
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();

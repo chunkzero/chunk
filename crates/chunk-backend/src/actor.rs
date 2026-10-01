@@ -108,7 +108,7 @@ impl Actor {
         memory: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
         let (committer, initial) = Committer::new(store, events.clone())?;
-        let crate::commit::Initial { snapshot, deployments, jobs: scheduled, work } = initial;
+        let crate::commit::Initial { snapshot, deployments, jobs: scheduled, work, retiring } = initial;
         let mut js = Engine::new()?;
         let mut versions = BTreeMap::new();
         let mut installed = Vec::new();
@@ -128,6 +128,10 @@ impl Actor {
             installed.push(id.clone());
             versions.insert(id, Some(Arc::new(deployment)));
         }
+        let mut retired = BTreeSet::new();
+        for id in &retiring {
+            retired.insert(DeploymentId::new(id)?);
+        }
         let readers = readers::Readers::new(readers, &events)?;
         Ok(Self {
             scheduled: jobs::Scheduled::new(scheduled),
@@ -143,7 +147,7 @@ impl Actor {
             epoch: 0,
             versions,
             installed,
-            retired: BTreeSet::new(),
+            retired,
             unready,
             work: readiness::Work::new(work),
             deploying: None,

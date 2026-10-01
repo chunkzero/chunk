@@ -467,7 +467,19 @@ impl Core {
     /// # Errors
     /// Reports a stopped control or a rejected release.
     pub fn activate(&self, release: chunk_control::Release, drain: chunk_control::DrainPolicy) -> io::Result<()> {
-        self.control()?.activate_release(release, drain).map_err(io::Error::other)
+        self.activate_stopping(release, drain, &BTreeSet::new())
+    }
+
+    /// Like [`Self::activate`], and in the same commit asks `stop` to stop at once rather than drain.
+    /// # Errors
+    /// Reports a stopped control or a rejected release.
+    pub fn activate_stopping(
+        &self,
+        release: chunk_control::Release,
+        drain: chunk_control::DrainPolicy,
+        stop: &BTreeSet<String>,
+    ) -> io::Result<()> {
+        self.control()?.activate_release_stopping(release, drain, stop).map_err(io::Error::other)
     }
 
     /// Whether the backend stopped.

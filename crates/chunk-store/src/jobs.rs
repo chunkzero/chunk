@@ -79,7 +79,8 @@ pub enum JobCommand {
         id: String,
         caller: Value,
     },
-    /// Cancels the deployment's pending jobs and marks its running ones unknown.
+    /// Cancels the deployment's pending jobs and marks its running ones unknown, and in the same commit records the
+    /// deployment as retiring, so [`Storage::retiring`] keeps naming it until it is released.
     CancelDeployment {
         deployment: String,
     },
