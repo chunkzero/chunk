@@ -98,6 +98,14 @@ pub(super) fn changed(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn retiring(connection: &Connection, deployment: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _chunk_retired_deployments WHERE id=?1)",
+        [deployment],
+        |row| row.get(0),
+    )?)
+}
+
 pub(super) fn apply(connection: &Connection, intents: &[JobIntent], limits: &JobLimits) -> Result<()> {
     if intents.len() > 16 {
         return Err(Error::Capacity);
@@ -128,16 +136,11 @@ pub(super) fn apply(connection: &Connection, intents: &[JobIntent], limits: &Job
                 if exists {
                     return Err(Error::Invalid("scheduled job ID reused"));
                 }
-                let retiring: bool = connection.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM _chunk_retired_deployments WHERE id=?1)",
-                    [&job.deployment],
-                    |row| row.get(0),
-                )?;
-                if retiring {
-                    save(connection, &Job { state: JobState::Cancelled, ..job.clone() })?;
-                } else {
-                    save(connection, job)?;
+                let mut job = job.clone();
+                if retiring(connection, &job.deployment)? {
+                    job.state = JobState::Cancelled;
                 }
+                save(connection, &job)?;
             }
             JobIntent::Cancel { id, caller } => {
                 let mut job = get(connection, id)?;
@@ -163,7 +166,8 @@ pub(super) fn apply(connection: &Connection, intents: &[JobIntent], limits: &Job
                 }
                 due(*due_at)?;
                 target(connection, &job)?;
-                job.state = JobState::Pending;
+                job.state =
+                    if retiring(connection, &job.deployment)? { JobState::Cancelled } else { JobState::Pending };
                 job.due_at = *due_at;
                 job.attempt = job.attempt.checked_add(1).ok_or(Error::Capacity)?;
                 job.result = None;

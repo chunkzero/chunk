@@ -3,10 +3,7 @@
 use super::*;
 use crate::{Core, managed::Managed};
 use chunk_backend::{Call, DeploymentId};
-use chunk_proto::{
-    control::v1::{ClaimRequest, Identity, SessionDemand},
-    sync::v1::NodePhase,
-};
+use chunk_proto::control::v1::{ClaimRequest, Identity, SessionDemand};
 use std::sync::OnceLock;
 
 fn hold(deployment: &str) -> Call {
@@ -93,7 +90,7 @@ async fn an_occupied_stopped_release_with_a_backend_job_is_retired_without_slot_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn releasable_deployments_free_the_slots_so_an_occupied_older_one_is_not_forced_out() {
+async fn a_pending_deployment_forces_out_the_oldest_when_all_sixteen_resist_release() {
     let harness = Harness::new().await;
     let core = Core::start(harness.core(), || {}).await.unwrap();
     let (gateway, lease) = (OnceLock::new(), watch::Sender::new(crate::managed::Lease::Waiting));
@@ -106,45 +103,49 @@ async fn releasable_deployments_free_the_slots_so_an_occupied_older_one_is_not_f
         ..AttachResponse::default()
     };
     let cancel = CancellationToken::new();
-    assert!(managed.deploy(&desired("dep_a"), &cancel).await.unwrap());
-
-    // A player holds dep_a's session, and dep_a's version holds a job.
     let control = core.control().unwrap();
-    let claiming = tokio::spawn({
-        let control = control.clone();
-        async move { control.claim(login()).await }
-    });
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while control.online_players().unwrap() == 0 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("the claim reserves a place");
     let backend = core.backend().unwrap();
-    backend.mutate("hold-dep_a".into(), hold("dep_a")).await.unwrap();
 
-    // dep_b replaces dep_a, and fourteen releasable versions fill the rest of the backend's sixteen slots.
-    assert!(managed.deploy(&desired("dep_b"), &cancel).await.unwrap());
-    harness.abandon_in(&core, 14).await;
-    assert_eq!(backend.deployments().await.unwrap().len(), chunk_backend::MAX_DEPLOYMENTS);
+    // Every version holds a job, and a player holds the oldest deployment's session, so none releases on its own.
+    let mut claiming = None;
+    for index in 0..chunk_backend::MAX_DEPLOYMENTS {
+        let id = format!("dep_{index}");
+        assert!(managed.deploy(&desired(&id), &cancel).await.unwrap());
+        if index == 0 {
+            claiming = Some(tokio::spawn({
+                let control = control.clone();
+                async move { control.claim(login()).await }
+            }));
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while control.online_players().unwrap() == 0 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("the claim reserves a place");
+        }
+        backend.mutate(format!("hold-{id}"), hold(&id)).await.unwrap();
+    }
     {
         let mut deployments = crate::managed::lock(&managed.deployments);
-        deployments.desired = Some("dep_b".into());
-        deployments.serving = Some("dep_b".into());
-        deployments.loading = Some("dep_c".into());
+        deployments.desired = Some("dep_15".into());
+        deployments.serving = Some("dep_15".into());
+        deployments.unacknowledged = None;
+        deployments.loading = Some("dep_pending".into());
     }
 
-    // The tick releases them all, so the oldest deployment, which holds the player, is not retired for room.
+    // The first tick finds nothing to release and durably asks the oldest deployment to stop.
     managed.retire().await;
-    let resident: Vec<_> = backend.deployments().await.unwrap().iter().map(|id| id.as_str().to_owned()).collect();
-    assert_eq!(resident, ["dep_a", "dep_b"]);
-    assert_eq!(control.online_players().unwrap(), 1);
-    let phases: Vec<_> = control.nodes().unwrap().iter().map(|node| node.phase).collect();
-    assert!(
-        !phases.is_empty() && phases.iter().all(|phase| !matches!(phase, NodePhase::Stopping | NodePhase::Stopped))
-    );
-    claiming.abort();
+    assert!(control.stopping().unwrap().iter().any(|name| name == "dep_0"));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while backend.deployments().await.unwrap().iter().any(|id| id.as_str() == "dep_0") {
+        assert!(tokio::time::Instant::now() < deadline, "dep_0 was never released");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    crate::managed::lock(&managed.deployments).loading = None;
+    assert!(managed.deploy(&desired("dep_pending"), &cancel).await.unwrap());
+    assert!(backend.deployments().await.unwrap().iter().any(|id| id.as_str() == "dep_pending"));
+    claiming.unwrap().abort();
     core.stop(|| {}).await.unwrap();
 }
 

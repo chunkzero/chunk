@@ -304,6 +304,22 @@ async fn retiring_a_deployment_frees_its_slot_despite_a_scheduled_job_and_a_subs
 }
 
 #[tokio::test]
+async fn a_retirement_completes_though_its_caller_stops_waiting() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = backend(&directory);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    let old = DeploymentId::new("old").unwrap();
+    assert!(tokio::time::timeout(Duration::ZERO, backend.retire(old)).await.is_err());
+    for _ in 0..100 {
+        if backend.deployments().await.unwrap().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the deployment was never released");
+}
+
+#[tokio::test]
 async fn a_restart_after_the_retirement_committed_completes_it_and_cancels_a_late_job() {
     let directory = tempfile::tempdir().unwrap();
     let first = backend(&directory);

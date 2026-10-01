@@ -338,6 +338,28 @@ struct Owner {
     activity: chunk_service::Activity,
     stopped: Arc<AtomicBool>,
     thread: std::sync::Mutex<Option<JoinHandle<()>>>,
+    retirements: Retirements,
+}
+
+/// A thread that runs the backend's retirements, so they finish whichever task or runtime started them. It ends when
+/// the backend is dropped.
+struct Retirements {
+    runtime: tokio::runtime::Handle,
+    _shutdown: oneshot::Sender<()>,
+}
+
+impl Retirements {
+    fn start() -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
+        let handle = runtime.handle().clone();
+        let (shutdown, closed) = oneshot::channel::<()>();
+        std::thread::Builder::new().name("chunk-retire".into()).spawn(move || {
+            runtime.block_on(async {
+                let _ = closed.await;
+            });
+        })?;
+        Ok(Self { runtime: handle, _shutdown: shutdown })
+    }
 }
 
 impl Owner {
@@ -387,6 +409,7 @@ impl Backend {
             activity: chunk_service::Activity::default(),
             stopped: Arc::default(),
             thread: std::sync::Mutex::new(None),
+            retirements: Retirements::start().expect("retirement thread"),
         }));
         (backend, incoming, memory)
     }
@@ -465,6 +488,7 @@ impl Backend {
                 }
             }
         })?;
+        let retirements = Retirements::start()?;
         let (lane, activity, retiring) = match initialized.recv().map_err(|_| Error::Closed).and_then(|ready| ready) {
             Ok(ready) => ready,
             Err(error) => {
@@ -484,25 +508,13 @@ impl Backend {
             activity,
             stopped,
             thread: std::sync::Mutex::new(Some(thread)),
+            retirements,
         });
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            for id in retiring {
-                runtime.spawn(Self::finish_retirement(Arc::downgrade(&owner), id));
-            }
+        let backend = Self(owner);
+        for id in retiring {
+            backend.spawn_retirement(id, None);
         }
-        Ok(Self(owner))
-    }
-
-    /// Completes a retirement a restart found committed, until the version is released or the backend is dropped.
-    async fn finish_retirement(owner: std::sync::Weak<Owner>, id: DeploymentId) {
-        let mut cancelled = false;
-        loop {
-            let Some(owner) = owner.upgrade() else { return };
-            if !matches!(Self(owner).retire_step(&id, &mut cancelled).await, Ok(None)) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        Ok(backend)
     }
 
     /// Serves the moves actions ask for with `moves`, instead of any served before. Until then, an action's move fails.
@@ -673,13 +685,29 @@ impl Backend {
     /// # Errors
     /// Reports an unavailable service or a failure to release.
     pub async fn retire(&self, id: DeploymentId) -> Result<bool> {
-        let mut cancelled = false;
-        loop {
-            if let Some(resident) = self.retire_step(&id, &mut cancelled).await? {
-                return Ok(resident);
+        let (done, finished) = oneshot::channel();
+        self.spawn_retirement(id, Some(done));
+        finished.await.map_err(|_| Error::Closed)?
+    }
+
+    /// Runs the retirement of `id` on the backend's own thread until it releases the version or the backend is dropped,
+    /// whatever happens to the caller waiting on `done`.
+    fn spawn_retirement(&self, id: DeploymentId, done: Option<oneshot::Sender<Result<bool>>>) {
+        let owner = Arc::downgrade(&self.0);
+        self.0.retirements.runtime.spawn(async move {
+            let mut cancelled = false;
+            let result = loop {
+                let Some(owner) = owner.upgrade() else { return };
+                let step = Self(owner).retire_step(&id, &mut cancelled).await;
+                if let Some(resident) = step.transpose() {
+                    break resident;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            };
+            if let Some(done) = done {
+                let _ = done.send(result);
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        });
     }
 
     /// One attempt to commit the retirement of `id`, then to release it; `None` while either is busy.

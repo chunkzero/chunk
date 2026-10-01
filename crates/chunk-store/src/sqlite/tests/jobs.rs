@@ -110,6 +110,29 @@ fn cancelling_a_deployments_jobs_ends_its_pending_and_running_ones() {
 }
 
 #[test]
+fn retrying_a_job_of_a_retiring_deployment_leaves_it_cancelled() {
+    let (_directory, mut store) = open();
+    store.retain_deployment(&target()).unwrap();
+    let owner = job("one").caller;
+    store.commit_with_jobs(commit("schedule", 1, vec![]), vec![JobIntent::Schedule(job("one"))]).unwrap();
+    store
+        .commit_with_jobs(
+            commit("cancel", 2, vec![]),
+            vec![JobIntent::Cancel { id: "one".into(), caller: owner.clone() }],
+        )
+        .unwrap();
+    store.job_command(JobCommand::CancelDeployment { deployment: job("one").deployment }).unwrap();
+    store
+        .commit_with_jobs(
+            commit("retry", 3, vec![]),
+            vec![JobIntent::Retry { id: "one".into(), caller: owner, due_at: 20, acknowledge_possible_effects: true }],
+        )
+        .unwrap();
+    assert_eq!(store.jobs().unwrap().records[0].state, JobState::Cancelled);
+    assert!(store.release_deployment("v1").unwrap());
+}
+
+#[test]
 fn full_job_budget_rejects_new_intent_and_its_document_writes() {
     let (_directory, mut store) = open();
     store.retain_deployment(&target()).unwrap();
