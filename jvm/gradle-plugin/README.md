@@ -124,29 +124,26 @@ without must implement plain `SessionProvider`.
 For each `sessionMethod` declared in TypeScript (see the [SDK](../../crates/chunk-build/sdk/README.md#session-methods)),
 the generated `SessionMethods` class has a single-method interface with `Args` and result types. The session class
 implements it, and the provider's `create` must declare that concrete class as its return type. From the
-[Java example](../../examples/java/apps/lobby/src/main/java/example/Lobby.java):
+[arena example](../../examples/arena/apps/arena/src/main/java/example/arena/Arena.java):
 
 ```java
-@SessionType("default")
-public final class Lobby implements LobbySessionProviders.Default {
+@SessionType("koth")
+public final class Arena implements ArenaSessionProviders.Koth {
     @Override
-    public GreetingSession create(SessionCreation<SessionConfigs.Lobby.Default.Config> creation) {
-        return new GreetingSession(creation.config().greeting());
+    public ArenaSession create(SessionCreation<SessionConfigs.Arena.Koth.Config> creation) {
+        var config = creation.config();
+        return new ArenaSession(
+                new Match.Rules(
+                        Math.toIntExact(config.targetScore()),
+                        Math.toIntExact(config.timeLimitSeconds())));
     }
+}
 
-    public static final class GreetingSession extends Session
-            implements SessionMethods.Lobby.Default.Announce {
-        private final String greeting;
-
-        public GreetingSession(String greeting) {
-            this.greeting = greeting;
-        }
-
-        @Override
-        public Long announce(SessionMethods.Lobby.Default.Announce.Args args) {
-            // Runs synchronously on the session's tick thread.
-            return 0L;
-        }
+public final class ArenaSession extends Session implements SessionMethods.Arena.Koth.Status {
+    @Override
+    public String status(SessionMethods.Arena.Koth.Status.Args args) {
+        // Runs synchronously on the session's tick thread.
+        return "Red %d - %d Blue".formatted(match.score(Team.RED), match.score(Team.BLUE));
     }
 }
 ```
@@ -167,6 +164,7 @@ for missing or duplicate providers, cycles and process components that depend on
 ## Testing
 
 `./gradlew -p jvm/gradle-plugin test`, from the repository root, runs Gradle TestKit fixtures against a copy of the
-plugin published to a build-local repository. `just consumers` builds the [Java example](../../examples/java/README.md)
-and the [Kotlin example](../../examples/local/README.md) from source-only scratch copies with the development CLI, then
-checks their release archives, session registries and dependency boundaries without starting any services.
+plugin published to a build-local repository. `just consumers` builds the
+[arena example](../../examples/arena/README.md) and the [Kotlin example](../../examples/local/README.md) from
+source-only scratch copies with the development CLI, then checks their release archives, session registries and
+dependency boundaries without starting any services.

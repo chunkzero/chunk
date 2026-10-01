@@ -43,6 +43,7 @@ test: toolchain
     cargo test -p chunk-proxy --no-default-features
     ./gradlew test
     examples/local/gradlew test
+    examples/arena/gradlew test
 
 # Build everything.
 build: toolchain
