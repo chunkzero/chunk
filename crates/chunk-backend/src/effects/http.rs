@@ -113,6 +113,8 @@ impl Fetcher {
             .no_deflate()
             .no_zstd()
             .connect_timeout(TIMEOUT)
+            // Idle connections would outlive the fetch permits that bound open sockets.
+            .pool_max_idle_per_host(0)
             .dns_resolver(Arc::new(Resolver(policy)))
             .build()
             .map_err(|_| Error::Invalid("HTTP client unavailable"))?;
