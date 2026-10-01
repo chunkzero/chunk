@@ -1,12 +1,19 @@
-//! The saved platform and token, and the environment variables that override them.
+//! The saved platform and token, and the environment variables that override them. The token is saved in the OS
+//! keychain on macOS and Windows, and in the configuration file elsewhere. Saving and forgetting it hold a lock on a
+//! file beside the configuration file, so concurrent commands see one login or the other.
 
 use std::{
-    fmt, io,
+    fmt,
+    fs::{File, OpenOptions},
+    io,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 use url::Url;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use super::keychain;
 
 /// Chunk Cloud's management API.
 pub(super) const CLOUD_URL: &str = "https://api.chunkzero.com";
@@ -63,7 +70,8 @@ impl fmt::Debug for Secret {
     }
 }
 
-/// What `chunk auth login` saves: the platform, and the token it issued, which only ever goes to that platform.
+/// What `chunk auth login` saves: the platform, and the token it issued, which only ever goes to that platform. The
+/// file holds the token only where the OS has no keychain support.
 #[derive(Default, Serialize, Deserialize, PartialEq, Debug)]
 pub(super) struct Config {
     #[serde(default)]
@@ -94,7 +102,7 @@ pub(super) fn parse_url(value: &str) -> Result<Url, String> {
     Ok(url)
 }
 
-fn path() -> io::Result<PathBuf> {
+pub(super) fn path() -> io::Result<PathBuf> {
     let directory = match std::env::var_os("CHUNK_CONFIG_DIR") {
         Some(path) if !path.is_empty() => PathBuf::from(path),
         Some(_) => return Err(io::Error::other("CHUNK_CONFIG_DIR must not be empty")),
@@ -106,11 +114,61 @@ fn path() -> io::Result<PathBuf> {
 }
 
 pub(super) fn load() -> io::Result<Config> {
-    load_from(&path()?)
+    load_at(&path()?)
 }
 
-pub(super) fn save(config: &Config) -> io::Result<()> {
-    save_to(&path()?, config)
+/// Saves the login.
+pub(super) fn save(target: &Target, token: Secret) -> io::Result<()> {
+    save_at(&path()?, target, token)
+}
+
+pub(super) fn load_at(path: &Path) -> io::Result<Config> {
+    let config = load_from(path)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let config = Config { token: keychain::get(&account(path, &config.target)?)?, ..config };
+    Ok(config)
+}
+
+pub(super) fn save_at(path: &Path, target: &Target, token: Secret) -> io::Result<()> {
+    let _lock = lock(path)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let previous = load_from(path).ok().map(|config| account(path, &config.target)).transpose()?;
+        let account = account(path, target)?;
+        keychain::set(&account, &token)?;
+        if let Some(previous) = previous.filter(|previous| *previous != account) {
+            keychain::delete(&previous)?;
+        }
+        save_to(path, &Config { target: target.clone(), token: None })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    save_to(path, &Config { target: target.clone(), token: Some(token) })
+}
+
+/// The keychain account of the token saved by the configuration file at `path` for `target`: a digest of the file's
+/// absolute path and the exact endpoint, so each file owns its entry and endpoints that differ only in case stay apart.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn account(path: &Path, target: &Target) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let path = std::path::absolute(path)?;
+    let digest = Sha256::new()
+        .chain_update(path.as_os_str().as_encoded_bytes())
+        .chain_update(b"\n")
+        .chain_update(target.endpoint())
+        .finalize();
+    Ok(digest[..16].iter().fold(String::from("chunk-"), |name, byte| name + &format!("{byte:02x}")))
+}
+
+pub(super) fn lock_path(path: &Path) -> PathBuf {
+    path.with_extension("lock")
+}
+
+/// Holds the exclusive lock on the file beside `path` until it is dropped.
+pub(super) fn lock(path: &Path) -> io::Result<File> {
+    std::fs::create_dir_all(path.parent().expect("the configuration file has a parent"))?;
+    let file = OpenOptions::new().create(true).truncate(false).write(true).open(lock_path(path))?;
+    file.lock()?;
+    Ok(file)
 }
 
 pub(super) fn load_from(path: &Path) -> io::Result<Config> {
@@ -143,13 +201,29 @@ fn make_private(path: &Path) -> io::Result<()> {
 
 /// Forgets the saved token if it is still `token`, so a login since it was loaded stays.
 pub(super) fn forget(token: &Secret) -> io::Result<()> {
-    let path = path()?;
-    let mut config = load_from(&path)?;
-    if config.token.as_ref() == Some(token) {
-        config.token = None;
-        save_to(&path, &config)?;
+    forget_at(&path()?, token)
+}
+
+pub(super) fn forget_at(path: &Path, token: &Secret) -> io::Result<()> {
+    let _lock = lock(path)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let target = load_from(path)?.target;
+        let account = account(path, &target)?;
+        if keychain::get(&account)?.as_ref() == Some(token) {
+            keychain::delete(&account)?;
+        }
+        save_to(path, &Config { target, token: None })
     }
-    Ok(())
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let mut config = load_from(path)?;
+        if config.token.as_ref() == Some(token) {
+            config.token = None;
+            save_to(path, &config)?;
+        }
+        Ok(())
+    }
 }
 
 /// Replaces the file atomically. The temporary file it renames is created readable by its owner alone.
@@ -166,7 +240,9 @@ pub(super) fn save_to(path: &Path, config: &Config) -> io::Result<()> {
 pub(super) fn credentials() -> io::Result<Credentials> {
     let url = chunk_service::optional::<String>("CHUNK_API_URL")?;
     let token = chunk_service::optional::<String>("CHUNK_TOKEN")?.filter(|token| !token.is_empty());
-    resolve(url.as_deref(), token, load)
+    // A `CHUNK_TOKEN` needs only the saved platform, so the keychain stays unread.
+    let target_only = token.is_some();
+    resolve(url.as_deref(), token, || if target_only { load_from(&path()?) } else { load() })
 }
 
 /// `CHUNK_TOKEN` beats the saved token, and the saved token goes only to the platform it was issued by.

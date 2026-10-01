@@ -82,7 +82,7 @@ async fn login(options: Login) -> io::Result<()> {
         .map_err(api_error)?
         .principal
         .unwrap_or_default();
-    config::save(&Config { target: target.clone(), token: Some(secret) })?;
+    config::save(&target, secret)?;
     cliclack::log::success(format!("Logged in to {target} as {}", principal.display_name))?;
     warn_overrides()
 }
@@ -132,7 +132,11 @@ async fn status() -> io::Result<()> {
     let current = client.get_current_principal(&GetCurrentPrincipalRequest {}).await.map_err(api_error)?;
     let name = current.principal.unwrap_or_default().display_name;
     let source = if credentials.from_env { " with CHUNK_TOKEN" } else { "" };
-    cliclack::log::info(format!("{target} · logged in as {name}{source}"))
+    cliclack::log::info(format!("{target} · logged in as {name}{source}"))?;
+    if let Some(expire_time) = current.token.and_then(|token| token.expire_time) {
+        cliclack::log::info(format!("Token expires {}", prost_types::Timestamp { nanos: 0, ..expire_time }))?;
+    }
+    Ok(())
 }
 
 /// Forgets the saved token, then revokes it; never `CHUNK_TOKEN`. A revocation that fails or times out only warns.
@@ -165,7 +169,7 @@ async fn logout() -> io::Result<()> {
 }
 
 fn warn_overrides() -> io::Result<()> {
-    for name in ["CHUNK_API_URL", "CHUNK_TOKEN"] {
+    for name in chunk_service::PLATFORM_ENV {
         if std::env::var_os(name).is_some_and(|value| !value.is_empty()) {
             cliclack::log::warning(format!("{name} overrides your saved login."))?;
         }

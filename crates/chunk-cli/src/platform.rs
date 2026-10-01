@@ -11,6 +11,8 @@ use clap::{Args, Subcommand};
 mod auth;
 mod config;
 mod deploy;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod keychain;
 mod resources;
 
 use auth::{Auth, Login};

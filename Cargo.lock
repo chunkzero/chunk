@@ -110,6 +110,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2114736faba96bcd79595c700d03183f61357b9fbce14852515e59f3bee4ed4a"
 
 [[package]]
+name = "apple-native-keyring-store"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b350bfd03649e07aa05c0a81b3e15934374e585c98204a57e20b9d49f49bb9a"
+dependencies = [
+ "keyring-core",
+ "log",
+ "security-framework",
+]
+
+[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -496,8 +507,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -580,6 +593,7 @@ dependencies = [
 name = "chunk-cli"
 version = "0.1.0"
 dependencies = [
+ "apple-native-keyring-store",
  "chunk-backend",
  "chunk-build",
  "chunk-contract",
@@ -591,6 +605,7 @@ dependencies = [
  "clap",
  "cliclack",
  "dirs",
+ "keyring-core",
  "notify",
  "process-wrap",
  "prost",
@@ -609,6 +624,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows-native-keyring-store",
  "zip",
 ]
 
@@ -1255,6 +1271,7 @@ dependencies = [
  "lock_api",
  "once_cell",
  "parking_lot_core",
+ "serde",
 ]
 
 [[package]]
@@ -2562,6 +2579,21 @@ dependencies = [
  "hashbrown 0.16.1",
  "portable-atomic",
  "thiserror",
+]
+
+[[package]]
+name = "keyring-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb1e621458ca9c51aa110bd0339d4751a056b9576bf1253aee1aa560dda0fc9d"
+dependencies = [
+ "chrono",
+ "dashmap",
+ "log",
+ "regex",
+ "ron",
+ "serde",
+ "uuid",
 ]
 
 [[package]]
@@ -4826,6 +4858,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ron"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81116b9531d61eabc41aeb228e4b6b2435bcca3233b98cf3b3077d4e6e9debb3"
+dependencies = [
+ "bitflags",
+ "once_cell",
+ "serde",
+ "serde_derive",
+ "typeid",
+ "unicode-ident",
+]
+
+[[package]]
 name = "ropey"
 version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6024,6 +6070,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "63278e72ed4f207eb3216c944cbafb35bdb656d2eab97ef73c0c165a1cd3e319"
 
 [[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
+
+[[package]]
 name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6485,6 +6537,18 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+
+[[package]]
+name = "windows-native-keyring-store"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "063426e76fdec7438d56bb777f67e318a84a25c707b07e575cb8b78e10c028f8"
+dependencies = [
+ "byteorder",
+ "keyring-core",
+ "windows-sys 0.61.2",
+ "zeroize",
+]
 
 [[package]]
 name = "windows-numerics"
