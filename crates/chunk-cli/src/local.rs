@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::building;
 use report::Reporter;
 
+mod dev_vars;
 mod logs;
 mod plain;
 mod reload;
@@ -48,6 +49,9 @@ pub(crate) struct Options {
     /// Accept logins without Mojang authentication, using offline-mode UUIDs. For local testing only.
     #[arg(long)]
     offline_logins: bool,
+    /// Read the variables chunk.toml's `[env.NAME.vars]` overrides, rather than only its top-level `[vars]`.
+    #[arg(long = "env", value_name = "NAME")]
+    environment: Option<String>,
 }
 
 struct Settings {
@@ -57,6 +61,8 @@ struct Settings {
     bind: SocketAddr,
     control_bind: SocketAddr,
     offline_logins: bool,
+    /// Selects the `[env.<name>.vars]` deployments read.
+    environment_name: Option<String>,
 }
 
 /// A packaged release checked against its Java runtime and projected into a control release.
@@ -65,6 +71,8 @@ pub(super) struct Staged {
     java: PathBuf,
     control: chunk_control::Release,
     bundle: chunk_contract::Deployment,
+    /// The project's `.dev.vars`, read as it was built.
+    secrets: chunk_backend::Secrets,
 }
 
 /// Requests from the terminal UI or plain-mode input.
@@ -146,6 +154,7 @@ async fn serve(
         bind: options.bind,
         control_bind: options.control_bind,
         offline_logins: options.offline_logins,
+        environment_name: options.environment.clone(),
     };
     let watched = if options.no_watch {
         None
@@ -177,9 +186,15 @@ async fn stage(
         () = stop.cancelled() => building::cancelled(stop)?,
         result = java_version(&java, built.java.version) => result?,
     }
+    let secrets = dev_vars::read(&project.root)?;
+    let mut bundle: chunk_contract::Deployment = chunk_service::read(&built.release.directory.join("backend.json"))?;
+    let missing: Vec<_> = bundle.contracts.env.secrets.iter().filter(|name| secrets.get(name).is_none()).collect();
+    if !missing.is_empty() {
+        let missing = missing.iter().map(|name| name.as_str()).collect::<Vec<_>>().join(", ");
+        tracing::warn!("required secrets missing from {}: {missing}", dev_vars::FILE);
+    }
     let deployment = version(&built.release.id);
     let mut control = control_config(&project.metadata, &built.release.id, &deployment, &built.release.apps)?;
-    let mut bundle: chunk_contract::Deployment = chunk_service::read(&built.release.directory.join("backend.json"))?;
     bundle.validate().map_err(io::Error::other)?;
     if bundle.id != built.release.id {
         return Err(io::Error::other("published backend deployment differs from release"));
@@ -191,7 +206,7 @@ async fn stage(
         session_configurations: contracts.session_configurations,
         destinations: contracts.destinations,
     };
-    Ok(Staged { release: built.release, java, control, bundle })
+    Ok(Staged { release: built.release, java, control, bundle, secrets })
 }
 
 fn project_summary(project: &building::Project) -> String {

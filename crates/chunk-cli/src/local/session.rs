@@ -206,6 +206,8 @@ impl<'a> Session<'a> {
         self.stale = true;
         let outcome = match result.map_err(io::Error::other).and_then(|built| built) {
             Ok((staged, elapsed)) => {
+                // Unchanged releases still pick up an edited `.dev.vars`.
+                self.shared.set_secrets(staged.secrets.clone());
                 let release = short(&staged.release.id).to_owned();
                 let deployed = if forced { self.restart(staged).await } else { self.deploy(staged).await };
                 deployed.map(|summary| {

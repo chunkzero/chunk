@@ -66,9 +66,14 @@ runs per project at a time. `--java PATH` overrides the Java executable Gradle s
 Java version. `--offline-logins` admits players without Mojang authentication, under offline-mode UUIDs; use it only for
 local testing.
 
-`chunk dev` watches the project's sources, except build output, `.chunk`, `dist`, `node_modules` and hidden files, and
-rebuilds 300 ms after the last change (`--no-watch` rebuilds only on request). A new release starts beside the running
-one and new players go to it:
+Backend functions read `chunk.toml`'s top-level `[vars]`, or with `--env NAME` its `[env.NAME.vars]` over them. Actions
+read their secrets from `.dev.vars` in the project root: `NAME=value` lines, with `#` comments and optional quotes. Keep
+it out of version control, as the project template's `.gitignore` does. `chunk dev` reads it on every rebuild, editing
+it triggers one, and it warns, by name only, about secrets `[secrets] required` lists that it lacks.
+
+`chunk dev` watches the project's sources, except build output, `.chunk`, `dist`, `node_modules` and hidden files other
+than `.dev.vars`, and rebuilds 300 ms after the last change (`--no-watch` rebuilds only on request). A new release
+starts beside the running one and new players go to it:
 
 - If only backend code changed, existing sessions stay on the previous release until their players leave.
 - If an app's JAR changed, earlier releases drain: they stop once empty for 10 seconds, or after `--drain-seconds`
