@@ -78,6 +78,123 @@ async fn core_replicates_where_management_grants_and_a_fresh_core_restores_from_
     tokio::time::timeout(Duration::from_secs(60), running).await.unwrap().unwrap().unwrap();
 }
 
+/// Object storage in memory, standing in for the buckets management grants.
+#[derive(Default)]
+struct Memory(Mutex<BTreeMap<String, Vec<u8>>>);
+
+impl Memory {
+    fn keys(&self) -> Vec<String> {
+        self.0.lock().unwrap().keys().cloned().collect()
+    }
+}
+
+impl chunk_store::ObjectStorage for Memory {
+    fn put(&self, key: &str, bytes: Vec<u8>) -> std::io::Result<()> {
+        self.0.lock().unwrap().insert(key.into(), bytes);
+        Ok(())
+    }
+
+    fn create(&self, key: &str, bytes: Vec<u8>) -> std::io::Result<bool> {
+        let mut objects = self.0.lock().unwrap();
+        if objects.contains_key(key) {
+            return Ok(false);
+        }
+        objects.insert(key.into(), bytes);
+        Ok(true)
+    }
+
+    fn get(&self, key: &str) -> std::io::Result<Vec<u8>> {
+        let objects = self.0.lock().unwrap();
+        objects.get(key).cloned().ok_or_else(|| std::io::ErrorKind::NotFound.into())
+    }
+
+    fn list(&self, prefix: &str) -> std::io::Result<Vec<chunk_store::Listed>> {
+        let objects = self.0.lock().unwrap();
+        let below = objects.iter().filter(|(key, _)| key.starts_with(&format!("{prefix}/")));
+        let listed = below.map(|(key, bytes)| chunk_store::Listed {
+            key: key.clone(),
+            size: bytes.len() as u64,
+            modified: std::time::SystemTime::now(),
+        });
+        Ok(listed.collect())
+    }
+
+    fn delete(&self, key: &str) -> std::io::Result<()> {
+        self.0.lock().unwrap().remove(key);
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_s_core_forks_the_named_log_and_reports_its_newest_deployment_without_serving_it() {
+    let harness = Harness::new().await;
+    // The source replicated two deployments that the fork's control never ran.
+    let (source, target) = (Arc::new(Memory::default()), Arc::new(Memory::default()));
+    let replicated = |storage: &Arc<Memory>| chunk_store::Replication::new(storage.clone());
+    let state = harness.directory.path().join("source");
+    let source_core = CoreConfig {
+        environment: "env_source".into(),
+        control_record: state.join("control.json"),
+        state,
+        replication: Some(replicated(&source)),
+        ..harness.core()
+    };
+    let core = Core::start(source_core, || {}).await.unwrap();
+    harness.abandon_in(&core, 2).await;
+    core.stop(|| {}).await.unwrap();
+
+    let grant = |prefix: &str| ObjectStore {
+        endpoint: "http://127.0.0.1:9".into(),
+        bucket: "logs".into(),
+        prefix: prefix.into(),
+        access_key_id: "key".into(),
+        secret_access_key: "secret".into(),
+        ..ObjectStore::default()
+    };
+    *harness.management.restore.lock().unwrap() = Some(Restore {
+        source: Some(grant("env_source/")),
+        snapshot_id: String::new(),
+        source_environment_id: "env_source".into(),
+    });
+    harness.management.grant(grant("env_test/"));
+    let mut config = harness.core();
+    let stop = CancellationToken::new();
+    let registration =
+        Registration::attach(&harness.management_config(), &mut config, &stop).await.unwrap().expect("attached");
+    let fork = config.fork.as_mut().expect("a fork source");
+    assert_eq!((fork.environment.as_str(), fork.snapshot), ("env_source", None));
+
+    // The registered configuration starts core, with the granted buckets in memory.
+    fork.replication = replicated(&source);
+    config.replication = Some(replicated(&target));
+    let core = Core::start(config, || {}).await.unwrap();
+    assert!(target.keys().iter().any(|key| key.contains("/snapshots/")), "{:?}", target.keys());
+    let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
+    let managed = Managed::new(
+        &harness.management_config(),
+        lease,
+        registration,
+        &harness.state(),
+        &core,
+        &gateway,
+        Some(GatewayConfig::new("127.0.0.1:0".parse().unwrap())),
+    );
+    let reported = async {
+        while harness.management.restored.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        error = managed.run() => panic!("{error}"),
+        () = reported => {}
+    }
+    drop(managed);
+    assert_eq!(*harness.management.restored.lock().unwrap(), ["dep_abandoned_1"]);
+    assert!(gateway.get().is_none());
+    assert_eq!(core.control().unwrap().current_release().unwrap(), None);
+    core.stop(|| {}).await.unwrap();
+}
+
 /// Waits until `log_store` signs with `token`.
 async fn renewed(log_store: &LogStore, token: &str) {
     let credentials = log_store.credentials().unwrap();

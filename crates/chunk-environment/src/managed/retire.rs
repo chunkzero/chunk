@@ -113,7 +113,10 @@ impl Managed<'_> {
         let deployments = lock(&self.deployments);
         let names: BTreeSet<_> = resident.iter().map(|id| id.as_str().to_owned()).collect();
         let current = match control.current_release() {
-            Ok(current) => current,
+            // Until a deployment is first made current, the resident ones keep their contracts: in a fork, the restored
+            // ones hold the schema the release it deploys first may need, after a restart too.
+            Ok(None) => return Vec::new(),
+            Ok(Some(current)) => current,
             Err(error) => {
                 tracing::warn!(%error, "current release unknown");
                 return Vec::new();
@@ -129,7 +132,7 @@ impl Managed<'_> {
         let mut stopped = Vec::new();
         for id in resident {
             let name = id.as_str();
-            if deployments.kept(name) || current.as_deref() == Some(name) {
+            if deployments.kept(name) || current == name {
                 continue;
             }
             let asked = stopping.contains(name);

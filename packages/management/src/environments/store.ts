@@ -18,9 +18,16 @@ export async function advanceRevision(db: Db, environmentId: string): Promise<vo
  * gateways and reported login count are dropped. A new lease starts with no accepted status report.
  *
  * The takeover is read once the environment's row is locked, and never precedes the current owner's, so ownership
- * windows never invert or overlap however the claims' transactions interleave.
+ * windows never invert or overlap however the claims' transactions interleave. `firstClaim` runs in the claim's
+ * transaction when no core attached with an epoch before, as a fork's core does once it has restored.
  */
-export async function claimLease(sql: Sql, environmentId: string, instanceId: string, epoch: bigint) {
+export async function claimLease(
+  sql: Sql,
+  environmentId: string,
+  instanceId: string,
+  epoch: bigint,
+  firstClaim?: (tx: Db) => Promise<void>,
+) {
   const { lease } = await sql.begin(async (tx) => {
     const [environment] = await tx<{ epoch: bigint; owner_instance_id: string }[]>`
       select epoch, owner_instance_id from environments where id = ${environmentId} for update`;
@@ -34,6 +41,7 @@ export async function claimLease(sql: Sql, environmentId: string, instanceId: st
     if (epoch < environment.epoch) {
       throw failedPrecondition(`epoch ${epoch} is lower than the environment's epoch ${environment.epoch}`);
     }
+    if (environment.epoch === 0n && epoch > 0n) await firstClaim?.(tx);
     if (environment.owner_instance_id && environment.owner_instance_id !== instanceId) {
       await tx`
         insert into superseded_instances (environment_id, instance_id, owned_since, superseded_time)

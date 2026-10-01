@@ -131,6 +131,7 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
         fresh: true,
         defers_retirement: false,
         replication: None,
+        fork: None,
     };
     let core = Core::start(config, || {
         reporter.done("Backend", "embedded");

@@ -72,6 +72,8 @@ enum DeploymentTrigger {
   DEPLOYMENT_TRIGGER_DEPLOY = 1;
   DEPLOYMENT_TRIGGER_PROMOTE = 2;
   DEPLOYMENT_TRIGGER_ROLLBACK = 3;
+  // An environment fork, deploying the release its restored data was serving.
+  DEPLOYMENT_TRIGGER_FORK = 4;
 }
 
 message App {

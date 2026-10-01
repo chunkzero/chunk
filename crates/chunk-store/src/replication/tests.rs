@@ -76,6 +76,11 @@ pub(crate) fn snapshotting(storage: &Arc<Memory>) -> Replication {
     Replication { snapshot_segments: 2, ..manual(storage) }
 }
 
+/// The latest state `storage` holds, as the environment `local` replicated it.
+fn latest(storage: &Arc<Memory>) -> ForkSource {
+    ForkSource { replication: manual(storage), environment: "local".into(), snapshot: None }
+}
+
 pub(crate) fn open(path: &Path, replication: Replication) -> (SqliteStore, Replicator) {
     SqliteStore::open_replicated(path, "local", replication).unwrap()
 }
@@ -463,7 +468,7 @@ fn a_fork_copies_the_latest_state_into_a_new_lineage_without_writing_to_the_sour
     let target = Arc::new(Memory::default());
     let forked = directory.path().join("fork.db");
     let (mut fork, fork_replicator) =
-        SqliteStore::fork(&manual(&source), "local", &forked, "preview", manual(&target), false).unwrap();
+        SqliteStore::fork(&latest(&source), &forked, "preview", manual(&target), false).unwrap();
     assert_eq!(fork.epoch(), Epoch(1));
     assert_eq!(count(&target, "/snapshots/"), 1);
     fork.commit(commit("fork-only", 2, vec![write("b", Some(json!({"coins": 2})))])).unwrap();
@@ -481,25 +486,11 @@ fn a_fork_copies_the_latest_state_into_a_new_lineage_without_writing_to_the_sour
     assert_eq!(dump(&restored), dump(&forked));
 
     assert!(matches!(
-        SqliteStore::fork(
-            &manual(&source),
-            "local",
-            directory.path().join("again.db"),
-            "preview",
-            manual(&target),
-            false
-        ),
+        SqliteStore::fork(&latest(&source), directory.path().join("again.db"), "preview", manual(&target), false),
         Err(Error::Invalid(_))
     ));
     assert!(matches!(
-        SqliteStore::fork(
-            &manual(&target),
-            "local",
-            directory.path().join("wrong.db"),
-            "other",
-            manual(&Arc::default()),
-            false
-        ),
+        SqliteStore::fork(&latest(&target), directory.path().join("wrong.db"), "other", manual(&Arc::default()), false),
         Err(Error::EnvironmentMismatch)
     ));
 }
@@ -523,8 +514,7 @@ fn a_fork_drops_retry_contexts_system_rows_and_unfinished_jobs_unless_asked_to_k
     let fresh = RetryContext { deployment: "v1".into(), timestamp: 3, seed: 4 };
     let fork = |name: &str, keep_jobs| {
         let (store, _replicator) = SqliteStore::fork(
-            &manual(&source),
-            "local",
+            &latest(&source),
             directory.path().join(name),
             "preview",
             manual(&Arc::default()),
@@ -546,12 +536,72 @@ fn a_fork_drops_retry_contexts_system_rows_and_unfinished_jobs_unless_asked_to_k
 
     // Failing after the database is installed still leaves no inherited work in it.
     let interrupted = directory.path().join("interrupted.db");
-    let failing = Arc::new(FailingLists { storage: Arc::default(), remaining: Mutex::new(1) });
-    assert!(SqliteStore::fork(&manual(&source), "local", &interrupted, "preview", manual_on(failing), false).is_err());
+    let failing = Arc::new(FailingLists { storage: Arc::default(), remaining: Mutex::new(2) });
+    assert!(SqliteStore::fork(&latest(&source), &interrupted, "preview", manual_on(failing), false).is_err());
     let mut reopened = SqliteStore::open(&interrupted, "preview").unwrap();
     assert!(reopened.jobs().unwrap().records.is_empty());
     assert_eq!(reopened.prepare_operation(&operation("unfinished"), fresh.clone()).unwrap(), fresh);
     assert_eq!(store.prepare_operation(&operation("unfinished"), fresh).unwrap(), inherited);
+}
+
+#[test]
+fn a_fork_of_a_chosen_snapshot_leaves_out_the_segments_after_it() {
+    let source = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) = open(&directory.path().join("source.db"), manual(&source));
+    store.apply_schema(&schema()).unwrap();
+    replicator.flush().unwrap();
+    let key = source.keys().into_iter().find(|key| key.contains("/snapshots/")).unwrap();
+    let Some(segment::Object::Snapshot { epoch, sequence }) = segment::Object::parse(&key, 0) else { panic!("{key}") };
+    let id: SnapshotId = format!("{epoch}-{sequence}").parse().unwrap();
+    assert_eq!(id, SnapshotId { epoch, sequence });
+    store.commit(commit("one", 1, vec![write("a", Some(json!({"coins": 1})))])).unwrap();
+    replicator.flush().unwrap();
+
+    let fork = |snapshot| {
+        let source = ForkSource { snapshot: Some(snapshot), ..latest(&source) };
+        let path = directory.path().join(format!("fork-{snapshot}.db"));
+        SqliteStore::fork(&source, path, "preview", manual(&Arc::default()), false)
+    };
+    let (forked, _replicator) = fork(id).unwrap();
+    assert!(forked.outcome(&operation("one")).unwrap().is_none());
+    assert!(matches!(fork(SnapshotId { sequence: sequence + 1, ..id }), Err(Error::Invalid(_))));
+}
+
+#[test]
+fn open_forked_forks_only_until_the_fork_s_own_storage_holds_a_snapshot() {
+    let source = Arc::new(Memory::default());
+    let directory = tempfile::tempdir().unwrap();
+    let (mut store, replicator) = open(&directory.path().join("source.db"), manual(&source));
+    store.apply_schema(&schema()).unwrap();
+    store.commit(commit("one", 1, vec![write("a", Some(json!({"coins": 1})))])).unwrap();
+    replicator.flush().unwrap();
+
+    // An earlier start claimed epoch 1 but stored no snapshot, so this one forks again under the next epoch.
+    let target = Arc::new(Memory::default());
+    target.create(&segment::claim_key(1), b"interrupted".to_vec()).unwrap();
+    let path = directory.path().join("fork.db");
+    let (mut fork, fork_replicator) =
+        SqliteStore::open_forked(&path, "preview", manual(&target), &latest(&source)).unwrap();
+    assert_eq!(fork.epoch(), Epoch(2));
+    assert_eq!(count(&target, "/snapshots/"), 1);
+    assert!(fork.outcome(&operation("one")).unwrap().is_some());
+    fork.commit(commit("fork-only", 2, vec![write("b", Some(json!({"coins": 2})))])).unwrap();
+    fork_replicator.flush().unwrap();
+    drop((fork, fork_replicator));
+    store.commit(commit("source-only", 2, vec![write("c", Some(json!({"coins": 3})))])).unwrap();
+    replicator.flush().unwrap();
+
+    // From then on the fork opens its own database, or restores its own log without it, never the source's.
+    let (fork, fork_replicator) =
+        SqliteStore::open_forked(&path, "preview", manual(&target), &latest(&source)).unwrap();
+    assert_eq!(fork.epoch(), Epoch(2));
+    drop((fork, fork_replicator));
+    let moved = directory.path().join("moved.db");
+    let (fork, _replicator) = SqliteStore::open_forked(&moved, "preview", manual(&target), &latest(&source)).unwrap();
+    assert_eq!(fork.epoch(), Epoch(3));
+    assert!(fork.outcome(&operation("fork-only")).unwrap().is_some());
+    assert!(fork.outcome(&operation("source-only")).unwrap().is_none());
 }
 
 /// Fails every listing after the first `remaining`.
@@ -667,8 +717,7 @@ fn format_7_snapshots_and_segments_restore_and_fork_before_migrating() {
     storage.put(&segment::segment_key(1, 2, 2), segment::encode(1, [entry.as_slice()]).unwrap()).unwrap();
 
     let (fork, _replicator) = SqliteStore::fork(
-        &manual(&storage),
-        "local",
+        &latest(&storage),
         directory.path().join("fork.db"),
         "preview",
         manual(&Arc::default()),

@@ -1,6 +1,8 @@
 import { create } from "@bufbuild/protobuf";
 import type { ServiceImpl } from "@connectrpc/connect";
 
+import type { Keys } from "../crypto.ts";
+import type { Db } from "../db.ts";
 import type { Deps } from "../deps.ts";
 import { advanceRevision } from "../environments/store.ts";
 import { SecretSchema, SecretService, SetSecretResponseSchema } from "../gen/chunk/management/v1/secrets_pb.ts";
@@ -24,6 +26,17 @@ const utf8 = new TextDecoder("utf-8", { fatal: true });
 /** Binds a stored ciphertext to its environment and name. */
 export function secretContext(environmentId: string, name: string): string {
   return `secret/${environmentId}/${name}`;
+}
+
+/** Copies every secret `from` holds to `to`, which holds none yet, each as its first version. */
+export async function copySecrets(db: Db, keys: Keys, from: string, to: string): Promise<void> {
+  const secrets = await db<{ name: string; ciphertext: Uint8Array }[]>`
+    select name, ciphertext from secrets where environment_id = ${from} and ciphertext is not null`;
+  for (const { name, ciphertext } of secrets) {
+    const value = await keys.cipher.open(ciphertext, secretContext(from, name));
+    const sealed = await keys.cipher.seal(value, secretContext(to, name));
+    await db`insert into secrets (environment_id, name, version, ciphertext) values (${to}, ${name}, 1, ${sealed})`;
+  }
 }
 
 export function secretService({ sql, keys }: Deps): Partial<ServiceImpl<typeof SecretService>> {

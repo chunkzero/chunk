@@ -147,6 +147,7 @@ async fn stop_closes_subscriptions_joins_the_backend_and_releases_its_database()
             secrets: crate::Secrets::default(),
             state: directory.path().join("state"),
             replication: None,
+            fork: None,
         };
         let task = tokio::spawn(crate::server::run(config, ready, stop.clone()));
         // The embedder keeps its readiness handle past shutdown.

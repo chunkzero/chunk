@@ -8,6 +8,7 @@ import {
   AttachResponseSchema,
   ObjectStoreSchema,
   ReleaseArtifactSchema,
+  RestoreSchema,
 } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { releaseKey } from "../releases/store.ts";
@@ -54,8 +55,14 @@ export async function desiredState(
         state: EnvironmentState;
         drain_max_age_seconds: number;
         drain_deadline_seconds: number;
+        forked_from_environment_id: string;
+        forked_from_snapshot_id: string;
+        epoch: bigint;
       }[]
-    >`select project_id, name, revision, lease, state, drain_max_age_seconds, drain_deadline_seconds from environments where id = ${environmentId}`;
+    >`
+      select project_id, name, revision, lease, state, drain_max_age_seconds, drain_deadline_seconds,
+        forked_from_environment_id, forked_from_snapshot_id, epoch
+      from environments where id = ${environmentId}`;
     if (!environment || environment.state === EnvironmentState.DELETING) throw notFound("environment");
     const deployment = await desiredDeployment(tx, environmentId);
     const secrets = await tx<{ name: string; version: bigint; ciphertext: Uint8Array }[]>`
@@ -94,6 +101,17 @@ export async function desiredState(
   if (logStore) {
     const { expireTime, ...grant } = await logStore.grant(environmentId);
     message.logStore = create(ObjectStoreSchema, { ...grant, expireTime: timestamp(expireTime) });
+    // Core attaches only once its log is open, which for a fork means its own log holds a snapshot: from then on it
+    // restores from there, so the source may go.
+    const source = environment.forked_from_environment_id;
+    if (source && environment.epoch === 0n) {
+      const { expireTime: sourceExpireTime, ...sourceGrant } = await logStore.readGrant(source);
+      message.restore = create(RestoreSchema, {
+        source: { ...sourceGrant, expireTime: timestamp(sourceExpireTime) },
+        snapshotId: environment.forked_from_snapshot_id,
+        sourceEnvironmentId: source,
+      });
+    }
   }
   return { message, lease: environment.lease };
 }

@@ -200,3 +200,93 @@ async fn waiting_to_retire_one_deployment_does_not_delay_the_retirement_of_anoth
     assert!(resident(backend.clone()).await.contains(&"dep_a".to_owned()));
     core.stop(|| {}).await.unwrap();
 }
+
+/// Deploys `id` with the first `length` entries of a journal that renames `fighters.name` to `displayName` and
+/// finishes the rename.
+fn renaming(id: &str, length: usize) -> chunk_contract::Deployment {
+    use chunk_contract::{DatabaseSchema, Migration, MigrationKind, MigrationTable};
+    let schema = |field: &str, optional: bool| -> DatabaseSchema {
+        let field = serde_json::json!({field: {"schema": {"type": "string"}, "optional": optional}});
+        serde_json::from_value(serde_json::json!({"fighters": {"fields": field}})).unwrap()
+    };
+    let rename = MigrationTable { added: vec!["displayName".into()], removed: vec!["name".into()], back: true };
+    let entry = |id: &str, kind, finishes: Option<&str>, tables, schema| Migration {
+        id: id.into(),
+        hash: "0".repeat(64),
+        kind,
+        finishes: finishes.map(Into::into),
+        tables,
+        schema,
+    };
+    let journal = [
+        entry("0001_init", MigrationKind::Baseline, None, BTreeMap::new(), schema("name", false)),
+        entry(
+            "0002_rename",
+            MigrationKind::Expand,
+            None,
+            [("fighters".into(), rename.clone())].into(),
+            schema("displayName", true),
+        ),
+        entry(
+            "0003_finish_rename",
+            MigrationKind::Finish,
+            Some("0002_rename"),
+            [("fighters".into(), MigrationTable { removed: rename.removed, ..MigrationTable::default() })].into(),
+            schema("displayName", true),
+        ),
+    ];
+    chunk_contract::Deployment {
+        contracts: chunk_contract::Contracts { migrations: journal[..length].to_vec(), ..Default::default() },
+        contract_version: chunk_contract::CONTRACT_VERSION,
+        runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
+        id: id.into(),
+        source: "export {};".into(),
+        tables: journal[length - 1].schema.clone(),
+        functions: BTreeMap::new(),
+    }
+}
+
+async fn resident_in(core: &Core) -> Vec<String> {
+    let ids = core.backend().unwrap().deployments().await.unwrap();
+    ids.iter().map(|id| id.as_str().to_owned()).collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_keeps_its_restored_contracts_until_its_first_deployment_installs_even_across_a_restart() {
+    let harness = Harness::new().await;
+    // What a fork restores: a source that finished a rename while the old shape was kept, then rolled back to the
+    // release before it. The fork's control never ran any of these.
+    let core = Core::start(harness.core(), || {}).await.unwrap();
+    for deployment in [renaming("dep_old", 1), renaming("dep_renamed", 3), renaming("dep_rollback", 1)] {
+        core.deploy(deployment).await.unwrap();
+    }
+    core.backend().unwrap().release(DeploymentId::new("dep_old").unwrap()).await.unwrap();
+    core.stop(|| {}).await.unwrap();
+
+    // Management deploys the rolled-back release to the fork, whose archive is slow to arrive, and core restarts
+    // meanwhile.
+    for _ in 0..2 {
+        let core = Core::start(harness.core(), || {}).await.unwrap();
+        let (gateway, lease) = (OnceLock::new(), watch::Sender::new(crate::managed::Lease::Waiting));
+        let registration = crate::managed::Registration::local("env_test");
+        let managed =
+            Managed::new(&harness.management_config(), lease, registration, &harness.state(), &core, &gateway, None);
+        {
+            let mut deployments = crate::managed::lock(&managed.deployments);
+            deployments.desired = Some("dep_fork".into());
+            deployments.loading = Some("dep_fork".into());
+        }
+        for _ in 0..3 {
+            managed.retire().await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        assert_eq!(resident_in(&core).await, ["dep_renamed", "dep_rollback"]);
+        drop(managed);
+        core.stop(|| {}).await.unwrap();
+    }
+
+    // Once its archive arrives, the rolled-back release still installs.
+    let core = Core::start(harness.core(), || {}).await.unwrap();
+    core.deploy(renaming("dep_fork", 1)).await.unwrap();
+    core.stop(|| {}).await.unwrap();
+}

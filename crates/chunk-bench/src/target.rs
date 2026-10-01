@@ -192,6 +192,7 @@ pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
         fresh: false,
         defers_retirement: false,
         replication: None,
+        fork: None,
     };
     if init.config.scenario.is_backend() {
         chunk_backend::observe(backend::observe);

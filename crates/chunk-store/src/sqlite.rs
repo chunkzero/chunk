@@ -9,9 +9,9 @@ use rusqlite::Connection;
 use serde_json::Value;
 
 use crate::{
-    Backfill, Commit, DatabaseSchema, Epoch, Error, IndexDefinition, JobIntent, Operation, Outcome, PendingWork,
-    Replication, Replicator, Reply, Request, Result, RetryContext, Revision, Snapshot, Storage, Transform, Work,
-    replication,
+    Backfill, Commit, DatabaseSchema, Epoch, Error, ForkSource, IndexDefinition, JobIntent, Operation, Outcome,
+    PendingWork, Replication, Replicator, Reply, Request, Result, RetryContext, Revision, Snapshot, Storage, Transform,
+    Work, replication,
 };
 
 mod backfill;
@@ -87,37 +87,69 @@ impl SqliteStore {
         Self::replicated(path, writer_lock, environment, replication, &remote)
     }
 
-    /// Creates the database at `path` as `environment` from the latest state
-    /// replicated to `source` as `source_environment`, and replicates it to the
-    /// empty storage of `replication` under a new lineage starting at epoch 1.
-    /// Returns once that storage holds the fork's first snapshot.
+    /// Creates the database at `path` as `environment` from `source`, and
+    /// replicates it to the storage of `replication`, which holds no snapshot
+    /// yet, under the next unused epoch there. Returns once that storage holds
+    /// the fork's first snapshot.
     ///
     /// Documents and operation outcomes are copied. Retry contexts are dropped,
     /// and so are pending and running jobs unless `keep_jobs` is set, so a fork
     /// never runs work scheduled by the source.
     /// # Errors
     /// Fails like [`Self::open_replicated`], and with [`Error::Invalid`] when
-    /// `path` already holds a database, the target storage is not empty or the
-    /// source has no snapshot.
+    /// `path` already holds a database, the target storage holds a snapshot, or
+    /// the source has no snapshot or not the one chosen.
     pub fn fork(
-        source: &Replication,
-        source_environment: &str,
+        source: &ForkSource,
         path: impl AsRef<Path>,
         environment: &str,
         replication: Replication,
         keep_jobs: bool,
     ) -> Result<(Self, Replicator)> {
-        validate_environment(source_environment)?;
+        validate_environment(&source.environment)?;
         validate_environment(environment)?;
         let (path, writer_lock) = bootstrap::acquire_writer_lock(path.as_ref())?;
         if bootstrap::version(&Connection::open(&path)?)? != 0 {
             return Err(Error::Invalid("fork target database already exists"));
         }
         let target = replication.storage();
-        replication::fork(&path, source.storage(), source_environment, environment, target, keep_jobs)?;
+        replication::fork(&path, source, environment, target, keep_jobs)?;
         let remote = replication::Remote::load(target)?;
         let (store, replicator) = Self::replicated(path, writer_lock, environment, replication, &remote)?;
         replicator.flush()?;
+        Ok((store, replicator))
+    }
+
+    /// Opens like [`Self::open_replicated`], except that while neither the
+    /// database at `path` nor the storage of `replication` holds a state yet,
+    /// it is forked from `source` as [`Self::fork`] does without keeping jobs.
+    /// Until the storage holds a snapshot, it returns only once it does, since
+    /// before then `source` holds the only copy of the fork's starting state.
+    /// # Errors
+    /// Fails like [`Self::open_replicated`] and [`Self::fork`].
+    pub fn open_forked(
+        path: impl AsRef<Path>,
+        environment: &str,
+        replication: Replication,
+        source: &ForkSource,
+    ) -> Result<(Self, Replicator)> {
+        validate_environment(&source.environment)?;
+        validate_environment(environment)?;
+        let (path, writer_lock) = bootstrap::acquire_writer_lock(path.as_ref())?;
+        let target = replication.storage();
+        let stored = replication::Remote::load(target)?.source().is_some();
+        if bootstrap::version(&Connection::open(&path)?)? == 0 {
+            if stored {
+                replication::restore(&path, environment, target)?;
+            } else {
+                replication::fork(&path, source, environment, target, false)?;
+            }
+        }
+        let remote = replication::Remote::load(target)?;
+        let (store, replicator) = Self::replicated(path, writer_lock, environment, replication, &remote)?;
+        if !stored {
+            replicator.flush()?;
+        }
         Ok((store, replicator))
     }
 

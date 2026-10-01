@@ -87,6 +87,14 @@ message AttachRequest {
   bool core = 3;
   // Set by core: the log epoch it serves. Every restore starts a new, higher epoch.
   uint64 epoch = 4;
+  // Set by a fork's core started with a restore: the newest deployment
+  // resident in the database it restored, by the deployment ID management
+  // gave it in the environment that wrote it, which is in the fork's
+  // project. When this attach is the fork's first core attach and the fork
+  // has no deployment yet, management deploys that deployment's release to
+  // it under DEPLOYMENT_TRIGGER_FORK. Empty when the restored database holds
+  // no deployment; the fork then stays without one until one is deployed.
+  string restored_deployment_id = 5;
 }
 
 // The environment's complete desired state.
@@ -103,7 +111,9 @@ message AttachResponse {
   repeated SecretValue secrets = 6;
   // Where to replicate the log; unset when replication is off.
   ObjectStore log_store = 7;
-  // Set for forks: when the local log is empty, restore this snapshot first.
+  // Set for forks until their core first attaches: while neither the local
+  // database nor log_store holds the fork's state yet, core creates it from
+  // this restore.
   Restore restore = 8;
   // Set for core: the lease this attach was granted. Constant for the stream.
   uint64 lease = 9;
@@ -149,7 +159,10 @@ message ObjectStore {
 message Restore {
   // The source environment's log, readable only.
   ObjectStore source = 1;
+  // A Snapshot.id of the source; empty restores its latest state.
   string snapshot_id = 2;
+  // The environment that wrote the source's log.
+  string source_environment_id = 3;
 }
 
 message ReportStatusRequest {

@@ -31,6 +31,11 @@ export function Environment() {
             <Fact label="Release">
               <Release deploymentId={environment.activeDeploymentId} />
             </Fact>
+            {environment.forkedFromEnvironmentId && (
+              <Fact label="Forked from">
+                <span className="font-mono text-xs">{environment.forkedFromEnvironmentId}</span>
+              </Fact>
+            )}
             <Fact label="Created">{timeAgo(environment.createTime)}</Fact>
           </dl>
         )}

@@ -5,7 +5,7 @@ use std::{
 };
 
 use super::{
-    ObjectStorage,
+    ForkSource, ObjectStorage, SnapshotId,
     segment::{self, Object},
 };
 use crate::{
@@ -37,6 +37,12 @@ impl Remote {
         let snapshots = self.objects.iter().filter(|object| matches!(object, Object::Snapshot { .. }));
         let epoch = snapshots.map(Object::epoch).max()?;
         Some((epoch, self.uploaded(epoch)))
+    }
+
+    /// `snapshot` alone, as a history without later segments, if it is stored.
+    pub fn at(&self, snapshot: SnapshotId) -> Option<Self> {
+        let object = Object::Snapshot { epoch: snapshot.epoch, sequence: snapshot.sequence };
+        self.objects.contains(&object).then(|| Self { objects: vec![object] })
     }
 
     /// The latest snapshot sequence of `epoch`.
@@ -98,32 +104,45 @@ pub(crate) fn restore(path: &Path, environment: &str, storage: &dyn ObjectStorag
     })
 }
 
-/// Restores the newest state of `source` into `path` as `environment`, owning
-/// epoch 1 of the empty `target`. Only reads from `source`.
+/// Restores `source` into `path` as `environment`, owning the epoch after every
+/// one claimed in `target`, which must hold no snapshot yet. Only reads from the
+/// source's storage. As in a restore, the claim is kept only if `target` shows
+/// no snapshot and no newer claim after it; otherwise the fork fails with
+/// [`Error::StaleReplica`].
 pub(crate) fn fork(
     path: &Path,
-    source: &dyn ObjectStorage,
-    source_environment: &str,
+    source: &ForkSource,
     environment: &str,
     target: &dyn ObjectStorage,
     keep_jobs: bool,
 ) -> Result<()> {
-    if !target.list("epochs")?.is_empty() {
-        return Err(Error::Invalid("fork target storage is not empty"));
+    let existing = Remote::load(target)?;
+    if existing.source().is_some() {
+        return Err(Error::Invalid("fork target storage already holds a snapshot"));
     }
-    let remote = Remote::load(source)?;
+    let storage = source.replication.storage();
+    let remote = Remote::load(storage)?;
+    let remote = match source.snapshot {
+        Some(snapshot) => remote.at(snapshot).ok_or(Error::Invalid("fork snapshot is not in the source storage"))?,
+        None => remote,
+    };
     if remote.source().is_none() {
         return Err(Error::Invalid("fork source has no snapshot"));
     }
     install(path, |temporary| {
-        let replica = rebuild(temporary, source_environment, source, &remote)?;
+        let replica = rebuild(temporary, &source.environment, storage, &remote)?;
         // Cleaned before the file is installed, so no interruption leaves source work behind.
         replica.discard_inherited(keep_jobs)?;
         let token = replica.token()?;
-        if !target.create(&segment::claim_key(1), token.clone().into_bytes())? {
-            return Err(Error::Invalid("fork target storage is not empty"));
+        let claimed = existing.latest_epoch().unwrap_or(0) + 1;
+        if !target.create(&segment::claim_key(claimed), token.clone().into_bytes())? {
+            return Err(Error::StaleReplica);
         }
-        replica.finish(1, &token, environment)
+        let current = Remote::load(target)?;
+        if current.latest_epoch() != Some(claimed) || current.source().is_some() {
+            return Err(Error::StaleReplica);
+        }
+        replica.finish(claimed, &token, environment)
     })
 }
 

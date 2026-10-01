@@ -100,6 +100,9 @@ pub(crate) struct Managed<'a> {
     telemetry: Arc<Telemetry>,
     /// The secrets the backend holds.
     secrets: Mutex<secrets::Versions>,
+    /// Whether core started with a fork's restore, so its database may hold the deployments of the environment it
+    /// was restored from.
+    forked: bool,
     /// Cancelled once core shuts down. From then on no deployment activates, no gateway starts and no status is
     /// reported periodically, while attaches still publish their leases.
     stopping: CancellationToken,
@@ -196,6 +199,7 @@ impl<'a> Managed<'a> {
             renewal: Mutex::new(registration.renewal),
             telemetry: Arc::new(telemetry),
             secrets: Mutex::new(registration.secrets),
+            forked: registration.forked,
             environment: registration.environment,
             releases: release::Store::new(state, core.archives().clone()),
             activation: state.join("managed.json"),
@@ -255,8 +259,10 @@ impl<'a> Managed<'a> {
             Ok(()) => tracing::info!(elapsed_ms = millis(started), "kept release archives restored"),
             Err(error) => tracing::warn!(%error, "kept release archives not restored"),
         }
+        // Read before any desired state arrives, since until then no resident deployment retires.
+        let restored = if self.forked { self.restored().await } else { String::new() };
         tokio::select! {
-            error = self.follow() => error,
+            error = self.follow(&restored) => error,
             never = self.reclaim() => match never {},
             never = self.hand_off_alarms() => match never {},
             never = self.report_failed_auth() => match never {},
@@ -319,9 +325,26 @@ impl<'a> Managed<'a> {
         Ok(())
     }
 
-    async fn follow(&self) -> io::Error {
+    /// The newest deployment resident in a fork's restored database, which management deploys the release of. Control's
+    /// state isn't restored with a fork, so none of these deployments resumes or serves until management asks for one.
+    async fn restored(&self) -> String {
+        let resident = match self.core.backend() {
+            Some(backend) => backend.deployments().await.map_err(io::Error::other),
+            None => Err(io::Error::other("backend is not running")),
+        };
+        match resident {
+            Ok(resident) => resident.last().map(|id| id.as_str().to_owned()).unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(%error, "the restored deployment is unknown; the fork waits for a deploy");
+                String::new()
+            }
+        }
+    }
+
+    /// Attaches as core, with `restored` from [`Self::restored`], until fenced or core can't serve.
+    async fn follow(&self, restored: &str) -> io::Error {
         loop {
-            match self.attach().await {
+            match self.attach(restored).await {
                 Ok(()) => tracing::warn!("management ended the attach"),
                 Err(Interrupted::Retry(error)) => tracing::warn!(%error, "management attach interrupted"),
                 Err(Interrupted::Fatal(error)) => return error,
@@ -333,12 +356,13 @@ impl<'a> Managed<'a> {
 
     /// Applies each new desired revision beside the stream, so a newer one or a fence is seen at once. A newer
     /// revision naming another deployment cancels the work on the one before.
-    async fn attach(&self) -> Result<(), Interrupted> {
+    async fn attach(&self, restored: &str) -> Result<(), Interrupted> {
         let request = v1::AttachRequest {
             instance_id: self.instance_id.clone(),
             version: env!("CARGO_PKG_VERSION").into(),
             core: true,
             epoch: self.core.epoch().map_err(Interrupted::Fatal)?,
+            restored_deployment_id: restored.into(),
         };
         self.attaching.store(true, Ordering::SeqCst);
         let mut stream = deadline(REQUEST_TIMEOUT, self.client.attach(&request)).await?;
@@ -696,6 +720,8 @@ pub(crate) struct Registration {
     renewal: Option<Renewal>,
     /// The secrets core starts with.
     secrets: secrets::Versions,
+    /// Whether management sent a fork's restore.
+    forked: bool,
 }
 
 impl Registration {
@@ -703,9 +729,10 @@ impl Registration {
     /// before it opens the log, and only then knows the epoch a core attach carries. Attaches again until management
     /// answers, or returns `None` once `stop` is cancelled. Object storage management grants replaces `core`'s
     /// replication, and that attach keeps renewing its credentials while core restores and starts. It also names the
-    /// environment, whose variables deployments read, and grants the secrets core starts with.
+    /// environment, whose variables deployments read, grants the secrets core starts with and, for a fork, names the log
+    /// core forks from.
     /// # Errors
-    /// Reports a desired state for another environment or an invalid log store.
+    /// Reports a desired state for another environment, or an invalid log store or restore.
     pub(crate) async fn attach(
         management: &ManagementConfig,
         core: &mut CoreConfig,
@@ -741,6 +768,14 @@ impl Registration {
         if replication.is_some() {
             core.replication = replication;
         }
+        if let Some(restore) = &desired.restore {
+            core.fork = Some(log_store::fork_source(restore)?);
+            tracing::info!(
+                source = restore.source_environment_id,
+                snapshot = restore.snapshot_id,
+                "a fork; its first start forks the source's log"
+            );
+        }
         core.environment_name = Some(desired.environment_name.clone()).filter(|name| !name.is_empty());
         core.secrets = secrets::decode(&desired);
         let secrets = secrets::versions(&desired);
@@ -752,7 +787,8 @@ impl Registration {
             log_store: log_store.clone(),
         };
         let renewal = renewer.start(Some(stream));
-        Ok(Some(Self { instance_id, environment, log_store, renewal, secrets }))
+        let forked = desired.restore.is_some();
+        Ok(Some(Self { instance_id, environment, log_store, renewal, secrets, forked }))
     }
 
     /// A run that replicates nothing management grants.
@@ -765,6 +801,7 @@ impl Registration {
             log_store: Arc::new(log_store),
             renewal: None,
             secrets: Vec::new(),
+            forked: false,
         }
     }
 }

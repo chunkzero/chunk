@@ -1,3 +1,4 @@
+import { untilAborted } from "../abort.ts";
 import { issueEnvironmentToken } from "../auth/tokens.ts";
 import { notify } from "../changes.ts";
 import { advisoryLock, type Db, type Sql } from "../db.ts";
@@ -44,6 +45,7 @@ interface EnvironmentRow {
   alarm_due_seconds: bigint | null;
   alarm_due_nanos: number | null;
   alarm_fired: boolean;
+  forked_from_environment_id: string;
 }
 
 const intervalMs = 5000;
@@ -239,7 +241,8 @@ async function reconcileEnvironment(run: Run, id: string) {
   // Read when the run starts, not when it was scheduled, since it may have waited for the pool.
   const [environment] = await sql<EnvironmentRow[]>`
     select id, state, revision, lease, ready_to_suspend, report_desired_revision, machine_id, machine_addresses,
-      machine_token, alarm_epoch, alarm_generation, alarm_due_seconds, alarm_due_nanos, alarm_fired
+      machine_token, alarm_epoch, alarm_generation, alarm_due_seconds, alarm_due_nanos, alarm_fired,
+      forked_from_environment_id
     from environments
     where id = ${id}`;
   if (!environment) return;
@@ -255,6 +258,12 @@ async function reconcileEnvironment(run: Run, id: string) {
     if (failures.length > 0) throw failures[0];
     // Once no machine is left to write them, and bounded like a provider call so a stalled store holds up no worker.
     if (logStore) {
+      // Forks whose core hasn't attached yet still restore from this log, so it stays until they have or are deleted.
+      const [restoring] = await sql`
+        select 1 from environments
+        where forked_from_environment_id = ${id} and epoch = 0 and state <> ${EnvironmentState.DELETING}
+        limit 1`;
+      if (restoring) return;
       const bound = AbortSignal.any([AbortSignal.timeout(options.timeouts.callMs), ...(signal ? [signal] : [])]);
       await untilAborted(bound, logStore.deleteEnvironment(id, bound));
     }
@@ -266,7 +275,9 @@ async function reconcileEnvironment(run: Run, id: string) {
     retries.clear(coreKey(id));
     return;
   }
-  if (!(await desiredDeployment(sql, id))) return;
+  // A fork's core runs without a deployment: it restores the fork, and its first attach deploys the release the restored
+  // data was serving, if any. Without one it suspends once idle, like any core.
+  if (!environment.forked_from_environment_id && !(await desiredDeployment(sql, id))) return;
 
   // Core has no state to fail into, so it retries for as long as it takes, backing off while calls fail transiently.
   const key = coreKey(id);
@@ -422,19 +433,6 @@ function capacityKey(request: Pick<CapacityRow, "environment_id" | "request_id">
 
 function teardownKey(request: Pick<CapacityRow, "environment_id" | "request_id">): string {
   return `teardown/${request.environment_id}/${request.request_id}`;
-}
-
-/** Settles like `work`, or rejects once `signal` aborts, whether or not `work` stops then. */
-async function untilAborted<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
-  const aborted = Promise.withResolvers<never>();
-  const abort = () => aborted.reject(signal.reason);
-  if (signal.aborted) abort();
-  signal.addEventListener("abort", abort, { once: true });
-  try {
-    return await Promise.race([work, aborted.promise]);
-  } finally {
-    signal.removeEventListener("abort", abort);
-  }
 }
 
 /**

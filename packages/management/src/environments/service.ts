@@ -3,7 +3,8 @@ import type { Timestamp } from "@bufbuild/protobuf/wkt";
 import type { ServiceImpl } from "@connectrpc/connect";
 
 import { notify } from "../changes.ts";
-import { activateDeployment, failDeployment, progressDeployment } from "../deployments/store.ts";
+import type { Db } from "../db.ts";
+import { activateDeployment, deployRestored, failDeployment, progressDeployment } from "../deployments/store.ts";
 import type { Deps } from "../deps.ts";
 import { DeploymentState } from "../gen/chunk/management/v1/common_pb.ts";
 import {
@@ -43,7 +44,13 @@ export function environmentService(deps: Deps): Partial<ServiceImpl<typeof Envir
         (change) => change.kind === "environment" && change.environmentId === environmentId,
       );
       try {
-        const lease = request.core ? await claimLease(sql, environmentId, request.instanceId, request.epoch) : 0n;
+        const restored = request.restoredDeploymentId;
+        const firstClaim = restored
+          ? (tx: Db) => deployRestored(tx, environmentId, restored, deps.jvmImage)
+          : undefined;
+        const lease = request.core
+          ? await claimLease(sql, environmentId, request.instanceId, request.epoch, firstClaim)
+          : 0n;
         let sentRevision: bigint | undefined;
         let sentAt = 0;
         const signal = streamSignal(context.signal, shutdown);

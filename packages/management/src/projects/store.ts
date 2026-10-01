@@ -65,6 +65,11 @@ export function toEnvironment(row: EnvironmentRow, edge: Edge | undefined): Envi
   });
 }
 
+/** The hostname the install assigns a new environment: none without an edge. */
+export function hostnameOf(environmentId: string, edge: Edge | undefined): string {
+  return edge ? `${environmentId.replace("_", "-")}.${edge.domain}` : "";
+}
+
 function joinAddress(hostname: string, edge: Edge | undefined): string {
   if (!hostname) return "";
   return edge && edge.port !== 25_565 ? `${hostname}:${edge.port}` : hostname;

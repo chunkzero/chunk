@@ -48,8 +48,11 @@ export interface Harness {
   close(): Promise<void>;
 }
 
-/** Serves the API on a random port against a fresh schema, a temporary release directory and a fake resolver. */
-export async function startHarness(): Promise<Harness> {
+/**
+ * Serves the API on a random port against a fresh schema, a temporary release directory and a fake resolver, with
+ * `overrides` replacing the defaults.
+ */
+export async function startHarness(overrides: Partial<Deps> = {}): Promise<Harness> {
   if (!databaseUrl) throw new Error("TEST_DATABASE_URL is not set");
   const schema = `test_${randomBytes(6).toString("hex")}`;
   const admin = connect(databaseUrl);
@@ -90,6 +93,7 @@ export async function startHarness(): Promise<Harness> {
     jvmImage: "chunk-jvm:{java}",
     changes,
     shutdown: new AbortController().signal,
+    ...overrides,
   };
   const harness: Harness = {
     sql,
