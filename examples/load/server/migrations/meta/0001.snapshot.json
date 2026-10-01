@@ -21,9 +21,7 @@
       }
     },
     "indexes": {
-      "by_player": [
-        "player"
-      ]
+      "by_player": ["player"]
     }
   }
 }

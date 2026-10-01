@@ -57,13 +57,8 @@
       }
     },
     "indexes": {
-      "by_player": [
-        "player"
-      ],
-      "by_rank": [
-        "rankWins",
-        "rankCaptures"
-      ]
+      "by_player": ["player"],
+      "by_rank": ["rankWins", "rankCaptures"]
     }
   }
 }
