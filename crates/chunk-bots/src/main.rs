@@ -2,6 +2,7 @@
 mod bot;
 mod config;
 mod packets;
+mod pings;
 mod stats;
 mod wire;
 

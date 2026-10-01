@@ -21,11 +21,11 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::OwnedSemaphorePermit,
-    time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout},
+    time::{Instant, MissedTickBehavior, interval_at, sleep_until, timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::{config::Config, packets, stats::Stats, wire};
+use crate::{config::Config, packets, pings::Pings, stats::Stats, wire};
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Radius of each bot's walking circle, in blocks, and its speed, a vanilla walk in blocks per second.
@@ -96,7 +96,7 @@ struct Bot {
     positioned: bool,
     center: [f64; 3],
     angle: f64,
-    ping: Option<(i64, Instant)>,
+    pings: Pings,
     next_ping: Instant,
     next_command: Instant,
 }
@@ -113,7 +113,13 @@ pub async fn run(
     let connected = Instant::now();
     let mut spawned = false;
     let result = async {
-        let stream = TcpStream::connect(&config.address).await.context("connect")?;
+        let deadline = connected + Duration::from_secs(config.login_timeout);
+        let stream = tokio::select! {
+            () = stop.cancelled() => return Ok(()),
+            stream = timeout_at(deadline, TcpStream::connect(&config.address)) => {
+                stream.context("connect timed out")?.context("connect")?
+            }
+        };
         stream.set_nodelay(true)?;
         let offset = |salt, period: f64| connected + Duration::from_secs_f64(period * spread(index, salt));
         let mut bot = Bot {
@@ -128,13 +134,16 @@ pub async fn run(
             positioned: false,
             center: [0.0; 3],
             angle: std::f64::consts::TAU * spread(index, 1),
-            ping: None,
+            pings: Pings::default(),
             next_ping: offset(2, config.ping_interval),
             next_command: offset(3, config.command_interval),
             config: config.clone(),
             stats: stats.clone(),
         };
-        let result = bot.drive(&stop).await;
+        let result = tokio::select! {
+            () = stop.cancelled() => Ok(()),
+            result = bot.drive(deadline) => result,
+        };
         spawned = bot.spawned;
         result
     }
@@ -143,8 +152,8 @@ pub async fn run(
 }
 
 impl Bot {
-    /// Plays until `stop` (Ok) or the connection fails.
-    async fn drive(&mut self, stop: &CancellationToken) -> Result<()> {
+    /// Plays until the connection fails, or until `deadline` if the bot isn't in play by then.
+    async fn drive(&mut self, deadline: Instant) -> Result<()> {
         let name = self.config.name(self.index);
         self.encoder.packet(&Handshake {
             protocol_version: VarInt(VERSION.protocol),
@@ -153,14 +162,14 @@ impl Bot {
             next_state: VarInt(2),
         })?;
         self.encoder.packet(&LoginStart { username: McString::new(&name)?, player_uuid: Uuid([0; 16]) })?;
-        self.flush().await?;
-        let deadline = self.connected + Duration::from_secs(self.config.login_timeout);
+        timeout_at(deadline, self.flush())
+            .await
+            .with_context(|| format!("not in play after {}s", self.config.login_timeout))??;
         let period = Duration::from_secs(1) / self.config.move_hz.max(1);
         let mut ticks = interval_at(self.connected + period.mul_f64(spread(self.index, 4)), period);
         ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             tokio::select! {
-                () = stop.cancelled() => return Ok(()),
                 () = sleep_until(deadline), if !self.spawned => bail!("not in play after {}s", self.config.login_timeout),
                 read = self.stream.read_buf(&mut self.decoder.buffer) => {
                     let read = read.context("read")?;
@@ -240,16 +249,13 @@ impl Bot {
                 self.encoder.packet(&ConfigurationAcknowledged)?;
                 self.phase = Phase::Configuration;
                 self.positioned = false;
+                self.pings.clear();
                 self.settings()?;
                 self.stats.reconfigurations.fetch_add(1, Relaxed);
             }
             (Phase::Play, PlayPong::ID) => {
-                let id = parse::<PlayPong>(body)?.id;
-                if let Some((sent_id, sent)) = self.ping
-                    && sent_id == id
-                {
-                    self.stats.pong(sent.elapsed());
-                    self.ping = None;
+                if let Some(rtt) = self.pings.answered(parse::<PlayPong>(body)?.id, Instant::now()) {
+                    self.stats.pong(rtt);
                 }
             }
             (Phase::Configuration | Phase::Play, packets::CONFIGURATION_DISCONNECT | packets::PLAY_DISCONNECT)
@@ -297,6 +303,7 @@ impl Bot {
 
     /// Walks, pings and runs the command as each falls due.
     fn tick(&mut self, now: Instant) -> Result<()> {
+        self.stats.ping_timeouts.fetch_add(self.pings.expire(Instant::now()), Relaxed);
         if self.config.move_hz > 0 {
             self.angle += SPEED / RADIUS / f64::from(self.config.move_hz);
             let [x, y, z] = self.center;
@@ -307,11 +314,11 @@ impl Bot {
             && now >= self.next_ping
         {
             self.next_ping = now + period;
-            // One ping in flight: an unanswered one is replaced after a period.
-            let id = self.ping.map_or(0, |(id, _)| id) + 1;
+            // Stamped when sent, not at the scheduled tick, which can run late.
+            let (id, pushed_out) = self.pings.sent(Instant::now());
             self.encoder.packet(&PlayPing { id })?;
-            self.ping = Some((id, now));
             self.stats.pings.fetch_add(1, Relaxed);
+            self.stats.ping_timeouts.fetch_add(pushed_out, Relaxed);
         }
         if let Some(command) = &self.config.command
             && now >= self.next_command

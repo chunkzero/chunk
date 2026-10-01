@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Runs chunk-bots from several hosts at once and collects their summaries.
 
-Each host gets an even, disjoint slice of the bots (by `--first`), copies of the binary under /tmp, and the same
+Each host gets an even, disjoint slice of the bots (by `--first`), a copy of the binary under /tmp, and the same
 chunk-bots arguments, so `--login-rate` applies per host. `local` runs on this machine instead of over SSH. Summaries and
-logs land in `--output`, with `summary.json` combining their counts; latency percentiles stay per host. Ctrl-C stops
-every host's bots, which still print their summaries.
+logs land in `--output`, with `summary.json` combining their counts; latency percentiles stay per host. Ctrl-C, or a
+failure while starting, stops this invocation's bots on every host, which still print their summaries; other runs on
+the same hosts are left alone.
 
     scripts/load/run.py --hosts bots-1,bots-2,bots-3 --bots 5000 -- --address play.example.com:25565 --hold 600
 """
@@ -15,17 +16,32 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
-REMOTE = '/tmp/chunk-bots'
+# Seconds the bots get to print their summaries after being told to stop.
+STOP_WAIT = 30
 COUNTS = ('started', 'logged_in', 'spawned', 'playing', 'failed', 'disconnects', 'reconfigurations', 'pings', 'pongs',
-          'commands', 'bytes_in', 'cpu_seconds')
+          'ping_timeouts', 'commands', 'bytes_in', 'cpu_seconds')
 
 
-def command(host, remote):
-    """Wraps a shell command for `host`, raising the open-file limit for the bots' sockets."""
-    shell = f'ulimit -n "$(ulimit -Hn)"; exec {remote}'
-    return ['sh', '-c', shell] if host == 'local' else ['ssh', '-o', 'BatchMode=yes', host, shell]
+def command(host, script):
+    """Runs a POSIX shell script on `host`."""
+    if host == 'local':
+        return ['sh', '-c', script]
+    return ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, shlex.join(['sh', '-c', script])]
+
+
+def stop(runs):
+    """Interrupts the bots of this invocation that are still running, by the PID each recorded at launch."""
+    live = [run for run in runs if run['process'].poll() is None]
+    for run in live:
+        subprocess.run(command(run['host'], f'kill -INT "$(cat {run["pidfile"]})" 2>/dev/null'))
+    for run in live:
+        try:
+            run['process'].wait(timeout=STOP_WAIT)
+        except subprocess.TimeoutExpired:
+            run['process'].kill()
 
 
 def main():
@@ -40,39 +56,48 @@ def main():
     arguments = [argument for argument in options.args if argument != '--']
     options.output.mkdir(parents=True, exist_ok=True)
 
+    marker = uuid.uuid4().hex[:8]
+    touched = []
     runs = []
-    for index, host in enumerate(hosts):
-        first = options.bots * index // len(hosts)
-        count = options.bots * (index + 1) // len(hosts) - first
-        binary = str(options.binary.resolve())
-        if host != 'local':
-            subprocess.run(['scp', '-q', binary, f'{host}:{REMOTE}'], check=True)
-            binary = REMOTE
-        bots = shlex.join([binary, '--json', '--bots', str(count), '--first', str(first), *arguments])
-        name = f'{index}-{host}'
-        stdout = open(options.output / f'{name}.json', 'w')
-        stderr = open(options.output / f'{name}.log', 'w')
-        runs.append((host, name, subprocess.Popen(command(host, bots), stdout=stdout, stderr=stderr,
-                                                    start_new_session=True)))
-        print(f'{host}: bots {first}..{first + count - 1}', flush=True)
-
     try:
-        for _, _, process in runs:
-            process.wait()
+        for index, host in enumerate(hosts):
+            first = options.bots * index // len(hosts)
+            count = options.bots * (index + 1) // len(hosts) - first
+            binary = str(options.binary.resolve())
+            pidfile = f'/tmp/chunk-bots-{marker}-{index}.pid'
+            touched.append((host, pidfile))
+            if host != 'local':
+                remote = f'/tmp/chunk-bots-{marker}-{index}'
+                touched.append((host, remote))
+                subprocess.run(['scp', '-q', binary, f'{host}:{remote}'], check=True)
+                binary = remote
+            bots = shlex.join([binary, '--json', '--bots', str(count), '--first', str(first), *arguments])
+            script = f'ulimit -n "$(ulimit -Hn)"; echo $$ > {pidfile}; exec {bots}'
+            name = f'{index}-{host}'
+            with (open(options.output / f'{name}.json', 'w') as stdout,
+                  open(options.output / f'{name}.log', 'w') as stderr):
+                process = subprocess.Popen(command(host, script), stdout=stdout, stderr=stderr, start_new_session=True)
+            runs.append({'host': host, 'name': name, 'process': process, 'pidfile': pidfile})
+            print(f'{host}: bots {first}..{first + count - 1}', flush=True)
+        for run in runs:
+            run['process'].wait()
     except KeyboardInterrupt:
-        # The bracket keeps the pattern from matching pkill's own shell.
-        for host, _, _ in runs:
-            subprocess.run(command(host, "pkill -INT -f '[c]hunk-bots --json'"))
-        for _, _, process in runs:
-            process.wait()
+        stop(runs)
+    except BaseException:
+        stop(runs)
+        raise
+    finally:
+        for host, path in touched:
+            subprocess.run(command(host, f'rm -f {path}'))
 
     total = dict.fromkeys(COUNTS, 0)
     hosts_summary = {}
-    for host, name, process in runs:
+    for run in runs:
+        host, name = run['host'], run['name']
         try:
             summary = json.loads((options.output / f'{name}.json').read_text())['summary']
         except (ValueError, KeyError):
-            print(f'{host}: no summary (exit {process.returncode}); see {options.output / (name + ".log")}')
+            print(f'{host}: no summary (exit {run["process"].returncode}); see {options.output / (name + ".log")}')
             continue
         hosts_summary[name] = summary
         for key in COUNTS:

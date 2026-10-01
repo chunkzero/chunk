@@ -9,7 +9,7 @@ import dev.chunkzero.runtime.SessionProvider
 import dev.chunkzero.runtime.SessionScope
 import dev.chunkzero.runtime.SessionType
 import dev.chunkzero.runtime.coroutines
-import dev.chunkzero.runtime.repeatEvery
+import dev.chunkzero.runtime.own
 import kotlinx.coroutines.launch
 import net.minestom.server.ServerProcess
 import net.minestom.server.entity.Player
@@ -17,6 +17,7 @@ import net.minestom.server.event.server.ServerTickMonitorEvent
 import net.minestom.server.instance.LightingChunk
 import net.minestom.server.instance.block.Block
 import kotlin.time.Duration.Companion.seconds
+import kotlin.time.toJavaDuration
 
 private const val SAVE_SECONDS = 60L
 private const val TICKS_PER_LOG = 200
@@ -54,7 +55,14 @@ class LobbySession : CoroutineSession() {
                 }.onFailure { LOG.log(System.Logger.Level.WARNING, "save failed for ${player.username}", it) }
             }
         }
-        scope.own(player, scope.repeatEvery(SAVE_SECONDS.seconds) { save() })
+        val interval = SAVE_SECONDS.seconds.toJavaDuration()
+        val task =
+            scope.scheduler
+                .buildTask { save() }
+                .delay(interval)
+                .repeat(interval)
+                .schedule()
+        scope.own(player, task)
     }
 }
 

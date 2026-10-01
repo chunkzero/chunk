@@ -190,11 +190,13 @@ impl Encoder {
 mod tests {
     use super::*;
 
+    /// Feeds the output a byte at a time, as a slow socket would, so every partial state is exercised. Asserts the
+    /// decoder never buffers as much as a skipped frame.
     fn frames(encoder: &Encoder, decoder: &mut Decoder, wanted: impl Fn(i32) -> bool + Copy) -> Vec<Frame> {
         let mut received = Vec::new();
-        // Feed a byte at a time, as a slow socket would, so every partial state is exercised.
         for &byte in &encoder.output {
             decoder.buffer.extend_from_slice(&[byte]);
+            assert!(decoder.buffer.len() < SKIP_ABOVE, "buffered {} bytes", decoder.buffer.len());
             while let Some(frame) = decoder.next(wanted).unwrap() {
                 received.push(frame);
             }
@@ -205,7 +207,16 @@ mod tests {
 
     #[test]
     fn skips_large_unwanted_frames_and_reads_the_rest() {
-        let large: Vec<u8> = (0..40_000_u32).map(|value| (value * 7 % 251) as u8).collect();
+        // Incompressible, so even compressed the frame is well over `SKIP_ABOVE`.
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let large: Vec<u8> = (0..40_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                u8::try_from(state >> 56).unwrap()
+            })
+            .collect();
         for threshold in [None, Some(256)] {
             let mut encoder = Encoder::new();
             let mut decoder = Decoder::new();
@@ -214,6 +225,7 @@ mod tests {
                 decoder.enable_compression();
             }
             encoder.raw(0x2d, &large).unwrap();
+            assert!(encoder.output.len() > 2 * SKIP_ABOVE);
             encoder.raw(0x2c, &[1, 2, 3]).unwrap();
             encoder.raw(0x20, &large[..300]).unwrap();
             encoder.raw(0x0b, &[]).unwrap();

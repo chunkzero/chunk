@@ -26,6 +26,8 @@ pub struct Stats {
     pub reconfigurations: AtomicU64,
     pub pings: AtomicU64,
     pub pongs: AtomicU64,
+    /// Pings unanswered for over thirty seconds, which no pong is counted for.
+    pub ping_timeouts: AtomicU64,
     pub commands: AtomicU64,
     pub bytes_in: AtomicU64,
     /// Microseconds from connecting to the first spawn in play.
@@ -75,6 +77,7 @@ pub struct Summary {
     pub reconfigurations: u64,
     pub pings: u64,
     pub pongs: u64,
+    pub ping_timeouts: u64,
     pub commands: u64,
     pub bytes_in: u64,
     pub login_to_play_ms: Percentiles,
@@ -109,6 +112,7 @@ impl Stats {
             reconfigurations: AtomicU64::new(0),
             pings: AtomicU64::new(0),
             pongs: AtomicU64::new(0),
+            ping_timeouts: AtomicU64::new(0),
             commands: AtomicU64::new(0),
             bytes_in: AtomicU64::new(0),
             login: Mutex::new(histogram()),
@@ -182,6 +186,7 @@ impl Stats {
             reconfigurations: self.reconfigurations.load(Relaxed),
             pings: self.pings.load(Relaxed),
             pongs: self.pongs.load(Relaxed),
+            ping_timeouts: self.ping_timeouts.load(Relaxed),
             commands: self.commands.load(Relaxed),
             bytes_in: self.bytes_in.load(Relaxed),
             login_to_play_ms: Percentiles::of(&lock(&self.login)),

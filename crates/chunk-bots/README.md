@@ -21,8 +21,10 @@ target/release/chunk-bots --address play.example.com:25565 --bots 1000 --first 1
 3. In play, confirms teleports, reports itself loaded and acknowledges chunk batches. The first teleport ends its login;
    `login_to_play_ms` measures from connecting until then.
 4. Then walks a three-block circle around where it was placed at `--move-hz` (default 20, a moving vanilla client),
-   sends a play ping every `--ping-interval` seconds (the gateway relays it to the JVM, so `ping_rtt_ms` includes
-   Minestom's tick), and runs `--command` every `--command-interval` seconds if given.
+   sends a play ping every `--ping-interval` seconds, and runs `--command` every `--command-interval` seconds if given.
+   `ping_rtt_ms` is the round trip through the gateway to the gameplay JVM's connection reader, which answers pings
+   directly, so it measures the network path and the JVM's connection handling, not its tick. Pings unanswered after 30
+   seconds count under `ping_timeouts` instead.
 5. Follows moves between sessions: acknowledges reconfiguration and plays on.
 
 A bot that fails before play counts under `failed`, one disconnected afterwards under `disconnects`, each with its
