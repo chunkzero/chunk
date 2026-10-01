@@ -61,8 +61,8 @@ impl Managed<'_> {
     }
 
     /// Retires every deployment the backend holds that is neither control's current one nor kept for management and
-    /// that is due or was asked to stop, then releases the backend version of each whose JVMs have all exited. A
-    /// deployment loading while the backend holds as many as it can retires the oldest one to make room.
+    /// that is due or was asked to stop, then releases the backend version of each whose JVMs have all exited, fencing
+    /// those asked to stop wherever their jobs and subscriptions stand. A deployment loading while the backend holds as many as it can retires the oldest one to make room.
     async fn retire(&self) {
         let (Ok(control), Some(backend)) = (self.core.control(), self.core.backend()) else { return };
         let resident = match backend.deployments().await {
@@ -70,8 +70,9 @@ impl Managed<'_> {
             Err(error) => return tracing::warn!(%error, "resident deployments unknown"),
         };
         let stopped = self.retire_resident(&control, &resident);
-        for id in &stopped {
-            match backend.release(id.clone()).await {
+        for (id, asked) in &stopped {
+            let released = if *asked { backend.retire(id.clone()).await } else { backend.release(id.clone()).await };
+            match released {
                 Ok(_) | Err(chunk_backend::Error::Busy) => {}
                 Err(error) => tracing::warn!(%error, deployment = id.as_str(), "backend version not released"),
             }
@@ -79,9 +80,14 @@ impl Managed<'_> {
         self.make_room(&control, &backend, &resident).await;
     }
 
-    /// Retires the resident deployments that are due or asked to stop, and returns those whose JVMs have all exited.
-    /// Checked and retired without an await in between, so management cannot ask for one meanwhile.
-    fn retire_resident(&self, control: &Control, resident: &[chunk_js::DeploymentId]) -> Vec<chunk_js::DeploymentId> {
+    /// Retires the resident deployments that are due or asked to stop, and returns those whose JVMs have all exited,
+    /// each with whether it was asked to stop. Checked and retired without an await in between, so management cannot
+    /// ask for one meanwhile.
+    fn retire_resident(
+        &self,
+        control: &Control,
+        resident: &[chunk_js::DeploymentId],
+    ) -> Vec<(chunk_js::DeploymentId, bool)> {
         let mut deployments = lock(&self.deployments);
         let names: BTreeSet<_> = resident.iter().map(|id| id.as_str().to_owned()).collect();
         let current = match control.current_release() {
@@ -104,13 +110,14 @@ impl Managed<'_> {
             if deployments.kept(name) || current.as_deref() == Some(name) {
                 continue;
             }
-            let outcome = if deployments.stopping.contains(name) || due.iter().any(|due| due == name) {
+            let asked = deployments.stopping.contains(name);
+            let outcome = if asked || due.iter().any(|due| due == name) {
                 control.retire_release(name)
             } else {
                 control.release_stopped(name)
             };
             match outcome {
-                Ok(true) => stopped.push(id.clone()),
+                Ok(true) => stopped.push((id.clone(), asked)),
                 Ok(false) => {}
                 Err(error) => tracing::warn!(%error, deployment = name, "release not yet retired"),
             }

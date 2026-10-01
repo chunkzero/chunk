@@ -1,4 +1,4 @@
-//! Retiring a draining release whose sessions have players and whose backend version holds a scheduled job.
+//! Retiring a stopped release whose sessions have players and whose backend version holds a scheduled job.
 
 use super::*;
 use crate::{Core, managed::Managed};
@@ -16,40 +16,8 @@ fn hold(deployment: &str) -> Call {
     }
 }
 
-/// A deployment whose version holds a job once `hold` runs.
-fn holding(id: &str) -> chunk_contract::Deployment {
-    let function = |kind, visibility, arguments: serde_json::Value, result: serde_json::Value| {
-        serde_json::from_value(serde_json::json!({
-            "kind": kind, "visibility": visibility, "export": "", "arguments": arguments, "result": result
-        }))
-        .unwrap()
-    };
-    let at = serde_json::json!({"type": "object", "fields": {"at": {"schema": {"type": "integer"}}}});
-    let mut functions: BTreeMap<String, chunk_contract::Function> = BTreeMap::from([
-        ("hold".into(), function("mutation", "public", at, serde_json::json!({"type": "string"}))),
-        (
-            "flow".into(),
-            function("action", "internal", serde_json::json!({"type": "null"}), serde_json::json!({"type": "null"})),
-        ),
-    ]);
-    for (name, function) in &mut functions {
-        function.export.clone_from(name);
-    }
-    chunk_contract::Deployment {
-        contracts: chunk_contract::Contracts::default(),
-        contract_version: 2,
-        runtime_profile: chunk_contract::RuntimeProfile::TransactionalV1,
-        id: id.into(),
-        source: "export function hold(ctx, args) { return ctx.scheduler.runAt(args.at, 'flow', null); }\n\
-                 export async function flow() { return null; }"
-            .into(),
-        tables: BTreeMap::new(),
-        functions,
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_occupied_draining_release_with_a_backend_job_is_retired_to_free_its_slot() {
+async fn an_occupied_stopped_release_with_a_backend_job_is_retired_without_slot_pressure() {
     let mut harness = Harness::new().await;
     harness.deploy("dep_a", harness.valid());
     let core = Core::start(harness.core(), || {}).await.unwrap();
@@ -67,7 +35,7 @@ async fn an_occupied_draining_release_with_a_backend_job_is_retired_to_free_its_
         harness.expect(1, "dep_a", DeploymentState::InProgress).await;
         harness.expect(1, "dep_a", DeploymentState::Active).await;
 
-        // A player holds a claim on dep_a's session, and dep_a's version holds a job, as do 14 versions beside it.
+        // A player holds a claim on dep_a's session, and dep_a's version holds a job.
         let control = core.control().unwrap();
         let login = ClaimRequest {
             operation_id: "login".into(),
@@ -99,23 +67,13 @@ async fn an_occupied_draining_release_with_a_backend_job_is_retired_to_free_its_
         .expect("the claim reserves a place");
         let backend = core.backend().unwrap();
         backend.mutate("hold-dep_a".into(), hold("dep_a")).await.unwrap();
-        for index in 0..14 {
-            let id = format!("dep_held_{index}");
-            core.deploy(holding(&id)).await.unwrap();
-            backend.mutate(format!("hold-{id}"), hold(&id)).await.unwrap();
-        }
 
-        // dep_b replaces dep_a and stops it, though it has a player and a job, so the backend holds 16 versions. Then
-        // dep_c needs a slot, which the oldest version, dep_a, frees.
+        // dep_b replaces dep_a and stops it, though it has a player and a job, so the backend fences dep_a at once.
         harness.deploy_stopping("dep_b", harness.valid());
         harness.expect(2, "dep_b", DeploymentState::InProgress).await;
         harness.expect(2, "dep_b", DeploymentState::Active).await;
-        assert!(harness.serves("dep_a").await);
-        harness.deploy("dep_c", harness.valid());
-        harness.expect(3, "dep_c", DeploymentState::InProgress).await;
-        harness.expect(3, "dep_c", DeploymentState::Active).await;
         harness.released("dep_a").await;
-        assert!(harness.serves("dep_c").await);
+        assert!(harness.serves("dep_b").await);
         claiming.abort();
     };
     let mut running = Box::pin(managed.run());
