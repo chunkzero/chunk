@@ -265,7 +265,7 @@ async fn claim_destination(login: &Claim, current: &Retarget) -> io::Result<(Cla
 enum Reconnect {
     /// There is no such session, or the login declines it.
     None,
-    /// The session's deployment denied the login, which then goes to the current release.
+    /// The session's deployment denied the login or couldn't admit it, which then goes to the current release.
     Declined,
     /// The session's deployment admitted the login, which core can now claim there.
     Admitted(Box<ClaimGuard>),
@@ -287,7 +287,11 @@ async fn reconnect(platform: &Platform, login: &Claim) -> io::Result<Reconnect> 
     match placed.admit_login(&claim).await {
         Ok(()) => Ok(Reconnect::Admitted(Box::new(ClaimGuard { platform: placed, claim, armed: true, failure: None }))),
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(Reconnect::Declined),
-        Err(error) => Err(error),
+        // The earlier release may have retired since the lookup; the login then goes to the current one.
+        Err(error) => {
+            tracing::debug!(%error, "reconnect admission failed; routing the login normally");
+            Ok(Reconnect::Declined)
+        }
     }
 }
 
