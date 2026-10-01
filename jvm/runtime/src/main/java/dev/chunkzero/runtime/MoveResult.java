@@ -16,6 +16,6 @@ public enum MoveResult {
     STALE,
     /** The destination admits one session, and that session is full. */
     FULL,
-    /** The release offers no such destination. */
+    /** The release declares no such destination. */
     UNKNOWN_DESTINATION
 }

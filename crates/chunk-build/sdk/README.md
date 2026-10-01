@@ -194,8 +194,8 @@ if (result.state === "refused") console.log(result.reason);
 It resolves to `{ state: "accepted", operationId }` once the move is queued; the player's gateway then carries it out,
 and the destination's login and `player.beforeMove` hooks may still turn the player away. Otherwise it resolves to
 `{ state: "refused", reason }`, where `reason` is `"offline"`, `"stale"` (the player is still arriving or already
-moving), `"full"` (a `"reject"` destination whose one session is full) or `"unknown_destination"`. Only actions move
-players; queries, mutations, hooks and commands can't.
+moving), `"full"` (a `"reject"` destination whose one session is full) or `"unknown_destination"` (the release declares
+no such destination). Only actions move players; queries, mutations, hooks and commands can't.
 
 `runQuery`, `runMutation`, the scheduler, hooks and command permissions take a function reference: an object with the
 function's `path`, `kind` and argument and result validators. Write it next to the code that uses it:

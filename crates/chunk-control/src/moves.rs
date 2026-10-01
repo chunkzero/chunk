@@ -53,7 +53,10 @@ impl Control {
             if session.host != host {
                 return Err(Error::Invalid(crate::NOT_HOSTED));
             }
-            let named = ClaimIdentity { delivery_generation: generation.wire(), ..claim.identity(delivery) };
+            let named = claim.identity(delivery);
+            if Generation::from_wire(named.delivery_generation) != generation {
+                return Err(Error::Refused(MoveRefusal::Stale));
+            }
             let connection_id = ClaimRequest::decode(claim.request.as_slice())?.connection_id;
             let request = MoveRequest {
                 operation_id: operation.to_owned(),
@@ -116,9 +119,10 @@ pub(crate) fn validate(request: &MoveRequest) -> Result<()> {
 }
 
 /// Queues `request`'s move within its source's release in the current update, returning the destination claim request.
-/// Refuses a player without a current claim as offline, and a source or player that can't move now as stale.
+/// Refuses a player without any claim as offline, and a source or player that can't move now as stale.
 pub(crate) fn queue(state: &mut State, request: MoveRequest) -> Result<ClaimRequest> {
-    let online = state.players.get(&request.player_id).is_some_and(|owner| owner.current.is_some());
+    let online =
+        state.players.get(&request.player_id).is_some_and(|owner| owner.current.is_some() || owner.pending.is_some());
     let refused = |refusal| Error::Refused(if online { refusal } else { MoveRefusal::Offline });
     if let Some(expected) = &request.source {
         let claim = state.arrived_claim(&expected.claim).ok_or_else(|| refused(MoveRefusal::Stale))?;
@@ -145,7 +149,7 @@ pub(crate) fn queue(state: &mut State, request: MoveRequest) -> Result<ClaimRequ
         return Err(Error::Invalid(crate::MOVE_NAMES_CLAIM));
     }
     let owner = state.players.get(&request.player_id).ok_or(Error::Refused(MoveRefusal::Offline))?;
-    let source = owner.current.as_ref().ok_or(Error::Refused(MoveRefusal::Offline))?;
+    let source = owner.current.as_ref().ok_or_else(|| refused(MoveRefusal::Stale))?;
     let claim = &state.claims[source];
     if claim.phase != Phase::Arrived || owner.pending.is_some() {
         return Err(Error::Refused(MoveRefusal::Stale));

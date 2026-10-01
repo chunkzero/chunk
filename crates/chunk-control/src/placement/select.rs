@@ -8,7 +8,7 @@ use crate::{
     state::{HostState, Phase, SessionState, State},
 };
 
-/// Refuses a move to `demand` that release `name` doesn't offer, or whose destination admits one session, which is full.
+/// Refuses a move to `demand` that release `name` doesn't declare, or whose destination admits one session, which is full.
 pub(crate) fn admit_move(state: &State, name: &str, release: &Release, demand: &SessionDemand) -> Result<()> {
     let unknown = || Error::Refused(MoveRefusal::UnknownDestination);
     if demand.key.is_empty() || demand.key.len() > 128 {
@@ -167,6 +167,9 @@ fn resolve_creation<'a>(
     spec: &'a crate::SessionType,
     policy: Option<&'a chunk_contract::DestinationPolicy>,
 ) -> Result<Creation<'a>> {
+    if policy.is_none() && release.contracts.destinations.is_some() {
+        return Err(Error::Invalid("undeclared destination"));
+    }
     let profile = policy.map_or(spec.machine_profile.as_str(), |policy| policy.destination.machine_profile.as_str());
     if (policy.is_some() || !demand.machine_profile.is_empty()) && demand.machine_profile != profile {
         return Err(Error::Invalid("destination profile mismatch"));

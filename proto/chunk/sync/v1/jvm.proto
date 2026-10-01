@@ -224,7 +224,7 @@ enum MoveRefusal {
   MOVE_REFUSAL_STALE = 2;
   // The destination admits one session, and that session is full.
   MOVE_REFUSAL_FULL = 3;
-  // The player's release offers no such destination.
+  // The player's release declares no such destination.
   MOVE_REFUSAL_UNKNOWN_DESTINATION = 4;
 }
 

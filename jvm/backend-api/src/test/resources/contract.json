@@ -552,6 +552,11 @@
   "destinations": {
     "version": 1,
     "entries": {
+      "apps/destination/destinations/main": {
+        "destination": { "key": "duel", "session_type": "destination/default", "machine_profile": "small" },
+        "overflow": "reject",
+        "empty_timeout_seconds": 60
+      },
       "apps/lobby/destinations/main": {
         "destination": { "key": "main", "session_type": "lobby/default", "machine_profile": "small" },
         "overflow": "replicate",

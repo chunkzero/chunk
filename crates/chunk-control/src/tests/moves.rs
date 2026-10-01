@@ -21,8 +21,14 @@ async fn a_jvm_moves_only_players_it_hosts_under_their_current_generation() {
     let foreign = control.move_hosted("another-host", "move", "source", generation, arena.clone());
     assert!(matches!(foreign, Err(Error::Invalid(crate::NOT_HOSTED))), "{foreign:?}");
     let older = Generation { revision: generation.revision - 1, ..generation };
-    let stale = control.move_hosted(&host, "move", "source", older, arena.clone());
-    assert!(matches!(stale, Err(Error::Refused(MoveRefusal::Stale))), "{stale:?}");
+    // Pairs that pack into the current generation's wire form are still other generations.
+    let carried = Generation { epoch: generation.epoch - 1, revision: generation.revision + (1 << 40) };
+    let oversized = Generation { epoch: generation.epoch + (1 << 24), ..generation };
+    assert_eq!((carried.wire(), oversized.wire()), (generation.wire(), generation.wire()));
+    for named in [older, carried, oversized] {
+        let stale = control.move_hosted(&host, "move", "source", named, arena.clone());
+        assert!(matches!(stale, Err(Error::Refused(MoveRefusal::Stale))), "{named:?}: {stale:?}");
+    }
     assert!(pending_move(&control, &source).is_none());
 
     control.move_hosted(&host, "move", "source", generation, arena).unwrap();
