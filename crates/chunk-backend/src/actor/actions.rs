@@ -269,6 +269,44 @@ impl Drop for Actions {
     }
 }
 
+/// Runs an action of `deployment` on an engine of its own and checks its result against `result`. What its JavaScript
+/// wrote to `console`, and the message of an error it threw, have `grants` redacted.
+fn run_action(
+    deployment: &Deployment,
+    result: &chunk_contract::Schema,
+    grants: &crate::effects::ActionGrants,
+    invocation: ActionInvocation,
+    host: Host,
+    id: &ActionId,
+    cancellation: &Cancellation,
+) -> Result<Arc<str>> {
+    let run = || -> Result<Arc<str>> {
+        let mut engine = Engine::new()?;
+        let deployment_id = DeploymentId::new(&deployment.id)?;
+        engine.register(deployment_id.clone(), deployment.source.clone(), Limits::default())?;
+        let execution = engine.execute_action(&deployment_id, invocation, Rc::new(host), cancellation)?;
+        for log in execution.logs {
+            console!(log.level.as_str(), invocation = %id, message = grants.redact(log.message));
+        }
+        let mut value = serde_json::from_str(&execution.value)?;
+        result.normalize_api(&mut value);
+        validate_wire_value(&value).map_err(Error::Invalid)?;
+        if !result.accepts(&value) {
+            return Err(Error::Contract);
+        }
+        Ok(serde_json::to_string(&value)?.into())
+    };
+    run().map_err(|error| match error {
+        Error::JavaScript(ref inner) => match inner.as_ref() {
+            chunk_js::Error::JavaScript(message) => {
+                Error::from(chunk_js::Error::JavaScript(grants.redact(message.clone())))
+            }
+            _ => error,
+        },
+        _ => error,
+    })
+}
+
 impl Actor {
     pub(super) fn start_action(
         &mut self,
@@ -384,28 +422,22 @@ impl Actor {
         let worker_id = id.clone();
         let worker_cancellation = cancellation.clone();
         let busy = self.actions.activity.begin();
-        let worker = std::thread::Builder::new().name("chunk-action".into()).spawn(move || {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Arc<str>> {
-                    let mut engine = Engine::new()?;
-                    let deployment_id = DeploymentId::new(&deployment.id)?;
-                    engine.register(deployment_id.clone(), deployment.source.clone(), Limits::default())?;
-                    let execution = engine.execute_action(&deployment_id, invocation, Rc::new(host), &worker_cancellation)?;
-                    for log in execution.logs {
-                        tracing::info!(target: "chunk_backend::console", invocation = %worker_id, level = log.level, message = grants.redact(log.message));
-                    }
-                    let mut value = serde_json::from_str(&execution.value)?;
-                    function.result.normalize_api(&mut value);
-                    validate_wire_value(&value).map_err(Error::Invalid)?;
-                    if !function.result.accepts(&value) { return Err(Error::Contract); }
-                    Ok(serde_json::to_string(&value)?.into())
-                })).unwrap_or(Err(Error::ActionOutcomeUnknown));
-                let result = result.map_err(|error| match error {
-                    Error::JavaScript(ref inner) => match inner.as_ref() {
-                        chunk_js::Error::JavaScript(message) => Error::from(chunk_js::Error::JavaScript(grants.redact(message.clone()))),
-                        _ => error,
-                    },
-                    _ => error,
-                });
+        let worker = std::thread::Builder::new()
+            .name("chunk-action".into())
+            .spawn(move || {
+                let run = || {
+                    run_action(
+                        &deployment,
+                        &function.result,
+                        &grants,
+                        invocation,
+                        host,
+                        &worker_id,
+                        &worker_cancellation,
+                    )
+                };
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run))
+                    .unwrap_or(Err(Error::ActionOutcomeUnknown));
                 worker_cancellation.cancel();
                 drop(busy);
                 let _ = events.blocking_send(Event::ActionFinished { id: worker_id, result });

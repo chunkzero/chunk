@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import { Code } from "@connectrpc/connect";
 
 import { issueEnvironmentToken } from "../src/auth/tokens.ts";
+import type { Sql } from "../src/db.ts";
+import { claimLease } from "../src/environments/store.ts";
 import { DeploymentState, LogSeverity, LogSource } from "../src/gen/chunk/management/v1/common_pb.ts";
 import { DeploymentService } from "../src/gen/chunk/management/v1/deployments_pb.ts";
 import { EnvironmentService } from "../src/gen/chunk/management/v1/environment_pb.ts";
@@ -199,6 +201,45 @@ describe.skipIf(!databaseUrl)("EnvironmentService", () => {
     ]);
     a.close();
     b.close();
+  });
+
+  test("a takeover whose transaction began before an earlier one's still never precedes it", async () => {
+    const { environmentId } = await environment();
+    await claimLease(h.sql, environmentId, "core-a", 1n);
+    // C's transaction begins, then waits until B has taken over and committed.
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let begun = () => {};
+    const started = new Promise<void>((resolve) => (begun = resolve));
+    const delayed = {
+      begin: (run: (tx: unknown) => Promise<unknown>) =>
+        h.sql.begin(async (tx) => {
+          await tx`select 1`;
+          begun();
+          await gate;
+          return run(tx);
+        }),
+    } as unknown as Sql;
+    const c = claimLease(delayed, environmentId, "core-c", 1n);
+    await started;
+    await claimLease(h.sql, environmentId, "core-b", 1n);
+    release();
+    await c;
+
+    const windows = await h.sql<{ instance_id: string; from: string; until: string | null }[]>`
+      select instance_id, owned_since::text as from, superseded_time::text as until from superseded_instances
+      where environment_id = ${environmentId}
+      union all
+      select owner_instance_id, owner_since::text, null from environments where id = ${environmentId}
+      order by instance_id`;
+    expect(windows.map((window) => window.instance_id)).toEqual(["core-a", "core-b", "core-c"]);
+    const [a, b, c2] = windows;
+    // Each window ends where the next begins, and none ends before it began.
+    expect([a!.until, b!.until]).toEqual([b!.from, c2!.from]);
+    const [ordered] = await h.sql<{ ok: boolean }[]>`
+      select ${a!.from}::timestamptz <= ${a!.until}::timestamptz
+        and ${b!.from}::timestamptz <= ${b!.until}::timestamptz as ok`;
+    expect(ordered?.ok).toBe(true);
   });
 
   test("a takeover cuts the spans its predecessor stored already", async () => {

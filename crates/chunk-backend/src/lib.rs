@@ -2,6 +2,18 @@
 //! run queries and subscriptions. Durable storage runs on a commit thread; replies and
 //! updates wait for its ordered acks.
 
+/// Logs a line JavaScript wrote through `console` at its method's level, so filters and log capture see its severity.
+macro_rules! console {
+    ($level:expr, $($fields:tt)*) => {
+        match $level {
+            "error" => tracing::error!(target: "chunk_backend::console", $($fields)*),
+            "warn" => tracing::warn!(target: "chunk_backend::console", $($fields)*),
+            "debug" => tracing::debug!(target: "chunk_backend::console", $($fields)*),
+            _ => tracing::info!(target: "chunk_backend::console", $($fields)*),
+        }
+    };
+}
+
 mod actions;
 mod actor;
 mod commands;

@@ -32,27 +32,23 @@ pub fn logging() {
 
 struct Capture(&'static Lines);
 
-/// The target of the backend's events for lines its JavaScript logged, which carry the console method in `level`.
-const CONSOLE: &str = "chunk_backend::console";
 /// The deployment an event names is cut to this many bytes.
 const MAX_DEPLOYMENT_BYTES: usize = 128;
 
 impl<S: Subscriber> Layer<S> for Capture {
     fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
         let metadata = event.metadata();
-        let console = metadata.target() == CONSOLE;
-        if !self.0.capturing.load(Ordering::Relaxed) || (!console && *metadata.level() > Level::INFO) {
-            return;
-        }
-        let mut text = Text::default();
-        event.record(&mut text);
-        let level = if console { text.console.unwrap_or(Level::INFO) } else { *metadata.level() };
-        let severity = match level {
+        let severity = match *metadata.level() {
             Level::ERROR => LogSeverity::Error,
             Level::WARN => LogSeverity::Warn,
             Level::INFO => LogSeverity::Info,
             _ => return,
         };
+        if !self.0.capturing.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut text = Text::default();
+        event.record(&mut text);
         let source = if metadata.target().starts_with("chunk_proxy") { LogSource::Gateway } else { LogSource::Core };
         self.0.push(source, severity, text.line.text, text.deployment);
     }
@@ -91,33 +87,23 @@ impl fmt::Write for Escaped {
     }
 }
 
-/// An event's message, then its other fields as `name=value`, up to [`MAX_LINE_BYTES`], the deployment the event names
-/// in its `deployment` field, and the console method a [`CONSOLE`] event names in its `level` field.
+/// An event's message, then its other fields as `name=value`, up to [`MAX_LINE_BYTES`], and the deployment the event
+/// names in its `deployment` field.
 struct Text {
     line: Escaped,
     deployment: Option<String>,
-    console: Option<Level>,
 }
 
 impl Default for Text {
     fn default() -> Self {
-        Self { line: Escaped { text: String::new(), limit: MAX_LINE_BYTES }, deployment: None, console: None }
+        Self { line: Escaped { text: String::new(), limit: MAX_LINE_BYTES }, deployment: None }
     }
 }
 
 impl tracing::field::Visit for Text {
     fn record_str(&mut self, field: &Field, value: &str) {
-        match field.name() {
-            "deployment" => self.deployment = Some(escaped(MAX_DEPLOYMENT_BYTES, value)),
-            "level" => {
-                self.console = Some(match value {
-                    "error" => Level::ERROR,
-                    "warn" => Level::WARN,
-                    "debug" => Level::DEBUG,
-                    _ => Level::INFO,
-                });
-            }
-            _ => {}
+        if field.name() == "deployment" {
+            self.deployment = Some(escaped(MAX_DEPLOYMENT_BYTES, value));
         }
         self.write_field(field, &value);
     }
@@ -271,18 +257,19 @@ impl Lines {
 mod tests {
     use super::*;
 
-    /// The lines `log` captures, logging for `serving`.
-    fn captured(serving: &str, log: impl FnOnce()) -> Vec<Line> {
+    /// The lines `log` captures under `RUST_LOG=filter`, logging for `serving`.
+    fn captured(filter: &str, serving: &str, log: impl FnOnce()) -> Vec<Line> {
         let lines: &'static Lines = Box::leak(Box::new(Lines::new()));
         lines.capture();
         lines.serving(serving);
-        tracing::subscriber::with_default(tracing_subscriber::registry().with(Capture(lines)), log);
+        let subscriber = tracing_subscriber::registry().with(EnvFilter::new(filter)).with(Capture(lines));
+        tracing::subscriber::with_default(subscriber, log);
         lines.oldest(usize::MAX, usize::MAX, 0)
     }
 
     #[test]
     fn nul_characters_are_escaped_within_the_line_bound() {
-        let lines = captured("", || {
+        let lines = captured("info", "", || {
             tracing::warn!(error = %std::io::Error::other("bad\0hook"), "hook \0 failed");
             tracing::info!("{}", "\0".repeat(MAX_LINE_BYTES));
         });
@@ -291,20 +278,21 @@ mod tests {
     }
 
     #[test]
-    fn console_lines_take_the_severity_of_their_console_method() {
-        use LogSeverity::{Error, Info, Warn};
-        let lines = captured("", || {
-            for level in ["error", "warn", "log", "info", "debug"] {
-                tracing::info!(target: CONSOLE, level, message = level);
-            }
+    fn console_lines_keep_their_severity_under_a_stricter_filter() {
+        // As the backend logs `console.error`, `console.warn`, `console.info` and `console.debug`.
+        let lines = captured("warn", "", || {
+            tracing::error!(target: "chunk_backend::console", message = "error");
+            tracing::warn!(target: "chunk_backend::console", message = "warn");
+            tracing::info!(target: "chunk_backend::console", message = "info");
+            tracing::debug!(target: "chunk_backend::console", message = "debug");
         });
         let severities: Vec<_> = lines.iter().map(|line| line.severity).collect();
-        assert_eq!(severities, [Error, Warn, Info, Info]);
+        assert_eq!(severities, [LogSeverity::Error, LogSeverity::Warn]);
     }
 
     #[test]
     fn a_line_belongs_to_the_deployment_its_event_names() {
-        let lines = captured("dep_b", || {
+        let lines = captured("info", "dep_b", || {
             tracing::info!(deployment = "dep_a", "query on a retained deployment");
             tracing::info!("query on the current deployment");
         });

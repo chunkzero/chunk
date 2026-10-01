@@ -169,19 +169,19 @@ export function reportServices({ sql }: Deps): Reports {
 }
 
 /**
- * Ends the instance's stored spans at the takeover that superseded it, now, and drops those that start later, as
+ * Ends the instance's stored spans at the takeover that superseded it, `at`, and drops those that start later, as
  * `reportUsage` cuts its later reports.
  */
-export async function endUsage(db: Db, environmentId: string, instanceId: string): Promise<void> {
+export async function endUsage(db: Db, environmentId: string, instanceId: string, at: string): Promise<void> {
   await db`
     delete from usage_records
-    where environment_id = ${environmentId} and instance_id = ${instanceId} and start_time >= now()`;
+    where environment_id = ${environmentId} and instance_id = ${instanceId} and start_time >= ${at}::timestamptz`;
   await db`
     update usage_records
-    set end_time = now(),
-      player_seconds = floor(player_seconds * extract(epoch from now() - start_time)
+    set end_time = ${at}::timestamptz,
+      player_seconds = floor(player_seconds * extract(epoch from ${at}::timestamptz - start_time)
         / extract(epoch from end_time - start_time))::bigint
-    where environment_id = ${environmentId} and instance_id = ${instanceId} and end_time > now()`;
+    where environment_id = ${environmentId} and instance_id = ${instanceId} and end_time > ${at}::timestamptz`;
 }
 
 function batch<T>(items: T[], field: string): T[] {
