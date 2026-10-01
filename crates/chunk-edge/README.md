@@ -13,6 +13,7 @@ streams from management.
 | `CHUNK_MANAGEMENT_URL`       | required        | The management service.                                                                        |
 | `CHUNK_EDGE_TOKEN`           | required        | The token the edge calls management's `EdgeService` with; management's own `CHUNK_EDGE_TOKEN`. |
 | `CHUNK_BIND`                 | `0.0.0.0:25565` | The player listener.                                                                           |
+| `CHUNK_HEALTH_BIND`          | unset           | Serves `GET /ready` over HTTP here; no health listener when unset.                             |
 | `CHUNK_HANDSHAKE_TIMEOUT_MS` | `5000`          | How long a client gets for its handshake, and for each step of a status exchange.              |
 | `CHUNK_WAKE_TIMEOUT_MS`      | `25000`         | How long a login waits for a sleeping environment to wake.                                     |
 | `RUST_LOG`                   | `info`          | The log filter.                                                                                |
@@ -33,6 +34,10 @@ for this.
 - **Wake on login.** A login to a sleeping environment calls `EdgeService.Wake` and holds the connection until a gateway
   is listed or the wake timeout passes. A refused wake, for example for a client that recently failed authentication,
   ends the login with a message saying the server is sleeping or starting.
+- **Readiness.** With `CHUNK_HEALTH_BIND` set, the edge answers `GET /ready` with `200` once it has loaded routes from
+  management at least once, and `503` before that. It stays `200` through later management outages, because the edge
+  keeps routing from its cached routes. Any other path is `404`. The listener stops with the edge, so a hung or stopped
+  edge doesn't answer and a failover check such as keepalived's fails on its own timeout.
 - **Limits.** At most 8192 connections may be open before being handed to a gateway, and 32 per client address (per /64
   for IPv6).
 
