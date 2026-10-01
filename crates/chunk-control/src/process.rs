@@ -186,6 +186,10 @@ impl ProcessHost {
             if let Some(address) = self.config.private_address {
                 command.env("CHUNK_PLAYER_ADDRESS", address.to_string());
             }
+            match &self.config.environment_name {
+                Some(name) => command.env("CHUNK_ENVIRONMENT_NAME", name),
+                None => command.env_remove("CHUNK_ENVIRONMENT_NAME"),
+            };
             inherit_lock(&mut command, marker)?;
             command.spawn()
         })();

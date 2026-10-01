@@ -30,7 +30,8 @@ working directory under `/tmp`. The heap is the lowest of the cgroup v2 memory l
 launch profile's memory, less 200 MiB and a tenth of that memory for everything outside the heap. Besides the runner's
 own environment, the JVM gets what the Java runtime reads: `CHUNK_PROCESS_TOKEN` (the machine credential),
 `CHUNK_DEPLOYMENT`, `CHUNK_CORE_ENDPOINT`, `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`,
-`CHUNK_APP_ID`, `CHUNK_ARTIFACT_DIGEST` and `CHUNK_PLAYER_ADDRESS`.
+`CHUNK_APP_ID`, `CHUNK_ARTIFACT_DIGEST`, `CHUNK_PLAYER_ADDRESS` and, when core serves a named environment,
+`CHUNK_ENVIRONMENT_NAME`.
 
 ## AOT cache
 

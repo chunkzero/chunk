@@ -188,6 +188,7 @@ fn service(fixture: &Fixture) -> SyncService {
         runs: Arc::default(),
         archives: platform::ArchiveReads::new(fixture.archives.clone()),
         aot: fixture.aot.clone(),
+        environment_name: String::new(),
         epoch: fixture.backend.system().epoch().0,
         private_address: None,
         stop: CancellationToken::new(),

@@ -61,3 +61,4 @@ The host (control's local process host under `chunk dev`, or `chunk-jvm` on a JV
 | `CHUNK_MACHINE_PROFILE`                        | The machine profile it was launched for                                                    |
 | `CHUNK_ARTIFACT_DIGEST`                        | The digest of the app JAR                                                                  |
 | `CHUNK_PLAYER_ADDRESS`                         | Optional. The IP Minestom binds for players; loopback or private only, default `127.0.0.1` |
+| `CHUNK_ENVIRONMENT_NAME`                       | Optional. The environment's name, whose `[env.<name>.vars]` the generated `Vars` apply     |

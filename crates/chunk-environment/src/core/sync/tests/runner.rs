@@ -162,6 +162,7 @@ async fn a_runner_boots_its_host_once_and_downloads_the_bound_release() {
         process_id: "process-1".into(),
         generation: 1,
         aot: None,
+        environment_name: "prod".into(),
     };
     assert_eq!(result::<JvmLaunch>(&launched), expected);
     // A retry after a lost response gets the same launch; a machine that booted again is refused.

@@ -302,6 +302,9 @@ message JvmLaunch {
     // host's release until its upload ends, for up to 90 seconds.
     JvmAotRecord record = 10;
   }
+  // The environment's name, which selects the `[env.<name>.vars]` the app's generated `Vars` read. The runner passes it
+  // to the JVM as `CHUNK_ENVIRONMENT_NAME`; empty when core serves no named environment.
+  string environment_name = 11;
 }
 
 // The AOT cache core keeps for a host's release, app and runtime: its size and SHA-256 digest in lowercase hex.

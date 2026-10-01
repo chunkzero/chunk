@@ -86,16 +86,20 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
 }
 
 #[tokio::test]
-async fn jvms_serve_players_on_the_machines_private_address() {
+async fn jvms_learn_the_machines_private_address_and_the_environments_name() {
     let directory = tempfile::tempdir().unwrap();
     let java = directory.path().join("java");
-    std::fs::write(&java, "#!/bin/sh\necho \"$CHUNK_PLAYER_ADDRESS\"\nexec sleep 60\n").unwrap();
+    std::fs::write(&java, "#!/bin/sh\necho \"$CHUNK_PLAYER_ADDRESS $CHUNK_ENVIRONMENT_NAME\"\nexec sleep 60\n")
+        .unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
     let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
     std::fs::write(unpacked(&directory).join(&artifact.jar), &jar).unwrap();
     artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
-    let host = private_host(directory.path(), java, Some("fdaa::2".parse().unwrap()));
+    let host = ProcessHost::new(ProcessHostConfig {
+        environment_name: Some("prod".into()),
+        ..config(directory.path(), java, Some("fdaa::2".parse().unwrap()))
+    });
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     let process = host.launch(&id, &release(artifact), "bridge", "local").unwrap().unwrap();
@@ -105,7 +109,7 @@ async fn jvms_serve_players_on_the_machines_private_address() {
         assert!(Instant::now() < deadline, "the JVM logged its player address");
         sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(std::fs::read_to_string(&log).unwrap(), "fdaa::2\n");
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "fdaa::2 prod\n");
     let registration =
         |endpoint: &str| Registration { identity: process.identity.clone(), player_endpoint: endpoint.into() };
     let token = format!("Bearer {}", process.token);
@@ -216,22 +220,23 @@ fn release(artifact: chunk_contract::AppArtifact) -> Release {
 
 /// A host in `directory` that launches releases with `java`.
 fn host(directory: &std::path::Path, java: std::path::PathBuf) -> ProcessHost {
-    private_host(directory, java, None)
+    ProcessHost::new(config(directory, java, None))
 }
 
-/// A host as [`host`] makes, on a machine whose private address is `private_address`.
-fn private_host(
+/// The configuration of a host as [`host`] makes, on a machine whose private address is `private_address`.
+fn config(
     directory: &std::path::Path,
     java: std::path::PathBuf,
     private_address: Option<std::net::IpAddr>,
-) -> ProcessHost {
-    ProcessHost::new(ProcessHostConfig {
+) -> ProcessHostConfig {
+    ProcessHostConfig {
         directory: directory.join("nodes"),
         releases: directory.join("releases"),
         java,
         environment: "test".into(),
+        environment_name: None,
         private_address,
-    })
+    }
 }
 
 /// Where a host in `directory` finds the tests' release unpacked.
