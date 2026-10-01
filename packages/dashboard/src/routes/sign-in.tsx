@@ -1,3 +1,4 @@
+import * as stylex from "@stylexjs/stylex";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 
@@ -8,6 +9,16 @@ import { Input } from "../components/ui/input.tsx";
 import { Label } from "../components/ui/label.tsx";
 import { api, errorMessage } from "../lib/client.ts";
 import { setToken } from "../lib/session.ts";
+import { colors, fonts, fontSizes, lineHeights, space } from "../tokens.stylex.ts";
+
+const styles = stylex.create({
+  screen: { display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100svh", padding: space.s6 },
+  form: { display: "flex", flexDirection: "column", gap: space.s5, width: "100%", maxWidth: "20rem" },
+  field: { display: "flex", flexDirection: "column", gap: space.s2 },
+  token: { fontFamily: fonts.mono },
+  hint: { fontSize: fontSizes.xs, lineHeight: lineHeights.xs, color: colors.mutedForeground },
+  submit: { width: "100%" },
+});
 
 export function SignIn() {
   const [token, setCandidate] = useState("");
@@ -18,16 +29,16 @@ export function SignIn() {
   });
 
   return (
-    <div className="flex min-h-svh items-center justify-center p-6">
+    <div {...stylex.props(styles.screen)}>
       <form
-        className="w-full max-w-xs space-y-5"
+        {...stylex.props(styles.form)}
         onSubmit={(event) => {
           event.preventDefault();
           attempt.mutate(token.trim());
         }}
       >
         <Logo />
-        <div className="space-y-2">
+        <div {...stylex.props(styles.field)}>
           <Label htmlFor="token">API token</Label>
           <Input
             id="token"
@@ -35,17 +46,17 @@ export function SignIn() {
             required
             autoComplete="off"
             autoFocus
-            className="font-mono"
+            style={styles.token}
             value={token}
-            onChange={(event) => setCandidate(event.target.value)}
+            onValueChange={setCandidate}
             aria-invalid={attempt.isError}
           />
-          <p className="text-xs text-muted-foreground">
+          <p {...stylex.props(styles.hint)}>
             An API token for {window.location.host}, such as its CHUNK_OPERATOR_TOKEN. Kept for this tab only.
           </p>
         </div>
         <ErrorText error={attempt.error ? errorMessage(attempt.error) : undefined} />
-        <Button type="submit" className="w-full" disabled={!token.trim() || attempt.isPending}>
+        <Button type="submit" style={styles.submit} disabled={!token.trim() || attempt.isPending}>
           {attempt.isPending ? "Checking…" : "Continue"}
         </Button>
       </form>

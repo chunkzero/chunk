@@ -1,17 +1,50 @@
 import { Add01Icon, Delete02Icon, EditIcon } from "@hugeicons/core-free-icons";
-import { HugeiconsIcon } from "@hugeicons/react";
+import * as stylex from "@stylexjs/stylex";
 import { useParams } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { ConfirmDialog } from "../../components/confirm-dialog.tsx";
 import { ErrorText } from "../../components/page.tsx";
-import { Panel, PanelNote } from "../../components/panel.tsx";
+import { listStyles, Panel, PanelNote } from "../../components/panel.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { fieldClass, Input } from "../../components/ui/input.tsx";
+import { fieldStyles, Input } from "../../components/ui/input.tsx";
 import { Label } from "../../components/ui/label.tsx";
 import { api, errorMessage, refresh, useRequestId } from "../../lib/client.ts";
 import { timeAgo } from "../../lib/format.ts";
 import { useSecrets } from "../../lib/queries.ts";
+import { colors, fonts, fontSizes, lineHeights, space } from "../../tokens.stylex.ts";
+
+const styles = stylex.create({
+  error: { paddingInline: space.s5, paddingBlock: space.s4 },
+  row: { display: "flex", alignItems: "center", gap: space.s4, paddingInline: space.s5, paddingBlock: space.s2_5 },
+  name: {
+    flex: 1,
+    minWidth: 0,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+    fontFamily: fonts.mono,
+    fontSize: fontSizes.sm,
+    lineHeight: lineHeights.sm,
+  },
+  small: { fontSize: fontSizes.xs, lineHeight: lineHeights.xs, color: colors.mutedForeground },
+  version: { fontVariantNumeric: "tabular-nums" },
+  updated: { width: "7.7rem", textAlign: "right" },
+  actions: { display: "flex", gap: space.s1 },
+  footnote: {
+    paddingInline: space.s5,
+    paddingBlock: space.s3,
+    borderTopWidth: "1px",
+    borderTopStyle: "solid",
+    borderTopColor: colors.border,
+    fontSize: fontSizes.xs,
+    lineHeight: lineHeights.xs,
+    color: colors.mutedForeground,
+  },
+  mono: { fontFamily: fonts.mono },
+  field: { display: "flex", flexDirection: "column", gap: space.s2 },
+  value: { paddingBlock: space.s2, fontFamily: fonts.mono },
+});
 
 type Dialog = { kind: "set"; name?: string } | { kind: "delete"; name: string } | null;
 
@@ -25,46 +58,44 @@ export function Secrets() {
     <Panel
       title="Secrets"
       action={
-        <Button size="sm" variant="outline" onClick={() => setDialog({ kind: "set" })}>
-          <HugeiconsIcon icon={Add01Icon} /> Add secret
+        <Button size="sm" variant="outline" icon={Add01Icon} onClick={() => setDialog({ kind: "set" })}>
+          Add secret
         </Button>
       }
     >
-      <ErrorText error={secrets.error ? errorMessage(secrets.error) : undefined} className="px-5 py-4" />
+      <ErrorText error={secrets.error ? errorMessage(secrets.error) : undefined} style={styles.error} />
       {secrets.data?.length === 0 ? (
         <PanelNote>No secrets yet.</PanelNote>
       ) : (
-        <ul className="divide-y">
+        <ul>
           {secrets.data?.map((secret) => (
-            <li key={secret.name} className="flex items-center gap-4 px-5 py-2.5">
-              <span className="min-w-0 flex-1 truncate font-mono text-sm">{secret.name}</span>
-              <span className="text-xs text-muted-foreground tabular-nums">v{secret.version.toString()}</span>
-              <span className="w-28 text-right text-xs text-muted-foreground">{timeAgo(secret.updateTime)}</span>
-              <div className="flex gap-1">
+            <li key={secret.name} {...stylex.props(listStyles.row, styles.row)}>
+              <span {...stylex.props(styles.name)}>{secret.name}</span>
+              <span {...stylex.props(styles.small, styles.version)}>v{secret.version.toString()}</span>
+              <span {...stylex.props(styles.small, styles.updated)}>{timeAgo(secret.updateTime)}</span>
+              <div {...stylex.props(styles.actions)}>
                 <Button
                   size="icon-sm"
                   variant="ghost"
+                  icon={EditIcon}
                   aria-label={`Replace ${secret.name}`}
                   title="Replace"
                   onClick={() => setDialog({ kind: "set", name: secret.name })}
-                >
-                  <HugeiconsIcon icon={EditIcon} />
-                </Button>
+                />
                 <Button
                   size="icon-sm"
                   variant="ghost"
+                  icon={Delete02Icon}
                   aria-label={`Delete ${secret.name}`}
                   title="Delete"
                   onClick={() => setDialog({ kind: "delete", name: secret.name })}
-                >
-                  <HugeiconsIcon icon={Delete02Icon} />
-                </Button>
+                />
               </div>
             </li>
           ))}
         </ul>
       )}
-      <p className="border-t px-5 py-3 text-xs text-muted-foreground">
+      <p {...stylex.props(styles.footnote)}>
         Values are write-only. Running environments receive changes without a redeploy.
       </p>
       {dialog?.kind === "set" && <SetSecretDialog environment={environment} name={dialog.name} onClose={close} />}
@@ -73,7 +104,7 @@ export function Secrets() {
           title="Delete secret"
           description={
             <>
-              Environments stop receiving <span className="font-mono">{dialog.name}</span>.
+              Environments stop receiving <span {...stylex.props(styles.mono)}>{dialog.name}</span>.
             </>
           }
           confirmLabel="Delete"
@@ -118,7 +149,7 @@ function SetSecretDialog({
       }}
       onClose={onClose}
     >
-      <div className="space-y-2">
+      <div {...stylex.props(styles.field)}>
         <Label htmlFor="secret-name">Name</Label>
         <Input
           id="secret-name"
@@ -126,14 +157,14 @@ function SetSecretDialog({
           pattern="[A-Za-z_][A-Za-z0-9_]{0,127}"
           title="Letters, digits and underscores, not starting with a digit"
           autoComplete="off"
-          className="font-mono"
+          style={styles.mono}
           readOnly={existing !== undefined}
           autoFocus={existing === undefined}
           value={name}
-          onChange={(event) => setName(event.target.value)}
+          onValueChange={setName}
         />
       </div>
-      <div className="space-y-2">
+      <div {...stylex.props(styles.field)}>
         <Label htmlFor="secret-value">Value</Label>
         <textarea
           id="secret-value"
@@ -141,7 +172,7 @@ function SetSecretDialog({
           autoComplete="off"
           spellCheck={false}
           autoFocus={existing !== undefined}
-          className={`py-2 font-mono ${fieldClass}`}
+          {...stylex.props(fieldStyles.field, styles.value)}
           value={value}
           onChange={(event) => setValue(event.target.value)}
         />

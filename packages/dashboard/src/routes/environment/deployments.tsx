@@ -1,14 +1,15 @@
+import * as stylex from "@stylexjs/stylex";
 import { useParams } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { ConfirmDialog } from "../../components/confirm-dialog.tsx";
 import { DeployGuideLink } from "../../components/deploy-guide.tsx";
 import { ErrorText } from "../../components/page.tsx";
-import { Panel, PanelNote } from "../../components/panel.tsx";
+import { listStyles, Panel, PanelNote } from "../../components/panel.tsx";
 import { ReleaseId } from "../../components/release.tsx";
 import { Status } from "../../components/status.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { fieldClass } from "../../components/ui/input.tsx";
+import { fieldStyles } from "../../components/ui/input.tsx";
 import { Label } from "../../components/ui/label.tsx";
 import { DeploymentState } from "../../gen/chunk/management/v1/common_pb.ts";
 import type { Deployment } from "../../gen/chunk/management/v1/deployments_pb.ts";
@@ -16,6 +17,38 @@ import type { Environment } from "../../gen/chunk/management/v1/projects_pb.ts";
 import { api, errorMessage, refresh, useRequestId } from "../../lib/client.ts";
 import { deploymentStatus, timeAgo, triggerLabels } from "../../lib/format.ts";
 import { recentDeployments, useDeployments, useEnvironment, useEnvironments } from "../../lib/queries.ts";
+import { colors, fonts, fontSizes, lineHeights, space } from "../../tokens.stylex.ts";
+
+const styles = stylex.create({
+  error: { paddingInline: space.s5, paddingBlock: space.s4 },
+  row: { display: "flex", alignItems: "center", gap: space.s4, paddingInline: space.s5, paddingBlock: space.s3 },
+  summary: { display: "flex", flexDirection: "column", gap: space.s1, flex: 1, minWidth: 0 },
+  release: { display: "flex", alignItems: "center", gap: space.s2, fontSize: fontSizes.sm, lineHeight: lineHeights.sm },
+  small: { fontSize: fontSizes.xs, lineHeight: lineHeights.xs, color: colors.mutedForeground },
+  message: {
+    fontSize: fontSizes.xs,
+    lineHeight: lineHeights.xs,
+    overflowWrap: "break-word",
+    color: colors.destructive,
+  },
+  time: { flexShrink: 0 },
+  column: { flexShrink: 0, width: "6.6rem" },
+  action: { textAlign: "right" },
+  footnote: {
+    paddingInline: space.s5,
+    paddingBlock: space.s3,
+    borderTopWidth: "1px",
+    borderTopStyle: "solid",
+    borderTopColor: colors.border,
+    fontSize: fontSizes.xs,
+    lineHeight: lineHeights.xs,
+    color: colors.mutedForeground,
+  },
+  note: { fontSize: fontSizes.sm, lineHeight: lineHeights.sm, color: colors.mutedForeground },
+  field: { display: "flex", flexDirection: "column", gap: space.s2 },
+  select: { height: "2.475rem" },
+  id: { fontFamily: fonts.mono, wordBreak: "break-all" },
+});
 
 type Dialog = { kind: "promote" } | { kind: "rollback"; deployment: Deployment } | null;
 
@@ -41,28 +74,28 @@ export function Deployments() {
         </Button>
       }
     >
-      <ErrorText error={deployments.error ? errorMessage(deployments.error) : undefined} className="px-5 py-4" />
+      <ErrorText error={deployments.error ? errorMessage(deployments.error) : undefined} style={styles.error} />
       {deployments.data?.length === 0 ? (
         <PanelNote>
           Nothing deployed yet. Upload and deploy a release through the management API, as the <DeployGuideLink />{" "}
           shows.
         </PanelNote>
       ) : (
-        <ul className="divide-y">
+        <ul>
           {deployments.data?.map((deployment) => (
-            <li key={deployment.id} className="flex items-center gap-4 px-5 py-3">
-              <div className="min-w-0 flex-1 space-y-1">
-                <p className="flex items-center gap-2 text-sm">
+            <li key={deployment.id} {...stylex.props(listStyles.row, styles.row)}>
+              <div {...stylex.props(styles.summary)}>
+                <p {...stylex.props(styles.release)}>
                   <ReleaseId id={deployment.releaseId} />
-                  <span className="text-xs text-muted-foreground">{triggerLabels[deployment.trigger]}</span>
+                  <span {...stylex.props(styles.small)}>{triggerLabels[deployment.trigger]}</span>
                 </p>
-                {deployment.message && <p className="text-xs break-words text-destructive">{deployment.message}</p>}
+                {deployment.message && <p {...stylex.props(styles.message)}>{deployment.message}</p>}
               </div>
-              <time className="shrink-0 text-xs text-muted-foreground">{timeAgo(deployment.createTime)}</time>
-              <div className="w-24 shrink-0">
+              <time {...stylex.props(styles.small, styles.time)}>{timeAgo(deployment.createTime)}</time>
+              <div {...stylex.props(styles.column)}>
                 <Status status={deploymentStatus[deployment.state]} />
               </div>
-              <div className="w-24 shrink-0 text-right">
+              <div {...stylex.props(styles.column, styles.action)}>
                 {deployment.state === DeploymentState.SUPERSEDED && (
                   <Button size="xs" variant="ghost" onClick={() => setDialog({ kind: "rollback", deployment })}>
                     Roll back
@@ -74,9 +107,7 @@ export function Deployments() {
         </ul>
       )}
       {deployments.data?.length === recentDeployments && (
-        <p className="border-t px-5 py-3 text-xs text-muted-foreground">
-          Showing the {recentDeployments} most recent deployments.
-        </p>
+        <p {...stylex.props(styles.footnote)}>Showing the {recentDeployments} most recent deployments.</p>
       )}
       {environment && dialog?.kind === "promote" && (
         <PromoteDialog project={project} source={environment} onClose={close} />
@@ -107,13 +138,13 @@ function PromoteDialog({ project, source, onClose }: { project: string; source: 
       onClose={onClose}
     >
       {targets.length === 0 ? (
-        <p className="text-sm text-muted-foreground">This project has no other environment.</p>
+        <p {...stylex.props(styles.note)}>This project has no other environment.</p>
       ) : (
-        <div className="space-y-2">
+        <div {...stylex.props(styles.field)}>
           <Label htmlFor="target">Target environment</Label>
           <select
             id="target"
-            className={`h-9 ${fieldClass}`}
+            {...stylex.props(fieldStyles.field, styles.select)}
             value={targetId}
             onChange={(event) => setTarget(event.target.value)}
           >
@@ -144,8 +175,7 @@ function RollbackDialog({
       title="Roll back"
       description={
         <>
-          Deploys release <span className="font-mono break-all">{deployment.releaseId}</span> to {environment.name}{" "}
-          again.
+          Deploys release <span {...stylex.props(styles.id)}>{deployment.releaseId}</span> to {environment.name} again.
         </>
       }
       confirmLabel="Roll back"
