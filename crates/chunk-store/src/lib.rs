@@ -66,7 +66,7 @@ pub use model::{
 pub use replication::{Listed, ObjectStorage, Replication, ReplicationProgress, Replicator, S3Bucket, S3Credentials};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
-pub use work::{PendingWork, Work};
+pub use work::{PendingWork, Transform, Work, compatible_field};
 
 /// Tables whose names start with this prefix, in any letter case, belong to the
 /// environment itself. App deployments may not declare them.
@@ -86,13 +86,23 @@ pub trait Storage: Send {
     /// Rejects reused identities, changed deployment bindings or storage failures.
     fn prepare_operation(&mut self, operation: &Operation, context: RetryContext) -> Result<RetryContext>;
 
-    /// Retains a deployment, installs its new tables and optional fields, and
-    /// records the work it waits on, such as building its indexes, in one
-    /// transaction. Installing it again records work it still lacks.
+    /// Retains a deployment, applies its schema and records the work it waits
+    /// on, such as building its indexes, in one transaction. Installing it
+    /// again records work it still lacks.
+    ///
+    /// Without a migration journal on either side, its new tables and optional
+    /// fields are installed. Otherwise its journal and the environment's applied
+    /// migrations must be prefix-related with matching hashes, and the stored
+    /// schema must match the applied ones. The journal's new entries are
+    /// applied: an expand adds its fields and records their backfills, and a
+    /// finish schedules dropping the old shape once no resident deployment
+    /// declares it. A shorter journal installs only while the store holds
+    /// every field the deployment declares.
     /// # Errors
     /// Rejects incompatible schemas, [system tables](is_system_table), retired
-    /// identities and storage failures. A storage failure that changed nothing
-    /// is [`Error::RolledBack`].
+    /// identities and storage failures, and journals with
+    /// [`Error::Migration`]. A storage failure that changed nothing is
+    /// [`Error::RolledBack`].
     fn install_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision>;
 
     /// Work installed deployments wait on, in the order it runs.
@@ -100,11 +110,19 @@ pub trait Storage: Send {
     /// Reports storage failures or corrupt work records.
     fn pending_work(&self) -> Result<Vec<PendingWork>>;
 
-    /// Runs one item of pending work in its own write, without changing document
-    /// revisions. Work no longer pending is done already.
+    /// Runs one item of pending work, or one batch of a backfill through
+    /// `transform`, in its own write, without changing document revisions. Work
+    /// no longer pending is done already.
     /// # Errors
-    /// Reports storage failures. A failure that changed nothing is [`Error::RolledBack`].
-    fn run_work(&mut self, id: u64) -> Result<()>;
+    /// Reports storage failures, and transforms that fail or produce invalid
+    /// rows with [`Error::Migration`]. A failure that changed nothing is
+    /// [`Error::RolledBack`].
+    fn run_work(&mut self, id: u64, transform: &mut Transform<'_>) -> Result<()>;
+
+    /// Applied expand migrations whose old shape is still stored, in journal order.
+    /// # Errors
+    /// Reports storage failures or corrupt records.
+    fn migrations(&self) -> Result<Vec<chunk_contract::Migration>>;
 
     /// Removes an inactive deployment, permanently retiring its identity. Indexes
     /// and pending work that no remaining deployment or schema declares go with it.
@@ -236,6 +254,8 @@ pub enum Error {
     OperationMismatch,
     #[error("invalid persistence request: {0}")]
     Invalid(&'static str),
+    #[error("{0}")]
+    Migration(String),
     #[error("local database size limit reached")]
     Capacity,
     #[error("scheduled job budget reached; retry once jobs finish or expire")]
@@ -270,6 +290,7 @@ impl Error {
             self,
             Self::Conflict { .. }
                 | Self::Invalid(_)
+                | Self::Migration(_)
                 | Self::Capacity
                 | Self::JobBudget
                 | Self::OperationMismatch

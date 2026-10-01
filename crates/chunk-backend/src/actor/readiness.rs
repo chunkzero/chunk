@@ -4,12 +4,18 @@ use chunk_js::DeploymentId;
 use chunk_store::{PendingWork, Snapshot};
 
 use super::Actor;
-use crate::{Error, Readiness, Result, commit::Job, service::Request};
+use crate::{
+    Error, Readiness, Result,
+    commit::{Job, Stored},
+    service::Request,
+};
 
 /// Work installed deployments wait on, and the replies waiting for them to be ready.
 #[derive(Default)]
 pub(super) struct Work {
     pub pending: Vec<PendingWork>,
+    /// Active expand migrations, whose old and new shapes writes keep in step.
+    pub migrations: Vec<chunk_contract::Migration>,
     /// The item the commit thread runs.
     running: Option<u64>,
     /// Items that failed, until a deployment is installed again.
@@ -45,29 +51,36 @@ impl Actor {
         Ok(Readiness { ready: !self.unready.contains(id), pending })
     }
 
-    /// Runs the next pending item that has not failed, unless one runs. Builds hold the commit thread but not
-    /// `outstanding`, so installs and releases queue behind them rather than being refused.
+    /// Runs the next pending item that has not failed and can run, unless one runs. A backfill runs once a
+    /// resident deployment carries its migration. Work holds the commit thread but not `outstanding`, so installs
+    /// and releases queue behind it rather than being refused.
     pub(super) fn dispatch_work(&mut self) {
         self.work.finish(|_, reply| reply.cancellation.is_cancelled().then_some(Err(Error::Cancelled)));
         if self.work.running.is_some() || self.failure.is_some() {
             return;
         }
-        let next = self.work.pending.iter().find(|pending| !self.work.failed.contains_key(&pending.id));
-        if let Some(id) = next.map(|pending| pending.id)
-            && self.committer.send(Job::Work { id }).is_ok()
+        let mut runnable = self.work.pending.iter().filter(|pending| !self.work.failed.contains_key(&pending.id));
+        let next = runnable.find_map(|pending| match &pending.work {
+            chunk_store::Work::Backfill { migration, .. } => {
+                self.carrier(migration).map(|deployment| (pending.id, Some(deployment)))
+            }
+            _ => Some((pending.id, None)),
+        });
+        if let Some((id, deployment)) = next
+            && self.committer.send(Job::Work { id, deployment }).is_ok()
         {
             self.work.running = Some(id);
         }
     }
 
-    pub(super) fn worked(&mut self, id: u64, result: Result<(Snapshot, Vec<PendingWork>)>) {
+    pub(super) fn worked(&mut self, id: u64, result: Result<(Snapshot, Stored)>) {
         self.work.running = None;
         if self.failure.is_some() {
             return;
         }
         match result {
-            Ok((snapshot, pending)) => {
-                self.work.pending = pending;
+            Ok((snapshot, stored)) => {
+                self.work.update(stored);
                 self.rebase(snapshot);
                 self.promote();
             }
@@ -88,13 +101,12 @@ impl Actor {
         }
     }
 
-    /// Marks deployments whose indexes the view has built as ready, finishing their waiters.
+    /// Marks deployments that no longer wait on work as ready, finishing their waiters.
     pub(super) fn promote(&mut self) {
-        let snapshot = &self.view.base;
-        let versions = &self.versions;
+        let (snapshot, versions, work) = (&self.view.base, &self.versions, &self.work);
         self.unready.retain(|id| {
             let deployment = versions.get(id).cloned().flatten();
-            !deployment.is_some_and(|deployment| Self::schema_ready(&deployment, snapshot).unwrap_or(false))
+            !deployment.is_some_and(|deployment| Self::schema_ready(&deployment, snapshot, work).unwrap_or(false))
         });
         let unready = &self.unready;
         self.work.finish(|id, _| (!unready.contains(id)).then_some(Ok(())));
@@ -102,8 +114,13 @@ impl Actor {
 }
 
 impl Work {
-    pub fn new(pending: Vec<PendingWork>) -> Self {
-        Self { pending, ..Self::default() }
+    pub fn new(stored: Stored) -> Self {
+        Self { pending: stored.work, migrations: stored.migrations, ..Self::default() }
+    }
+
+    pub fn update(&mut self, stored: Stored) {
+        self.pending = stored.work;
+        self.migrations = stored.migrations;
     }
 
     /// Finishes each waiting reply `outcome` decides, keeping the rest.

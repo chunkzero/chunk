@@ -42,7 +42,9 @@ export const count=query({args:{player:v.player()},returns:v.integer(),handler:(
     let mut metadata: Value = serde_json::from_slice(&fs::read(output.join("contract.json")).unwrap()).unwrap();
     metadata["id"] = json!("old");
     metadata["source"] = json!(fs::read_to_string(output.join("source.mjs")).unwrap());
-    let old: Deployment = serde_json::from_value(metadata).unwrap();
+    let mut old: Deployment = serde_json::from_value(metadata).unwrap();
+    // `new` declares a field its journal doesn't record, so neither installs a journal.
+    old.contracts.migrations.clear();
     let mut new = old.clone();
     new.id = "new".into();
     new.tables

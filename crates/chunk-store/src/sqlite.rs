@@ -9,14 +9,16 @@ use rusqlite::Connection;
 
 use crate::{
     Commit, DatabaseSchema, Epoch, Error, IndexDefinition, JobIntent, Operation, Outcome, PendingWork, Replication,
-    Replicator, Reply, Request, Result, RetryContext, Revision, Snapshot, Storage, Work, replication,
+    Replicator, Reply, Request, Result, RetryContext, Revision, Snapshot, Storage, Transform, Work, replication,
 };
 
+mod backfill;
 pub(crate) mod bootstrap;
 mod codec;
 mod deployments;
 mod indexes;
 pub(crate) mod jobs;
+mod journal;
 pub(crate) mod log;
 mod operations;
 mod read;
@@ -162,13 +164,13 @@ impl SqliteStore {
             pruned_at: None,
             _writer_lock: writer_lock,
         };
-        store.schedule_missing_indexes()?;
+        store.schedule_missing_work()?;
         Ok(store)
     }
 
     /// Records a build for each index a resident deployment declares that is neither built nor pending, so a
-    /// deployment is never unready with nothing to resume.
-    fn schedule_missing_indexes(&mut self) -> Result<()> {
+    /// deployment is never unready with nothing to resume, and each drop that can run.
+    fn schedule_missing_work(&mut self) -> Result<()> {
         let pending: Vec<_> = work::load(&self.connection)?.into_iter().map(|pending| pending.work).collect();
         let missing: Vec<_> = deployments::load(&self.connection)?
             .iter()
@@ -177,10 +179,30 @@ impl SqliteStore {
             .map(Work::Index)
             .filter(|work| !pending.contains(work))
             .collect();
-        if missing.is_empty() {
-            return Ok(());
+        log::write(&self.connection, self.log.as_mut(), &[], |transaction| {
+            work::record(transaction, missing)?;
+            journal::schedule_drops(transaction)
+        })
+    }
+
+    /// Drops expand migration `expand`'s old shape, unless a resident deployment declares it again.
+    fn drop_old_shape(&mut self, id: u64, expand: &str) -> Result<()> {
+        let plan = journal::drop_plan(&self.connection, &self.schema, expand)?;
+        let statements = plan.as_ref().map_or_else(Vec::new, |plan| plan.statements.clone());
+        log::write_or_roll_back(&self.connection, self.log.as_mut(), &statements, |transaction| {
+            if let Some(plan) = &plan {
+                for statement in &statements {
+                    transaction.execute_batch(statement)?;
+                }
+                journal::deactivate(transaction, expand)?;
+                schema::replace(transaction, &plan.schema)?;
+            }
+            work::finish(transaction, id)
+        })?;
+        if let Some(plan) = plan {
+            self.schema = Arc::new(plan.schema);
         }
-        log::write(&self.connection, self.log.as_mut(), &[], |transaction| work::record(transaction, missing))
+        Ok(())
     }
 
     /// Replaces the default one-day retention windows.
@@ -211,14 +233,27 @@ impl Storage for SqliteStore {
     }
 
     fn install_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<Revision> {
-        let migration = schema::merge(&self.schema, &deployment.tables, None)?;
+        let applied = journal::load(&self.connection)?;
+        let (migration, new) = if applied.is_empty() && deployment.contracts.migrations.is_empty() {
+            (schema::merge(&self.schema, &deployment.tables, None)?, Vec::new())
+        } else {
+            journal::install(&self.schema, &applied, deployment)?
+        };
         let (current, built) = (&self.schema, &self.indexes);
         let revision =
             log::write_or_roll_back(&self.connection, self.log.as_mut(), &migration.statements, |transaction| {
+                let carried = deployments::load(transaction)?
+                    .into_iter()
+                    .flat_map(|resident| resident.contracts.migrations.into_iter().map(|migration| migration.id))
+                    .collect();
                 deployments::insert(transaction, deployment)?;
                 let missing = IndexDefinition::declared(&deployment.tables).filter(|index| !built.contains(index));
                 work::record(transaction, missing.map(Work::Index))?;
-                schema::install(transaction, current, &migration)
+                let revision = schema::install(transaction, current, &migration)?;
+                journal::record(transaction, applied.len(), &new)?;
+                journal::rebackfill(transaction, &applied, deployment, &carried)?;
+                journal::schedule_drops(transaction)?;
+                Ok(revision)
             })?;
         self.schema = Arc::new(migration.schema);
         Ok(revision)
@@ -228,9 +263,18 @@ impl Storage for SqliteStore {
         work::load(&self.connection)
     }
 
-    fn run_work(&mut self, id: u64) -> Result<()> {
-        let Some(Work::Index(index)) = work::get(&self.connection, id)? else {
-            return Ok(());
+    fn run_work(&mut self, id: u64, transform: &mut Transform<'_>) -> Result<()> {
+        let index = match work::get(&self.connection, id)? {
+            None => return Ok(()),
+            Some((Work::Index(index), ..)) => index,
+            Some((Work::Backfill { migration, table }, done, cursor)) => {
+                let schema = &self.schema;
+                return log::write_or_roll_back(&self.connection, self.log.as_mut(), &[], |transaction| {
+                    let work = (migration.as_str(), table.as_str());
+                    backfill::run(transaction, schema, id, work, (done, cursor.as_deref()), transform)
+                });
+            }
+            Some((Work::Drop { migration }, ..)) => return self.drop_old_shape(id, &migration),
         };
         let built = self.indexes.contains(&index);
         let statements = if built { Vec::new() } else { vec![indexes::create(&index)] };
@@ -274,6 +318,7 @@ impl Storage for SqliteStore {
                 }
                 indexes::forget(transaction, &dropped)?;
                 work::prune(transaction, &needed)?;
+                journal::schedule_drops(transaction)?;
             }
             Ok(removed)
         })?;
@@ -282,6 +327,11 @@ impl Storage for SqliteStore {
             self.indexes = Arc::new(indexes);
         }
         Ok(removed)
+    }
+
+    fn migrations(&self) -> Result<Vec<chunk_contract::Migration>> {
+        let applied = journal::load(&self.connection)?;
+        Ok(applied.into_iter().filter(|entry| entry.active).map(|entry| entry.migration).collect())
     }
 
     fn deployments(&self) -> Result<Vec<chunk_contract::Deployment>> {

@@ -32,7 +32,7 @@ pub(super) fn backend(failure: &chunk_backend::Error) -> Error {
         }
         Backend::OperationMismatch => Code::OperationMismatch,
         Backend::Invalid(_) | Backend::Json(_) => Code::Invalid,
-        Backend::Contract | Backend::Unknown => Code::Contract,
+        Backend::Contract | Backend::Unknown | Backend::Migration(_) => Code::Contract,
         Backend::ActionOutcomeUnknown => Code::OutcomeUnknown,
         Backend::JavaScript(inner) => match inner.as_ref() {
             chunk_js::Error::JavaScript(thrown) => return error(Code::Application, thrown.clone()),

@@ -203,13 +203,16 @@ impl Storage for ControlledStore {
     fn pending_work(&self) -> chunk_store::Result<Vec<chunk_store::PendingWork>> {
         self.inner.pending_work()
     }
-    fn run_work(&mut self, id: u64) -> chunk_store::Result<()> {
+    fn run_work(&mut self, id: u64, transform: &mut chunk_store::Transform<'_>) -> chunk_store::Result<()> {
         if let Some(gate) = self.work.take()
             && gate.recv().is_err()
         {
             return Err(chunk_store::Error::RolledBack(Box::new(chunk_store::Error::Invalid("stopped"))));
         }
-        self.inner.run_work(id)
+        self.inner.run_work(id, transform)
+    }
+    fn migrations(&self) -> chunk_store::Result<Vec<chunk_contract::Migration>> {
+        self.inner.migrations()
     }
     fn release_deployment(&mut self, id: &str) -> chunk_store::Result<bool> {
         self.inner.release_deployment(id)
@@ -856,5 +859,6 @@ mod effects;
 mod integration;
 mod jobs;
 mod limits;
+mod migrations;
 mod readiness;
 mod subscriptions;

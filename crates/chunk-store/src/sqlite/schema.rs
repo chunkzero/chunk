@@ -42,13 +42,7 @@ pub(super) fn merge(
     let mut statements = Vec::new();
     for (name, table) in incoming {
         let existing = merged.entry(name.clone()).or_insert_with(|| {
-            let mut columns = vec![
-                "_id TEXT PRIMARY KEY".to_owned(),
-                "_revision INTEGER NOT NULL CHECK (_revision > 0)".to_owned(),
-                "_bytes INTEGER NOT NULL CHECK (_bytes >= 0)".to_owned(),
-            ];
-            columns.extend(table.fields.iter().map(|(name, field)| column(name, field)));
-            statements.push(format!("CREATE TABLE {} ({}) STRICT, WITHOUT ROWID", quote(name), columns.join(", ")));
+            statements.push(create(name, &table.fields));
             chunk_contract::TableSchema { fields: table.fields.clone(), indexes: BTreeMap::new() }
         });
         for (field, definition) in &table.fields {
@@ -85,6 +79,26 @@ pub(super) fn merge(
     });
     statements.extend(indexes.iter().map(indexes::create));
     Ok(Migration { schema: merged, statements, indexes })
+}
+
+pub(super) fn create(name: &str, fields: &BTreeMap<String, chunk_contract::Field>) -> String {
+    let mut columns = vec![
+        "_id TEXT PRIMARY KEY".to_owned(),
+        "_revision INTEGER NOT NULL CHECK (_revision > 0)".to_owned(),
+        "_bytes INTEGER NOT NULL CHECK (_bytes >= 0)".to_owned(),
+    ];
+    columns.extend(fields.iter().map(|(name, field)| column(name, field)));
+    format!("CREATE TABLE {} ({}) STRICT, WITHOUT ROWID", quote(name), columns.join(", "))
+}
+
+/// Replaces the schema recorded at the current revision, for changes that leave documents as they are.
+pub(super) fn replace(transaction: &rusqlite::Transaction<'_>, schema: &DatabaseSchema) -> Result<()> {
+    let revision = super::revision::current(transaction)?;
+    transaction.execute(
+        "INSERT OR REPLACE INTO _chunk_migrations (revision, schema) VALUES (?1, ?2)",
+        rusqlite::params![revision, serde_json::to_string(schema)?],
+    )?;
+    Ok(())
 }
 
 pub(super) fn install(

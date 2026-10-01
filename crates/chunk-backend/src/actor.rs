@@ -27,6 +27,7 @@ mod commands;
 mod deployments;
 mod index;
 mod jobs;
+mod migrations;
 mod pipeline;
 mod queries;
 mod readers;
@@ -108,7 +109,8 @@ impl Actor {
         memory: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
         let (committer, initial) = Committer::new(store, events.clone())?;
-        let crate::commit::Initial { snapshot, deployments, jobs: scheduled, work, retiring } = initial;
+        let crate::commit::Initial { snapshot, deployments, jobs: scheduled, stored, retiring } = initial;
+        let work = readiness::Work::new(stored);
         let mut js = Engine::new()?;
         let mut versions = BTreeMap::new();
         let mut installed = Vec::new();
@@ -117,7 +119,7 @@ impl Actor {
         for deployment in deployments {
             deployment.validate().map_err(Error::Invalid)?;
             let id = DeploymentId::new(&deployment.id)?;
-            if !Self::schema_ready(&deployment, &snapshot)? {
+            if !Self::schema_ready(&deployment, &snapshot, &work)? {
                 unready.insert(id.clone());
             }
             let env = effects.env(&deployment);
@@ -149,7 +151,7 @@ impl Actor {
             installed,
             retired,
             unready,
-            work: readiness::Work::new(work),
+            work,
             deploying: None,
             releasing: None,
             view: Arc::new(View::new(snapshot)),

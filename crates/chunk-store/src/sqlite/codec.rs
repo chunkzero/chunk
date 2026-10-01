@@ -21,8 +21,9 @@ pub(super) fn column(name: &str, field: &Field) -> String {
         }
         _ => ("TEXT", format!(" CHECK (json_valid({name}))")),
     };
-    let required = if field.optional { "" } else { " NOT NULL" };
-    format!("{name} {kind}{required}{check}")
+    // Every column is nullable, so a migration changes whether a field is required without rebuilding its table;
+    // encoding enforces it.
+    format!("{name} {kind}{check}")
 }
 
 pub(super) fn encode(field: &Field, value: Option<&Value>) -> Result<SqlValue> {

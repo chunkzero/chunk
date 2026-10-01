@@ -34,7 +34,7 @@ pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, WriterLock)> 
 }
 
 /// The current store format, recorded as SQLite's `user_version`.
-pub(super) const FORMAT: i64 = 9;
+pub(super) const FORMAT: i64 = 10;
 
 pub(crate) fn open(path: &Path, environment: &str) -> Result<Connection> {
     let mut connection = Connection::open(path)?;
@@ -154,6 +154,20 @@ fn upgrade(connection: &Connection, version: i64) -> Result<()> {
                  total INTEGER NOT NULL CHECK (total >= 0)
              ) STRICT;
              PRAGMA user_version = 9;
+             COMMIT;",
+        )?;
+    }
+    if version < 10 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE _chunk_work ADD COLUMN cursor TEXT;
+             CREATE TABLE _chunk_applied (
+                 position INTEGER PRIMARY KEY,
+                 id TEXT NOT NULL UNIQUE,
+                 migration TEXT NOT NULL,
+                 active INTEGER NOT NULL CHECK (active IN (0, 1))
+             ) STRICT;
+             PRAGMA user_version = 10;
              COMMIT;",
         )?;
     }

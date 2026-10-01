@@ -26,9 +26,10 @@ pub(crate) enum Job {
     Install {
         deployment: Arc<chunk_contract::Deployment>,
     },
-    /// Runs one item of pending work.
+    /// Runs one item of pending work. A backfill runs its transform in `deployment`'s bundle.
     Work {
         id: u64,
+        deployment: Option<Arc<chunk_contract::Deployment>>,
     },
     Commit {
         expected: Revision,
@@ -58,9 +59,15 @@ pub(crate) struct Initial {
     pub snapshot: Snapshot,
     pub deployments: Vec<chunk_contract::Deployment>,
     pub jobs: chunk_store::Jobs,
-    pub work: Vec<PendingWork>,
+    pub stored: Stored,
     /// The deployments whose retirement an earlier run committed.
     pub retiring: Vec<String>,
+}
+
+/// The store's pending work and its active expand migrations.
+pub(crate) struct Stored {
+    pub work: Vec<PendingWork>,
+    pub migrations: Vec<chunk_contract::Migration>,
 }
 
 /// How far the log has advanced.
@@ -90,7 +97,7 @@ impl Committer {
                     snapshot: store.snapshot()?,
                     deployments: store.deployments()?,
                     jobs: store.job_command(chunk_store::JobCommand::Recover)?,
-                    work: store.pending_work()?,
+                    stored: stored(store.as_ref())?,
                     retiring: store.retiring()?,
                 })
             })();
@@ -106,6 +113,7 @@ impl Committer {
             }
             let mut failed = false;
             let mut next = None;
+            let mut migrator = crate::migrations::Migrator::default();
             while let Some(job) = next.take().or_else(|| incoming.recv().ok()) {
                 let system = lane.0.take();
                 let healthy = !failed;
@@ -128,7 +136,7 @@ impl Committer {
                     Job::Wake => durable(store.as_mut(), &mut sequence, system, Vec::new(), &mut failed),
                     job => {
                         let mut events = durable(store.as_mut(), &mut sequence, system, Vec::new(), &mut failed);
-                        events.push(run(store.as_mut(), &mut sequence, job, &mut failed));
+                        events.push(run(store.as_mut(), &mut sequence, job, &mut migrator, &mut failed));
                         events
                     }
                 };
@@ -170,16 +178,22 @@ impl Drop for Closing {
     }
 }
 
-fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut bool) -> Event {
+fn run(
+    store: &mut dyn Storage,
+    sequence: &mut Sequence,
+    job: Job,
+    migrator: &mut crate::migrations::Migrator,
+    failed: &mut bool,
+) -> Event {
     match job {
         Job::Release { id } => {
             let result = if *failed {
                 Err(Error::CommitFailed)
             } else {
-                store.release_deployment(&id).map_err(Error::from).and_then(|released| {
-                    let work = store.pending_work().map_err(|_| Error::CommitFailed)?;
-                    Ok((released, work))
-                })
+                store
+                    .release_deployment(&id)
+                    .map_err(Error::from)
+                    .and_then(|released| Ok((released, stored(store).map_err(|_| Error::CommitFailed)?)))
             };
             *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
             Event::Released { result }
@@ -200,11 +214,15 @@ fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut 
             *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
             Event::Installed { result }
         }
-        Job::Work { id } => {
+        Job::Work { id, deployment } => {
             let result = if *failed {
                 Err(Error::CommitFailed)
             } else {
-                store.run_work(id).map_err(Error::from).and_then(|()| current(store))
+                let mut transform = |migration: &str, table: &str, rows: Vec<_>| {
+                    let deployment = deployment.as_ref().ok_or("no resident deployment carries the migration")?;
+                    migrator.to(deployment, migration, table, &rows)
+                };
+                store.run_work(id, &mut transform).map_err(Error::from).and_then(|()| current(store))
             };
             *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
             Event::Worked { id, result }
@@ -223,9 +241,13 @@ fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut 
 }
 
 /// A snapshot after a durable write, with the work still pending. Failing to read them is fatal.
-fn current(store: &mut dyn Storage) -> Result<(Snapshot, Vec<PendingWork>)> {
+fn current(store: &mut dyn Storage) -> Result<(Snapshot, Stored)> {
     let snapshot = store.snapshot().map_err(|_| Error::CommitFailed)?;
-    Ok((snapshot, store.pending_work().map_err(|_| Error::CommitFailed)?))
+    Ok((snapshot, stored(store).map_err(|_| Error::CommitFailed)?))
+}
+
+fn stored(store: &dyn Storage) -> chunk_store::Result<Stored> {
+    Ok(Stored { work: store.pending_work()?, migrations: store.migrations()? })
 }
 
 /// Installs system tables, reporting whether that advanced the revision, and reads the store.

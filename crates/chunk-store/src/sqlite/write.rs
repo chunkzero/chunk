@@ -12,7 +12,7 @@ use crate::{Commit, DatabaseSchema, DocumentKey, Error, JobIntent, Operation, Ou
 use super::codec;
 use super::codec::quote;
 
-const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
+pub(super) const MAX_DOCUMENT_BYTES: usize = 1024 * 1024;
 /// Each write charges its key and document JSON, so deletes count too.
 const MAX_COMMIT_BYTES: usize = 64 * 1024 * 1024;
 /// Keeps the database, and so its snapshots and restores, to a bounded size.
