@@ -58,13 +58,9 @@ pub(crate) fn generate(project: &Path, inventory: &Inventory, journal: &Journal)
     for (name, source) in SOURCES {
         write_changed(&project.join(".chunk/sdk").join(name), source.as_bytes())?;
     }
-    write_changed(&project.join(".chunk/generated/index.ts"), include_bytes!("sdk/index.ts"))?;
-    write_changed(&project.join(".chunk/generated/apps.ts"), app_references(inventory)?.as_bytes())?;
-    write_changed(&project.join(".chunk/generated/env.ts"), env_types(&inventory.env).as_bytes())?;
-    write_changed(
-        &project.join(".chunk/generated/migrations.ts"),
-        crate::migrations::declarations(journal).as_bytes(),
-    )?;
+    for (name, content) in generated(inventory, journal)? {
+        write_changed(&project.join(".chunk/generated").join(name), &content)?;
+    }
     if original != package {
         let mut bytes = serde_json::to_vec_pretty(&package).map_err(io::Error::other)?;
         bytes.push(b'\n');
@@ -75,6 +71,17 @@ pub(crate) fn generate(project: &Path, inventory: &Inventory, journal: &Journal)
         write_changed(&config, include_bytes!("sdk/tsconfig.json"))?;
     }
     Ok(())
+}
+
+/// The files of `.chunk/generated`, by name. They import `../sdk` and `../../server`, so they work from any directory
+/// directly under `.chunk`.
+pub(crate) fn generated(inventory: &Inventory, journal: &Journal) -> io::Result<[(&'static str, Vec<u8>); 4]> {
+    Ok([
+        ("index.ts", include_bytes!("sdk/index.ts").to_vec()),
+        ("apps.ts", app_references(inventory)?.into_bytes()),
+        ("env.ts", env_types(&inventory.env).into_bytes()),
+        ("migrations.ts", crate::migrations::declarations(journal).into_bytes()),
+    ])
 }
 
 fn app_references(inventory: &Inventory) -> io::Result<String> {

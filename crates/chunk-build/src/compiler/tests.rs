@@ -243,14 +243,14 @@ fn generated_helpers_infer_the_live_schema_and_resolve_package_imports() {
     let files = sources::discover(project.path(), &inventory).unwrap();
     let files: Vec<_> = files.iter().map(|file| file.path.as_path()).collect();
     // No generation between schema edits: TypeScript follows typeof schema.tables.
-    let error = typecheck::check(&files, output.path()).unwrap_err().to_string();
+    let error = typecheck::check(&files, &generated, output.path()).unwrap_err().to_string();
     assert!(error.contains("added") && error.contains("missing"), "{error}");
     fs::write(
         project.path().join("server/helpers.ts"),
         include_str!("helper-types.ts").replace("{ wins: 1 }", "{ wins: 1, added: 'new' }"),
     )
     .unwrap();
-    typecheck::check(&files, output.path()).unwrap();
+    typecheck::check(&files, &generated, output.path()).unwrap();
     assert_eq!(fs::metadata(generated).unwrap().modified().unwrap(), timestamp);
 }
 

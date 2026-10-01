@@ -77,7 +77,10 @@ fn migrations_are_typed_from_snapshots_and_callable_from_the_bundle() {
     .unwrap();
     rehash(project.path(), "2").unwrap();
     let error = crate::compile(project.path(), output.path()).unwrap_err();
-    assert!(error.to_string().contains("helper.ts"), "{error}");
+    assert!(
+        error.to_string().contains("0002_display_name.ts imports ../helper.ts; migrations may import only from #chunk"),
+        "{error}"
+    );
     fs::write(&path, &source).unwrap();
     rehash(project.path(), "2").unwrap();
     fs::write(&path, source.replace("old.name", "old.displayName")).unwrap();
@@ -167,6 +170,31 @@ fn compilation_uses_the_captured_migrations_and_ignores_package_imports() {
     fs::write(&path, fs::read_to_string(&path).unwrap().replace("old.name", "old.displayName")).unwrap();
     crate::compiler::compile_journal(&root, output.path(), &captured).unwrap();
     assert_eq!(migrate_to(output.path(), "Ann"), r#"[{"displayName":"Ann"}]"#);
+
+    // Another compilation rewriting the shared declarations can't loosen what this one is checked against.
+    fs::write(&path, fs::read_to_string(&path).unwrap().replace("{ displayName: old.displayName }", "{ }")).unwrap();
+    rehash(&root, "2").unwrap();
+    let incomplete = verified(&root, false).unwrap();
+    let shared = root.join(".chunk/generated/migrations.ts");
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let error = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = fs::write(&shared, "export {};\n");
+            }
+        });
+        let result = crate::compiler::compile_journal(&root, output.path(), &incomplete);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        result.unwrap_err()
+    });
+    assert!(error.to_string().contains("displayName"), "{error}");
+    assert!(
+        fs::read_dir(root.join(".chunk")).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("compile-"))
+    );
 
     fs::create_dir_all(root.join("server/migrations/helpers")).unwrap();
     fs::write(root.join("server/migrations/helpers/package.json"), r##"{"imports":{"#chunk":"./x.ts"}}"##).unwrap();

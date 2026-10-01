@@ -2,6 +2,7 @@ mod bundle;
 mod descriptors;
 mod domains;
 mod sources;
+mod stage;
 mod typecheck;
 use std::{collections::BTreeMap, fs, io, path::Path};
 
@@ -34,22 +35,23 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
 }
 
 /// Compiles from `journal`, which was verified when it was read: migrations are type-checked and bundled from
-/// copies of its sources under `.chunk/migrations/`, never from `server/migrations/`.
+/// copies of its sources in a private directory under `.chunk/`, never from `server/migrations/`.
 pub(crate) fn compile_journal(project: &Path, output: &Path, journal: &crate::migrations::Journal) -> io::Result<()> {
     let inventory = crate::project::load(project)?;
     crate::sdk::generate(project, &inventory, journal)?;
     fs::create_dir_all(output)?;
     let output = output.canonicalize()?;
     let staging = tempfile::Builder::new().prefix(".compile-").tempdir_in(&output)?;
-    let migrations = pin_migrations(project, journal)?;
+    let stage = stage::stage(project, &inventory, journal)?;
+    let migrations = &stage.migrations;
     let files = sources::discover(project, &inventory)?;
     let paths: Vec<_> = files
         .iter()
         .map(|file| file.path.as_path())
         .chain(migrations.iter().map(|migration| migration.path.as_path()))
         .collect();
-    typecheck::check(&paths, staging.path())?;
-    let (mut contract, backs) = bundle_and_extract(project, staging.path(), &files, &migrations, &inventory)?;
+    typecheck::check(&paths, &stage.chunk, staging.path())?;
+    let (mut contract, backs) = bundle_and_extract(project, staging.path(), &files, migrations, &inventory)?;
     crate::migrations::require_replayed(journal, &contract.tables)?;
     contract.contracts.migrations = journal.contract(&backs);
     for migration in contract.contracts.migrations.iter().filter(|migration| migration.kind == MigrationKind::Expand) {
@@ -88,24 +90,6 @@ pub(crate) fn compile_journal(project: &Path, output: &Path, journal: &crate::mi
         fs::rename(staging.path().join(name), output.join(name))?;
     }
     Ok(())
-}
-
-fn pin_migrations(project: &Path, journal: &crate::migrations::Journal) -> io::Result<Vec<bundle::MigrationSource>> {
-    let directory = project.join(".chunk/migrations");
-    match fs::remove_dir_all(&directory) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-        _ => {}
-    }
-    fs::create_dir_all(&directory)?;
-    let mut migrations = Vec::new();
-    for (entry, code) in journal.entries.iter().zip(&journal.sources) {
-        if entry.kind == MigrationKind::Expand {
-            let path = directory.join(format!("{}.ts", entry.id));
-            fs::write(&path, code)?;
-            migrations.push(bundle::MigrationSource { id: entry.id.clone(), path, code: code.clone() });
-        }
-    }
-    Ok(migrations)
 }
 
 /// Evaluates only `server/schema/`, without type-checking or migration checks, for diffing it.
