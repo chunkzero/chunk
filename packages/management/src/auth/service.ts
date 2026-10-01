@@ -17,7 +17,7 @@ import { findProject } from "../projects/store.ts";
 import { callerOf, checkProjectAccess } from "../rpc/caller.ts";
 import { idempotent } from "../rpc/idempotency.ts";
 import { failedPrecondition, invalid, notFound, page, pageOf, required, seqAfter } from "../rpc/validate.ts";
-import { findToken, issueToken, type TokenRow, toToken } from "./tokens.ts";
+import { findToken, issueToken, renewingLifetimeMs, type TokenRow, toToken } from "./tokens.ts";
 
 const loginLifetimeMs = 10 * 60 * 1000;
 const pollIntervalMs = 5 * 1000;
@@ -85,7 +85,8 @@ export function authService({ sql, keys, publicUrl }: Deps): Partial<ServiceImpl
           principalId: caller.principal.id,
           name: login.client_name,
           projectId: undefined,
-          expireTime: undefined,
+          expireTime: new Date(Date.now() + renewingLifetimeMs),
+          renews: true,
         });
         const sealed = await keys.cipher.seal(new TextEncoder().encode(secret), loginContext(login.id_hash));
         await tx`
