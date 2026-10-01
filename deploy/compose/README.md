@@ -101,9 +101,10 @@ with offline test players, and removes everything it created. It refuses to run 
 
 Environments' machines are not part of the Compose project: they keep running without management, and they keep the
 `chunk` network in use. To take the install down, delete every environment first. Neither the CLI nor the dashboard
-deletes environments yet, so call the API:
+deletes environments yet, so call the API, from `deploy/compose` again:
 
 ```sh
+cd deploy/compose  # from the repository root
 url=http://localhost:8080  # CHUNK_PUBLIC_URL
 token=$(sed -n 's/^CHUNK_OPERATOR_TOKEN=//p' .env)
 environments="ENVIRONMENT_ID ..."  # every ID `chunk environments` lists

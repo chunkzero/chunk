@@ -144,7 +144,7 @@ chunk deployments --env prod
 
 `--project` (or `CHUNK_PROJECT`) selects a project by name or ID, and may be left out while there is only one; `--env`
 selects an environment of it the same way. Project and environment names are 1 to 63 lowercase letters, digits and
-hyphens.
+hyphens, starting and ending with a letter or digit.
 
 `chunk deploy` builds the project as `chunk build` does, uploads the release unless the project already holds it,
 deploys it, and follows the deployment until it is active, then prints where players join. It fails if the deployment
