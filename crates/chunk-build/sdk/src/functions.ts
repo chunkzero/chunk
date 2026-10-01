@@ -2,6 +2,8 @@ import { documents } from "./documents.ts";
 import type { Reader, Writer, Tables } from "./documents.ts";
 import { scheduler } from "./jobs.ts";
 import type { RawScheduler, Scheduler } from "./jobs.ts";
+import { actionRouting } from "./routing.ts";
+import type { ActionRouting } from "./routing.ts";
 import type { SchemaDefinition } from "./schema.ts";
 import { argumentSchema, freeze } from "./validators.ts";
 import type { InferObject, JsonValue, ObjectValidator, Schema, Shape, Validator } from "./validators.ts";
@@ -65,10 +67,12 @@ export interface ActionContext extends AsyncContext {
   secret(name: string): Promise<string>;
   readonly invocationId: string;
   sleep(milliseconds: number): Promise<void>;
+  readonly routing: ActionRouting;
 }
 export interface RawActionContext {
   http(binding: string, request: HttpRequest): Promise<HttpOutcome>;
   secret(name: string): Promise<string>;
+  platform(request: unknown): Promise<unknown>;
   readonly caller: JsonValue;
   readonly invocationId: string;
   runQuery(path: string, args: unknown): Promise<unknown>;
@@ -226,6 +230,7 @@ export function actionContext(ctx: RawActionContext): ActionContext {
     runQuery: (ref, values) => invoke("query", ref, values),
     runMutation: (ref, values) => invoke("mutation", ref, values),
     sleep: (milliseconds) => ctx.sleep(milliseconds),
+    routing: actionRouting((request) => ctx.platform(request)),
   } satisfies Omit<ActionContext, "caller">);
 }
 

@@ -374,6 +374,15 @@ action({
     return null;
   },
 });
+mutation({
+  args: { player: v.player() },
+  returns: v.null(),
+  handler: (ctx) => {
+    // @ts-expect-error only actions move players
+    void ctx.routing;
+    return null;
+  },
+});
 
 import { defineApp, defineScope } from "../src/index.ts";
 
