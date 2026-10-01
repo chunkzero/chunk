@@ -104,11 +104,23 @@ struct Bot {
     next_command: Instant,
 }
 
+/// Connects to the first of `addresses` that accepts, so an unreachable IPv6 address doesn't hide a working IPv4 one.
+async fn connect(addresses: &[SocketAddr]) -> std::io::Result<TcpStream> {
+    let mut failure = None;
+    for &address in addresses {
+        match TcpStream::connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => failure = Some(error),
+        }
+    }
+    Err(failure.unwrap_or_else(|| std::io::ErrorKind::AddrNotAvailable.into()))
+}
+
 /// Runs bot `index` until `stop`, recording how it ended.
 pub async fn run(
     index: u32,
     config: Arc<Config>,
-    address: SocketAddr,
+    addresses: Arc<[SocketAddr]>,
     stats: Arc<Stats>,
     permit: OwnedSemaphorePermit,
     stop: CancellationToken,
@@ -120,7 +132,7 @@ pub async fn run(
         let deadline = connected + Duration::from_secs(config.login_timeout);
         let stream = tokio::select! {
             () = stop.cancelled() => return Ok(()),
-            stream = timeout_at(deadline, TcpStream::connect(address)) => {
+            stream = timeout_at(deadline, connect(&addresses)) => {
                 stream.context("connect timed out")?.context("connect")?
             }
         };

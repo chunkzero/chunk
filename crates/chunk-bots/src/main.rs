@@ -7,17 +7,18 @@ mod stats;
 mod wire;
 
 use std::{
+    net::SocketAddr,
     sync::{Arc, atomic::Ordering::Relaxed},
     time::Duration,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use clap::Parser;
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 use tokio::{
     sync::Semaphore,
     task::JoinSet,
-    time::{Instant, MissedTickBehavior, interval, sleep},
+    time::{Instant, MissedTickBehavior, interval, sleep, timeout},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -55,10 +56,12 @@ impl Cpu {
 }
 
 async fn run(config: Arc<Config>) -> Result<()> {
-    let address = tokio::net::lookup_host(&config.address)
-        .await?
-        .next()
-        .with_context(|| format!("{} resolves to no address", config.address))?;
+    let addresses: Arc<[SocketAddr]> =
+        timeout(Duration::from_secs(config.login_timeout), tokio::net::lookup_host(&config.address))
+            .await
+            .with_context(|| format!("resolving {} timed out", config.address))??
+            .collect();
+    ensure!(!addresses.is_empty(), "{} resolves to no address", config.address);
     let stats = Arc::new(Stats::new());
     let stop = CancellationToken::new();
     let mut cpu = Cpu { system: System::new(), pid: Pid::from_u32(std::process::id()) };
@@ -73,7 +76,7 @@ async fn run(config: Arc<Config>) -> Result<()> {
         for index in 0..config.bots {
             logins.tick().await;
             let permit = pending.clone().acquire_owned().await?;
-            bots.spawn(bot::run(index, config.clone(), address, stats.clone(), permit, stop.clone()));
+            bots.spawn(bot::run(index, config.clone(), addresses.clone(), stats.clone(), permit, stop.clone()));
         }
         anyhow::Ok(())
     };
