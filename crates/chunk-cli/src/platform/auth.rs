@@ -82,14 +82,8 @@ async fn login(options: Login) -> io::Result<()> {
         .map_err(api_error)?
         .principal
         .unwrap_or_default();
-    let keychain = config::save(&target, secret)?;
+    config::save(&target, secret)?;
     cliclack::log::success(format!("Logged in to {target} as {}", principal.display_name))?;
-    if !keychain {
-        cliclack::log::warning(format!(
-            "No OS keychain is available, so the token is saved in {}, readable only by you.",
-            config::path()?.display()
-        ))?;
-    }
     warn_overrides()
 }
 

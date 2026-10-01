@@ -1,4 +1,6 @@
-use super::config::{Config, Secret, Target, forget_at, load_at, load_from, parse_url, resolve, save_at, save_to};
+use super::config::{
+    Config, Secret, Target, forget_at, load_at, load_from, lock, lock_path, parse_url, resolve, save_at, save_to,
+};
 use super::*;
 use url::Url;
 
@@ -57,28 +59,48 @@ fn saved_logins_are_private_and_never_debug_print_the_token() {
     }
 }
 
+/// Installs an in-memory keychain for a test and removes it afterwards.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+struct MemoryKeychain;
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl MemoryKeychain {
+    fn install() -> Self {
+        keyring_core::set_default_store(keyring_core::sample::Store::new().unwrap());
+        Self
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl Drop for MemoryKeychain {
+    fn drop(&mut self) {
+        keyring_core::unset_default_store();
+    }
+}
+
 #[test]
-fn the_token_is_kept_in_the_keychain_or_else_the_file() {
+fn the_token_is_saved_in_one_place_and_forgotten_only_if_unchanged() {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let _keychain = MemoryKeychain::install();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("chunk/config.json");
-    let target = custom("https://custom.example/");
     let token = || Secret::new("chunk_saved".into());
-    // The OS store initialises first, so the in-memory one replaces it for good.
-    let _ = keyring::Entry::store_status();
-    keyring_core::set_default_store(keyring_core::sample::Store::new().unwrap());
-    assert!(save_at(&path, &target, token()).unwrap());
-    assert_eq!(load_from(&path).unwrap().token, None);
+    save_at(&path, &custom("https://custom.example/"), token()).unwrap();
+    assert_eq!(load_from(&path).unwrap().token.is_some(), cfg!(not(any(target_os = "macos", target_os = "windows"))));
     assert_eq!(load_at(&path).unwrap().token, Some(token()));
     forget_at(&path, &Secret::new("chunk_newer".into())).unwrap();
     assert_eq!(load_at(&path).unwrap().token, Some(token()));
     forget_at(&path, &token()).unwrap();
     assert_eq!(load_at(&path).unwrap().token, None);
+}
 
-    keyring_core::unset_default_store();
-    assert!(!save_at(&path, &target, token()).unwrap());
-    assert_eq!(load_from(&path).unwrap().token, Some(token()));
-    forget_at(&path, &token()).unwrap();
-    assert_eq!(load_at(&path).unwrap().token, None);
+#[test]
+fn saving_and_forgetting_the_token_exclude_each_other() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("chunk/config.json");
+    let _held = lock(&path).unwrap();
+    let other = std::fs::OpenOptions::new().write(true).open(lock_path(&path)).unwrap();
+    assert!(matches!(other.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
 }
 
 #[test]

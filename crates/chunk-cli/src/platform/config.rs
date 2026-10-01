@@ -1,14 +1,18 @@
 //! The saved platform and token, and the environment variables that override them. The token is saved in the OS
-//! keychain, or in the configuration file where there is none.
+//! keychain on macOS and Windows, and in the configuration file elsewhere. Saving and forgetting it hold a lock on a
+//! file beside the configuration file, so concurrent commands see one login or the other.
 
 use std::{
-    fmt, io,
+    fmt,
+    fs::{File, OpenOptions},
+    io,
     path::{Path, PathBuf},
 };
 
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::keychain;
 
 /// Chunk Cloud's management API.
@@ -67,7 +71,7 @@ impl fmt::Debug for Secret {
 }
 
 /// What `chunk auth login` saves: the platform, and the token it issued, which only ever goes to that platform. The
-/// file holds the token only where there is no keychain.
+/// file holds the token only where the OS has no keychain support.
 #[derive(Default, Serialize, Deserialize, PartialEq, Debug)]
 pub(super) struct Config {
     #[serde(default)]
@@ -113,24 +117,43 @@ pub(super) fn load() -> io::Result<Config> {
     load_at(&path()?)
 }
 
-/// Saves the login, with the token in the keychain if there is one. Returns whether it is.
-pub(super) fn save(target: &Target, token: Secret) -> io::Result<bool> {
+/// Saves the login.
+pub(super) fn save(target: &Target, token: Secret) -> io::Result<()> {
     save_at(&path()?, target, token)
 }
 
 pub(super) fn load_at(path: &Path) -> io::Result<Config> {
-    let mut config = load_from(path)?;
-    if config.token.is_none() {
-        config.token = keychain::get(config.target.endpoint())?;
-    }
+    let config = load_from(path)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let config = Config { token: keychain::get(config.target.endpoint())?, ..config };
     Ok(config)
 }
 
-pub(super) fn save_at(path: &Path, target: &Target, token: Secret) -> io::Result<bool> {
-    let keychain = keychain::set(target.endpoint(), &token).is_ok();
-    let token = (!keychain).then_some(token);
-    save_to(path, &Config { target: target.clone(), token })?;
-    Ok(keychain)
+pub(super) fn save_at(path: &Path, target: &Target, token: Secret) -> io::Result<()> {
+    let _lock = lock(path)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let previous = load_from(path).ok().map(|config| config.target);
+        keychain::set(target.endpoint(), &token)?;
+        if let Some(previous) = previous.filter(|previous| previous.endpoint() != target.endpoint()) {
+            keychain::delete(previous.endpoint())?;
+        }
+        save_to(path, &Config { target: target.clone(), token: None })
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    save_to(path, &Config { target: target.clone(), token: Some(token) })
+}
+
+pub(super) fn lock_path(path: &Path) -> PathBuf {
+    path.with_extension("lock")
+}
+
+/// Holds the exclusive lock on the file beside `path` until it is dropped.
+pub(super) fn lock(path: &Path) -> io::Result<File> {
+    std::fs::create_dir_all(path.parent().expect("the configuration file has a parent"))?;
+    let file = OpenOptions::new().create(true).truncate(false).write(true).open(lock_path(path))?;
+    file.lock()?;
+    Ok(file)
 }
 
 pub(super) fn load_from(path: &Path) -> io::Result<Config> {
@@ -167,16 +190,24 @@ pub(super) fn forget(token: &Secret) -> io::Result<()> {
 }
 
 pub(super) fn forget_at(path: &Path, token: &Secret) -> io::Result<()> {
-    let mut config = load_from(path)?;
-    if config.token.as_ref() == Some(token) {
-        config.token = None;
-        return save_to(path, &config);
+    let _lock = lock(path)?;
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let account = load_from(path)?.target;
+        if keychain::get(account.endpoint())?.as_ref() == Some(token) {
+            keychain::delete(account.endpoint())?;
+        }
+        Ok(())
     }
-    let account = config.target.endpoint();
-    if keychain::get(account)?.as_ref() == Some(token) {
-        keychain::delete(account)?;
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let mut config = load_from(path)?;
+        if config.token.as_ref() == Some(token) {
+            config.token = None;
+            save_to(path, &config)?;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Replaces the file atomically. The temporary file it renames is created readable by its owner alone.
