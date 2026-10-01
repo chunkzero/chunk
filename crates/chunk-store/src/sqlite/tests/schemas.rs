@@ -164,7 +164,7 @@ fn deployments_cannot_declare_system_tables() {
 
 #[test]
 fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
-    for version in [3, 4, 5, 6, 7] {
+    for version in [3, 4, 5, 6, 7, 8] {
         let (directory, mut store) = open();
         let path = directory.path().join("data.db");
         let deployment = chunk_contract::Deployment {
@@ -183,14 +183,22 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         store
             .connection
             .execute_batch(
-                "DROP INDEX _chunk_operations_committed;
-                 ALTER TABLE _chunk_operations DROP COLUMN committed_at;
-                 ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
-                 ALTER TABLE _chunk_jobs DROP COLUMN updated_at;
+                "DROP INDEX _chunk_index_8_profiles_8_by_coins_5_coins;
                  DROP TABLE _chunk_indexes;
                  DROP TABLE _chunk_work;",
             )
             .unwrap();
+        if version < 8 {
+            store
+                .connection
+                .execute_batch(
+                    "DROP INDEX _chunk_operations_committed;
+                     ALTER TABLE _chunk_operations DROP COLUMN committed_at;
+                     ALTER TABLE _chunk_retry_contexts DROP COLUMN prepared_at;
+                     ALTER TABLE _chunk_jobs DROP COLUMN updated_at;",
+                )
+                .unwrap();
+        }
         if version < 7 {
             store
                 .connection
@@ -219,8 +227,11 @@ fn retained_formats_upgrade_without_losing_data_outcomes_or_retry_bindings() {
         assert!(store.jobs().unwrap().records.is_empty());
         assert_eq!(store.deployments().unwrap(), vec![deployment.clone()]);
         assert_eq!(store.outcome(&operation("committed")).unwrap(), Some(outcome.clone()));
-        let key = DocumentKey::new("profiles", "a").unwrap();
-        assert_eq!(store.snapshot().unwrap().get(&key).unwrap().unwrap().value, json!({"coins": 7}));
+        let pending = store.pending_work().unwrap();
+        assert_eq!(pending.len(), 1);
+        store.run_work(pending[0].id).unwrap();
+        assert!(store.pending_work().unwrap().is_empty());
+        assert_eq!(store.snapshot().unwrap().scan_index(&by_coins()).unwrap()[0].1.value, json!({"coins": 7}));
         assert_eq!(store.prepare_operation(&operation("failed"), context.clone()).unwrap(), context);
         assert!(store.release_deployment("old").unwrap());
         drop(store);

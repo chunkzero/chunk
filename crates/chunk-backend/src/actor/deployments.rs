@@ -50,7 +50,6 @@ impl Actor {
             }
             return Err(error);
         }
-        self.work.failed.clear();
         Ok(true)
     }
 
@@ -68,6 +67,7 @@ impl Actor {
             Ok((snapshot, pending, ready)) => {
                 self.view = Arc::new(View::new(snapshot));
                 self.work.pending = pending;
+                self.work.failed.clear();
                 self.versions.insert(id.clone(), Some(deployment));
                 if ready {
                     self.unready.remove(&id);

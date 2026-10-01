@@ -215,6 +215,8 @@ impl Actor {
                     self.scheduled.active.insert(job.id, (job.attempt, handle));
                 }
                 Err(Error::Busy | Error::Overloaded(_)) => {}
+                // Waits behind the jobs of ready deployments until its indexes are built.
+                Err(Error::NotReady) => self.scheduled.ready.rotate_left(1),
                 Err(_) => {
                     if self.send_scheduling(JobCommand::Finish {
                         id: job.id,

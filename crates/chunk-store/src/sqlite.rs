@@ -150,7 +150,7 @@ impl SqliteStore {
         let schema = Arc::new(schema::load(&connection)?);
         let indexes = Arc::new(indexes::load(&connection)?);
         let epoch = Epoch(log::epoch(&connection)?);
-        Ok(Self {
+        let mut store = Self {
             connection,
             readers: read::Pool::new(path),
             schema,
@@ -161,7 +161,26 @@ impl SqliteStore {
             job_limits: jobs::JobLimits::default(),
             pruned_at: None,
             _writer_lock: writer_lock,
-        })
+        };
+        store.schedule_missing_indexes()?;
+        Ok(store)
+    }
+
+    /// Records a build for each index a resident deployment declares that is neither built nor pending, so a
+    /// deployment is never unready with nothing to resume.
+    fn schedule_missing_indexes(&mut self) -> Result<()> {
+        let pending: Vec<_> = work::load(&self.connection)?.into_iter().map(|pending| pending.work).collect();
+        let missing: Vec<_> = deployments::load(&self.connection)?
+            .iter()
+            .flat_map(|deployment| IndexDefinition::declared(&deployment.tables).collect::<Vec<_>>())
+            .filter(|index| !self.indexes.contains(index))
+            .map(Work::Index)
+            .filter(|work| !pending.contains(work))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        log::write(&self.connection, self.log.as_mut(), &[], |transaction| work::record(transaction, missing))
     }
 
     /// Replaces the default one-day retention windows.

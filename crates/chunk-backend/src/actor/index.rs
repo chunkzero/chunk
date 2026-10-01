@@ -28,8 +28,8 @@ impl Table {
     }
 }
 
-fn key(query: &IndexQuery) -> String {
-    serde_json::to_string(query).expect("index queries serialize")
+fn key(query: &IndexQuery, fields: &[String]) -> String {
+    serde_json::to_string(&(query, fields)).expect("index queries serialize")
 }
 
 impl ReadIndex {
@@ -46,7 +46,11 @@ impl ReadIndex {
         }
         for (query, fields) in &reads.indexes {
             let indexes = &mut self.table(&query.table).indexes;
-            indexes.entry(key(query)).or_insert_with(|| (query.clone(), fields.clone(), BTreeSet::new())).2.insert(id);
+            indexes
+                .entry(key(query, fields))
+                .or_insert_with(|| (query.clone(), fields.clone(), BTreeSet::new()))
+                .2
+                .insert(id);
         }
     }
 
@@ -73,9 +77,9 @@ impl ReadIndex {
                 }
             }
         }
-        for (query, _) in &reads.indexes {
+        for (query, fields) in &reads.indexes {
             if let Some(table) = self.tables.get_mut(&query.table) {
-                let key = key(query);
+                let key = key(query, fields);
                 if let Some((_, _, ids)) = table.indexes.get_mut(&key) {
                     ids.remove(&id);
                     if ids.is_empty() {
@@ -123,5 +127,44 @@ impl ReadIndex {
 
     fn table(&mut self, name: &str) -> &mut Table {
         self.tables.entry(name.to_owned()).or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use chunk_store::DocumentKey;
+
+    fn reads(fields: &str) -> Dependencies {
+        let query = IndexQuery {
+            table: "scores".into(),
+            index: "ranked".into(),
+            prefix: vec![json!(1)],
+            start: None,
+            end: None,
+            limit: 10,
+        };
+        Dependencies { indexes: vec![(query, vec![fields.into()])], ..Dependencies::default() }
+    }
+
+    #[test]
+    fn queries_on_one_index_name_with_different_fields_are_kept_apart() {
+        let (old, new) = (reads("a"), reads("b"));
+        let mut index = ReadIndex::default();
+        index.insert(1, &old);
+        index.insert(2, &new);
+        let change = Change {
+            key: DocumentKey::new("scores", "x").unwrap(),
+            before: Some(json!({"a": 9, "b": 9})),
+            after: Some(json!({"a": 9, "b": 1})),
+        };
+        let mut found = BTreeSet::new();
+        index.affected(std::slice::from_ref(&change), &mut found);
+        assert_eq!(found, BTreeSet::from([2]));
+        index.remove(1, &old);
+        index.remove(2, &new);
+        assert!(index.tables.is_empty());
     }
 }
