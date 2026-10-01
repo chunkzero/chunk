@@ -80,6 +80,8 @@ pub(crate) struct Initial {
 pub(crate) struct Stored {
     pub work: Vec<PendingWork>,
     pub migrations: Vec<chunk_contract::Migration>,
+    /// The expands whose old shape was dropped.
+    pub contracted: Vec<String>,
 }
 
 /// How far the log has advanced.
@@ -270,7 +272,7 @@ fn current(store: &mut dyn Storage) -> Result<(Snapshot, Stored)> {
 }
 
 fn stored(store: &dyn Storage) -> chunk_store::Result<Stored> {
-    Ok(Stored { work: store.pending_work()?, migrations: store.migrations()? })
+    Ok(Stored { work: store.pending_work()?, migrations: store.migrations()?, contracted: store.contracted()? })
 }
 
 /// Installs system tables, reporting whether that advanced the revision, and reads the store.

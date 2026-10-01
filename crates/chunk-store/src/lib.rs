@@ -69,7 +69,9 @@ pub use model::{
 pub use replication::{Listed, ObjectStorage, Replication, ReplicationProgress, Replicator, S3Bucket, S3Credentials};
 pub use snapshot::{Snapshot, SnapshotReader};
 pub use sqlite::{SqliteStore, jobs::JobLimits, retention::Retention};
-pub use work::{Backfill, BackfillRow, PendingWork, Transform, Work, compatible_field};
+pub use work::{
+    Backfill, BackfillRow, PendingWork, Transform, Work, compatible_field, rollback_error, rolled_back_past,
+};
 
 /// Only the database's single owning service holds this capability.
 pub trait Storage: Send {
@@ -130,6 +132,11 @@ pub trait Storage: Send {
     /// # Errors
     /// Reports storage failures or corrupt records.
     fn migrations(&self) -> Result<Vec<chunk_contract::Migration>>;
+
+    /// The IDs of the expand migrations whose old shape was dropped.
+    /// # Errors
+    /// Reports storage failures or corrupt records.
+    fn contracted(&self) -> Result<Vec<String>>;
 
     /// Removes an inactive deployment, permanently retiring its identity. Indexes
     /// and pending work that no remaining deployment or schema declares go with it.

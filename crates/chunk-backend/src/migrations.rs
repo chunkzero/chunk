@@ -16,8 +16,8 @@ const INVOCATION_BYTES: usize = MAX_DOCUMENT_BYTES + 4096;
 
 /// The longest the transforms of one backfill batch may take in all.
 const BATCH_DEADLINE: Duration = Duration::from_secs(5);
-/// The most JSON the transforms of one backfill batch may return in all.
-const BATCH_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+/// The most JSON the transforms of one backfill batch may return in all. Tests shrink it to a few documents.
+const BATCH_OUTPUT_BYTES: usize = if cfg!(test) { 1024 * 1024 } else { 8 * 1024 * 1024 };
 
 /// Which transform of a migration runs.
 #[derive(Clone, Copy)]

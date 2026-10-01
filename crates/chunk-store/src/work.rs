@@ -86,6 +86,33 @@ impl Backfill {
     }
 }
 
+/// The first of `contracted`, the expands whose old shape the environment dropped, that `journal` neither contains
+/// nor replaces with a baseline. A deployment without it writes the shape from before the contraction.
+#[must_use]
+pub fn rolled_back_past<'a>(
+    contracted: impl IntoIterator<Item = &'a str>,
+    journal: &[chunk_contract::Migration],
+) -> Option<&'a str> {
+    contracted.into_iter().find(|id| {
+        let number = chunk_contract::migration_number(id);
+        !journal.iter().any(|entry| {
+            entry.id == *id
+                || (entry.kind == chunk_contract::MigrationKind::Baseline
+                    && chunk_contract::migration_number(&entry.id)
+                        .zip(number)
+                        .is_some_and(|((space, baseline), (other, n))| space == other && n <= baseline))
+        })
+    })
+}
+
+/// The error for a deployment that `rolled_back_past` rejects.
+#[must_use]
+pub fn rollback_error(migration: &str) -> crate::Error {
+    crate::Error::Migration(format!(
+        "rolling back past migration {migration} is no longer possible: the environment dropped its old shape"
+    ))
+}
+
 /// Whether a stored field serves a deployment that declares it as `declared`. A field an active expand migration
 /// adds or removes (`migrating`) is stored as optional.
 #[must_use]

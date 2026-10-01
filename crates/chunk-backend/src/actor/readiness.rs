@@ -20,6 +20,8 @@ pub(super) struct Work {
     pub pending: Vec<PendingWork>,
     /// Active expand migrations, whose old and new shapes writes keep in step.
     pub migrations: Vec<chunk_contract::Migration>,
+    /// Expands whose old shape was dropped, which no deployment may lack.
+    pub contracted: Vec<String>,
     /// The item in progress: with the commit thread, or a backfill batch with a read engine.
     running: Option<u64>,
     /// What the running backfill does next, once the commit thread or a read engine can take it.
@@ -211,12 +213,13 @@ impl Actor {
 
 impl Work {
     pub fn new(stored: Stored) -> Self {
-        Self { pending: stored.work, migrations: stored.migrations, ..Self::default() }
+        Self { pending: stored.work, migrations: stored.migrations, contracted: stored.contracted, ..Self::default() }
     }
 
     pub fn update(&mut self, stored: Stored) {
         self.pending = stored.work;
         self.migrations = stored.migrations;
+        self.contracted = stored.contracted;
     }
 
     /// Finishes each waiting reply `outcome` decides, keeping the rest.

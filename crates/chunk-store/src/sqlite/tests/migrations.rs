@@ -142,7 +142,7 @@ fn installs_need_the_applied_journal_and_roll_back_only_until_the_old_shape_is_d
     store.run_work(pending[0].id, &mut |_, _, row| Ok(upper(&row))).unwrap();
     assert!(store.migrations().unwrap().is_empty());
     assert_eq!(fighter(&mut store, "007"), json!({"displayName": "N7"}));
-    assert!(migration_error(store.install_deployment(&deployment("late", 1))).contains("fighters.name"));
+    assert!(migration_error(store.install_deployment(&deployment("late", 1))).contains("0002_rename"));
     store.install_deployment(&deployed("baseline", &baseline)).unwrap();
 }
 
@@ -410,4 +410,26 @@ fn a_replicated_restore_recovers_a_partial_backfill_and_the_contraction_after_it
     let bytes = connection.query_row("SELECT document_bytes FROM _chunk_metadata", [], |row| row.get::<_, i64>(0));
     let expected: usize = (0..300).map(|i| json!({"displayName": format!("N{i}")}).to_string().len()).sum();
     assert_eq!(bytes.unwrap(), i64::try_from(expected).unwrap());
+}
+
+#[test]
+fn an_older_writer_cannot_install_after_a_contraction() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut optional = journal(3);
+    for entry in &mut optional[1..] {
+        entry.schema.get_mut("fighters").unwrap().fields.get_mut("displayName").unwrap().optional = true;
+    }
+    for (name, history) in [("required", counted()), ("renamed", optional)] {
+        let mut store = SqliteStore::open(directory.path().join(format!("{name}.db")), "local").unwrap();
+        store.install_deployment(&deployed("old", &history[..1])).unwrap();
+        store.install_deployment(&deployed("finished", &history)).unwrap();
+        store.release_deployment("old").unwrap();
+        while let Some(pending) = store.pending_work().unwrap().first().cloned() {
+            store.run_work(pending.id, &mut |_, _, _| Ok(json!({"count": 1, "displayName": "x"}))).unwrap();
+        }
+        assert!(store.migrations().unwrap().is_empty(), "{name} contracted");
+        let late = migration_error(store.install_deployment(&deployed("late", &history[..1])));
+        assert!(late.contains("0002_") && late.contains("no longer possible"), "{late}");
+        store.install_deployment(&deployed("again", &history)).unwrap();
+    }
 }

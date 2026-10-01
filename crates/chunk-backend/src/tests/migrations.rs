@@ -33,6 +33,7 @@ export function __chunk_migrate(_, {direction, rows}) {
 export function read(ctx, id) { return JSON.stringify(ctx.db.get('fighters', id)); }
 export function writeOld(ctx, id) { ctx.db.put('fighters', id, {name: id + '-old'}); return ''; }
 export function writeBig(ctx, id) { ctx.db.put('fighters', id, {name: 'a'.repeat(1048496)}); return ''; }
+export function writeLarge(ctx, id) { ctx.db.put('fighters', id, {name: 'a'.repeat(400000)}); return ''; }
 export function writeNew(ctx, id) { ctx.db.put('fighters', id, {displayName: id.toUpperCase() + '-NEW'}); return ''; }
 export function seed(ctx, part) {
   for (let i = part * 100; i < part * 100 + 100; i++) ctx.db.put('fighters', String(i).padStart(3, '0'), {name: 'n' + i});
@@ -84,6 +85,7 @@ fn deployment(id: &str, length: usize) -> Deployment {
             function("writeOld", FunctionKind::Mutation),
             function("writeNew", FunctionKind::Mutation),
             function("writeBig", FunctionKind::Mutation),
+            function("writeLarge", FunctionKind::Mutation),
             function("seed", FunctionKind::Mutation),
         ]
         .into(),
@@ -140,7 +142,7 @@ async fn a_rename_backfills_syncs_both_ways_and_drops_the_old_field_once_finishe
     assert!(!columns().contains(&"name".to_owned()), "{:?}", columns());
     assert_eq!(read(&backend, "finished", "a").await, json!({"displayName": "A-NEW"}));
     let error = backend.deploy(deployment("rollback", 1)).await.unwrap_err();
-    assert!(matches!(&error, Error::Migration(message) if message.contains("fighters.name")), "{error}");
+    assert!(matches!(&error, Error::Migration(message) if message.contains("0002_rename")), "{error}");
 }
 
 #[tokio::test]
@@ -348,4 +350,21 @@ async fn a_slow_backfill_leaves_the_commit_lane_to_other_writes() {
     write(&backend, "old", "writeOld", "live").await;
     assert!(!backend.readiness(new.clone()).await.unwrap().ready, "the write committed while the backfill ran");
     backend.ready(new).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_batch_cut_at_the_output_budget_commits_its_prefix_and_the_backfill_continues() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend =
+        Backend::new("local".into(), Box::new(SqliteStore::open(directory.path().join("budget.db"), "local").unwrap()))
+            .unwrap();
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    for id in ["a", "b", "c"] {
+        write(&backend, "old", "writeLarge", id).await;
+    }
+    backend.deploy(deployment("new", 2)).await.unwrap();
+    for id in ["a", "b", "c"] {
+        let name = read(&backend, "new", id).await["displayName"].as_str().unwrap().len();
+        assert_eq!(name, 400_000, "row {id} was transformed");
+    }
 }

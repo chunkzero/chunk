@@ -13,6 +13,10 @@ impl Actor {
         snapshot: &Snapshot,
         work: &super::readiness::Work,
     ) -> Result<bool> {
+        let journal = &deployment.contracts.migrations;
+        if chunk_store::rolled_back_past(work.contracted.iter().map(String::as_str), journal).is_some() {
+            return Err(Error::Contract);
+        }
         let migrating: BTreeSet<_> = work
             .migrations
             .iter()
