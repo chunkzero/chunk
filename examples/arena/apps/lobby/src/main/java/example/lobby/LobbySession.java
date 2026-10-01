@@ -34,6 +34,7 @@ final class LobbySession extends Session {
 
     private void open(Instance instance) {
         Leaderboard.show(scope, instance);
+        Portal.showLabel(scope, instance);
         scope.getEvents()
                 .addListener(PlayerMoveEvent.class, new Portal(scope)::onMove)
                 .addListener(PlayerMoveEvent.class, this::catchFalls);

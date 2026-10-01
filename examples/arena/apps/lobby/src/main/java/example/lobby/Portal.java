@@ -7,9 +7,15 @@ import dev.chunkzero.runtime.SessionScope;
 import net.kyori.adventure.sound.Sound;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import net.minestom.server.coordinate.Point;
+import net.minestom.server.coordinate.Pos;
+import net.minestom.server.entity.Entity;
+import net.minestom.server.entity.EntityType;
 import net.minestom.server.entity.Player;
+import net.minestom.server.entity.metadata.display.TextDisplayMeta;
 import net.minestom.server.event.player.PlayerMoveEvent;
+import net.minestom.server.instance.Instance;
 import net.minestom.server.sound.SoundEvent;
 
 import java.util.HashSet;
@@ -22,6 +28,30 @@ final class Portal {
 
     Portal(SessionScope scope) {
         this.scope = scope;
+    }
+
+    // At eye level, half a block in front of the portal, facing north toward spawn.
+    private static final Pos LABEL = new Pos(0.5, 66.4, 11.5, 180, 0);
+
+    static void showLabel(SessionScope scope, Instance instance) {
+        var label = new Entity(scope.getProcess(), EntityType.TEXT_DISPLAY);
+        label.editEntityMeta(
+                TextDisplayMeta.class,
+                meta ->
+                        meta.setText(
+                                Component.text()
+                                        .append(
+                                                Component.text(
+                                                        "King's Hill",
+                                                        NamedTextColor.GOLD,
+                                                        TextDecoration.BOLD))
+                                        .append(Component.newline())
+                                        .append(
+                                                Component.text(
+                                                        "Step through to fight",
+                                                        NamedTextColor.GRAY))
+                                        .build()));
+        label.setInstance(instance, LABEL);
     }
 
     void onMove(PlayerMoveEvent event) {
