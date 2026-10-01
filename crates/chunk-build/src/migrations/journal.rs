@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs, io,
     path::{Path, PathBuf},
 };
@@ -8,9 +8,34 @@ use chunk_contract::{DatabaseSchema, Migration, MigrationKind, migration_number}
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::project::{Child, children};
-
 const VERSION: u32 = 1;
+const MAX_ID_NAME: usize = 64;
+const FINISH_PREFIX: &str = "finish_";
+
+/// Holds `server/migrations/.lock` until dropped, so only one `chunk migrate` mutates the journal at a time.
+pub(crate) struct Lock(PathBuf);
+
+impl Lock {
+    pub fn acquire(project: &Path) -> io::Result<Self> {
+        let directory = project.join("server/migrations");
+        fs::create_dir_all(&directory)?;
+        let path = directory.join(".lock");
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => Ok(Self(path)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(io::Error::other(format!(
+                "{} is held by another `chunk migrate`; if none is running, delete it",
+                path.display()
+            ))),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +62,8 @@ pub(crate) struct Journal {
     pub directory: PathBuf,
     pub entries: Vec<Entry>,
     pub snapshots: Vec<DatabaseSchema>,
+    /// Each entry's migration source as read, empty for entries without one. Hashing and bundling use these bytes.
+    pub sources: Vec<String>,
 }
 
 impl Journal {
@@ -53,12 +80,19 @@ impl Journal {
             return Err(invalid(&path, "unsupported journal version"));
         }
         let mut snapshots = Vec::new();
+        let mut sources = Vec::new();
         for entry in &document.entries {
             let path = snapshot_path(&directory, &entry.id);
             let bytes = fs::read(&path).map_err(|error| invalid(&path, error))?;
             snapshots.push(serde_json::from_slice(&bytes).map_err(|error| invalid(&path, error))?);
+            sources.push(if entry.kind == MigrationKind::Expand {
+                let path = directory.join(format!("{}.ts", entry.id));
+                fs::read_to_string(&path).map_err(|error| invalid(&path, error))?
+            } else {
+                String::new()
+            });
         }
-        Ok(Self { directory, entries: document.entries, snapshots })
+        Ok(Self { directory, entries: document.entries, snapshots, sources })
     }
 
     pub fn schema(&self) -> DatabaseSchema {
@@ -85,14 +119,15 @@ impl Journal {
     pub fn next_id(&self, name: &str) -> io::Result<String> {
         let number = self.entries.last().and_then(|entry| migration_number(&entry.id)).map_or(1, |(_, n)| n + 1);
         let id = format!("{number:04}_{name}");
-        if name.len() > 64 || migration_number(&id).is_none() {
+        if name.len() > MAX_ID_NAME || migration_number(&id).is_none() {
             return Err(io::Error::other("migration names use lowercase letters, digits and underscores"));
         }
         Ok(id)
     }
 
-    /// Appends an entry, writing its snapshot and, for an expand, its source.
-    pub fn push(&mut self, mut entry: Entry, snapshot: DatabaseSchema, source: Option<&str>) -> io::Result<()> {
+    /// Appends an entry, writing its snapshot and, for an expand, its source. The entry isn't committed until
+    /// `save` writes the journal.
+    pub fn append(&mut self, mut entry: Entry, snapshot: DatabaseSchema, source: Option<&str>) -> io::Result<()> {
         if let Some(source) = source {
             write(&self.source_path(&entry.id), source.as_bytes())?;
         }
@@ -101,25 +136,37 @@ impl Journal {
         write(&snapshot_path(&self.directory, &entry.id), &pretty(&snapshot)?)?;
         self.entries.push(entry);
         self.snapshots.push(snapshot);
+        self.sources.push(source.unwrap_or_default().to_owned());
+        Ok(())
+    }
+
+    /// Appends an entry and commits it.
+    pub fn push(&mut self, entry: Entry, snapshot: DatabaseSchema, source: Option<&str>) -> io::Result<()> {
+        self.append(entry, snapshot, source)?;
         self.save()
     }
 
+    /// Fails unless the journal on disk is the one this was read as.
+    pub fn require_unchanged(&self, project: &Path) -> io::Result<()> {
+        let current = Self::read(project)?;
+        let same = current.entries.len() == self.entries.len()
+            && current.entries.iter().zip(&self.entries).all(|(a, b)| a.id == b.id && a.hash == b.hash);
+        if same {
+            Ok(())
+        } else {
+            Err(io::Error::other("the migration journal changed while this command ran; run it again"))
+        }
+    }
+
+    /// Writes the journal, which commits every entry in it.
     pub fn save(&self) -> io::Result<()> {
         let document = Document { version: VERSION, entries: self.entries.clone() };
         write(&self.directory.join("meta/journal.json"), &pretty(&document)?)
     }
 
     /// The hash entry `index` should record for its files as they are now.
-    pub fn current_hash(&self, index: usize) -> io::Result<String> {
-        let entry = &self.entries[index];
-        let source = match entry.kind {
-            MigrationKind::Expand => {
-                let path = self.source_path(&entry.id);
-                fs::read_to_string(&path).map_err(|error| invalid(&path, error))?
-            }
-            _ => String::new(),
-        };
-        Ok(hash(entry, &self.snapshots[index], &source))
+    pub fn current_hash(&self, index: usize) -> String {
+        hash(&self.entries[index], &self.snapshots[index], &self.sources[index])
     }
 
     /// Checks that entries are numbered once, chain, match their recorded hashes and account for every file.
@@ -143,7 +190,7 @@ impl Journal {
                     entry.id
                 )));
             }
-            if self.current_hash(index)? != entry.hash {
+            if self.current_hash(index) != entry.hash {
                 return Err(io::Error::other(format!(
                     "migration {} no longer matches its recorded hash. Deployed migrations can't change; if it was \
                      never deployed, run `chunk migrate rehash {number}`",
@@ -151,33 +198,8 @@ impl Journal {
                 )));
             }
         }
-        self.unlisted()?;
         chunk_contract::validate_migrations(&self.contract(&BTreeMap::new()))
             .map_err(|error| invalid(&self.directory.join("meta/journal.json"), error))
-    }
-
-    /// Rejects migration sources and snapshots the journal doesn't list, such as ones merged from another branch.
-    fn unlisted(&self) -> io::Result<()> {
-        let sources: BTreeSet<_> = self
-            .entries
-            .iter()
-            .filter(|entry| entry.kind == MigrationKind::Expand)
-            .map(|entry| format!("{}.ts", entry.id))
-            .collect();
-        let snapshots: BTreeSet<_> =
-            self.entries.iter().map(|entry| format!("{}.snapshot.json", number(&entry.id))).collect();
-        let listed =
-            children(&self.directory, "migration", |_| false)?.into_iter().map(|child| (child, &sources)).chain(
-                children(&self.directory.join("meta"), "migration", |_| false)?.into_iter().map(|c| (c, &snapshots)),
-            );
-        for (Child { name, path, kind }, known) in listed {
-            let extension = Path::new(&name).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-            let tracked = matches!(extension.as_deref(), Some("ts" | "mts")) || name.ends_with(".snapshot.json");
-            if kind.is_file() && tracked && !known.contains(&name) {
-                return Err(invalid(&path, "not in meta/journal.json; was it merged from another branch?"));
-            }
-        }
-        Ok(())
     }
 
     /// The contract's journal. `backs` lists, per migration and table, whether it has a `back` transform.
@@ -227,7 +249,7 @@ impl Journal {
     }
 }
 
-fn number(id: &str) -> &str {
+pub(crate) fn number(id: &str) -> &str {
     id.split('_').next().unwrap_or(id)
 }
 
@@ -256,11 +278,29 @@ fn pretty(value: &impl Serialize) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Writes a temporary file beside `path` and renames it over `path`, so a reader sees the old or the new file.
 fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let mut temporary = tempfile::Builder::new().prefix(".write-").tempfile_in(parent)?;
+    io::Write::write_all(&mut temporary, bytes)?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+/// Rejects names that would push the ID or its `finish_` entry past the length limit.
+pub(crate) fn require_name(name: &str) -> io::Result<()> {
+    if name.len() > MAX_ID_NAME - FINISH_PREFIX.len() {
+        return Err(io::Error::other(format!(
+            "migration names have at most {} characters",
+            MAX_ID_NAME - FINISH_PREFIX.len()
+        )));
     }
-    fs::write(path, bytes)
+    Ok(())
+}
+
+pub(crate) fn finish_name(name: &str) -> String {
+    format!("{FINISH_PREFIX}{name}")
 }
 
 fn invalid(path: &Path, error: impl std::fmt::Display) -> io::Error {

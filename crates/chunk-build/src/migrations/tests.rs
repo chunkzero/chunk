@@ -21,9 +21,14 @@ fn write_schema(project: &Path, fields: &str) {
 #[test]
 fn renames_write_mapped_transforms_and_edits_fail_their_hash() {
     let project = tempfile::tempdir().unwrap();
-    let pending = pending_from(Journal::read(project.path()).unwrap(), schema(&[("name", false)]));
+    let pending =
+        pending_from(project.path().to_owned(), Journal::read(project.path()).unwrap(), schema(&[("name", false)]));
     assert_eq!(create(pending, "init", &Renames::new()).unwrap(), "0001_init");
-    let pending = pending_from(Journal::read(project.path()).unwrap(), schema(&[("displayName", false)]));
+    let pending = pending_from(
+        project.path().to_owned(),
+        Journal::read(project.path()).unwrap(),
+        schema(&[("displayName", false)]),
+    );
     let renames = [("fighters".into(), [("name".into(), "displayName".into())].into())].into();
     assert_eq!(create(pending, "display_name", &renames).unwrap(), "0002_display_name");
     let path = project.path().join("server/migrations/0002_display_name.ts");
@@ -79,6 +84,17 @@ fn migrations_are_typed_from_snapshots_and_callable_from_the_bundle() {
     create(pending(project.path()).unwrap(), "display_name", &renames).unwrap();
     let path = project.path().join("server/migrations/0002_display_name.ts");
     let source = fs::read_to_string(&path).unwrap();
+    fs::write(project.path().join("server/helper.ts"), "export const trim = (s: string) => s.trim();").unwrap();
+    fs::write(
+        &path,
+        format!("import {{ trim }} from \"../helper.ts\";\n{}", source.replace("old.name", "trim(old.name)")),
+    )
+    .unwrap();
+    rehash(project.path(), "2").unwrap();
+    let error = crate::compile(project.path(), output.path()).unwrap_err();
+    assert!(error.to_string().contains("may import only from #chunk"), "{error}");
+    fs::write(&path, &source).unwrap();
+    rehash(project.path(), "2").unwrap();
     fs::write(&path, source.replace("old.name", "old.displayName")).unwrap();
     rehash(project.path(), "2").unwrap();
     let error = crate::compile(project.path(), output.path()).unwrap_err();
@@ -113,4 +129,22 @@ fn migrations_are_typed_from_snapshots_and_callable_from_the_bundle() {
     };
     let result = engine.execute(&id, invocation, Box::new(Host), &Cancellation::default()).unwrap();
     assert_eq!(result.value, r#"[{"displayName":"Ann"}]"#);
+}
+
+#[test]
+fn a_held_lock_refuses_mutations_and_names_leave_room_for_finish() {
+    let project = tempfile::tempdir().unwrap();
+    let pending =
+        pending_from(project.path().to_owned(), Journal::read(project.path()).unwrap(), schema(&[("a", false)]));
+    let lock = journal::Lock::acquire(project.path()).unwrap();
+    let error = create(pending, "init", &Renames::new()).unwrap_err();
+    assert!(error.to_string().contains("server/migrations/.lock"), "{error}");
+    assert!(finish(project.path(), "1").unwrap_err().to_string().contains(".lock"));
+    drop(lock);
+    assert!(!project.path().join("server/migrations/.lock").exists());
+
+    journal::require_name(&"a".repeat(57)).unwrap();
+    journal::require_name(&"a".repeat(58)).unwrap_err();
+    let journal = Journal::read(project.path()).unwrap();
+    journal.next_id(&journal::finish_name(&"a".repeat(57))).unwrap();
 }

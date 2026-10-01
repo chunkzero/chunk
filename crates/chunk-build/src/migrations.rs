@@ -1,7 +1,11 @@
 //! The migration journal in `server/migrations/`: `NNNN_<name>.ts` sources, `meta/journal.json` and a
 //! `meta/NNNN.snapshot.json` of the full schema after each entry.
 
-use std::{collections::BTreeMap, io, path::Path};
+use std::{
+    collections::BTreeMap,
+    io,
+    path::{Path, PathBuf},
+};
 
 use chunk_contract::{DatabaseSchema, MigrationKind, MigrationTable};
 
@@ -10,11 +14,12 @@ mod journal;
 mod source;
 pub use source::Renames;
 
-use journal::Entry;
 pub(crate) use journal::Journal;
+use journal::{Entry, Lock};
 
 /// Schema changes since the last snapshot that need a migration.
 pub struct Pending {
+    project: PathBuf,
     journal: Journal,
     schema: DatabaseSchema,
     changes: BTreeMap<String, MigrationTable>,
@@ -35,12 +40,12 @@ pub fn pending(project: &Path) -> io::Result<Pending> {
     let project = project.canonicalize()?;
     let journal = verified(&project)?;
     let schema = crate::compiler::schema(&project)?;
-    Ok(pending_from(journal, schema))
+    Ok(pending_from(project, journal, schema))
 }
 
-fn pending_from(journal: Journal, schema: DatabaseSchema) -> Pending {
+fn pending_from(project: PathBuf, journal: Journal, schema: DatabaseSchema) -> Pending {
     let changes = diff::changes(&journal.schema(), &schema);
-    Pending { journal, schema, changes }
+    Pending { project, journal, schema, changes }
 }
 
 /// Writes the next migration for `pending`, or a baseline of the current schema when there is no history yet,
@@ -48,7 +53,10 @@ fn pending_from(journal: Journal, schema: DatabaseSchema) -> Pending {
 /// # Errors
 /// Rejects invalid names or renames, and a schema with nothing to migrate.
 pub fn create(pending: Pending, name: &str, renames: &Renames) -> io::Result<String> {
-    let Pending { mut journal, schema, changes } = pending;
+    let Pending { project, mut journal, schema, changes } = pending;
+    journal::require_name(name)?;
+    let _lock = Lock::acquire(&project)?;
+    journal.require_unchanged(&project)?;
     let id = journal.next_id(name)?;
     for (table, fields) in renames {
         let change = changes.get(table).ok_or_else(|| io::Error::other(format!("{table} has no fields to rename")))?;
@@ -77,6 +85,7 @@ pub fn create(pending: Pending, name: &str, renames: &Renames) -> io::Result<Str
 /// # Errors
 /// Rejects an invalid journal and a migration that isn't an unfinished expand.
 pub fn finish(project: &Path, number: &str) -> io::Result<String> {
+    let _lock = Lock::acquire(project)?;
     let mut journal = verified(project)?;
     let target = journal.entries[journal.find(number)?].clone();
     if target.kind != MigrationKind::Expand
@@ -85,7 +94,7 @@ pub fn finish(project: &Path, number: &str) -> io::Result<String> {
         return Err(io::Error::other(format!("{} is not an unfinished expand migration", target.id)));
     }
     let name = target.id.split_once('_').map_or("", |(_, name)| name);
-    let id = journal.next_id(&format!("finish_{name}"))?;
+    let id = journal.next_id(&journal::finish_name(name))?;
     let entry = Entry {
         id: id.clone(),
         kind: MigrationKind::Finish,
@@ -109,15 +118,16 @@ pub fn check(project: &Path) -> io::Result<()> {
 /// # Errors
 /// Rejects an unknown migration.
 pub fn rehash(project: &Path, number: &str) -> io::Result<String> {
+    let _lock = Lock::acquire(project)?;
     let mut journal = Journal::read(project)?;
     let index = journal.find(number)?;
-    let hash = journal.current_hash(index)?;
+    let hash = journal.current_hash(index);
     if let Some(next) = journal.entries.get_mut(index + 1) {
         next.prev.clone_from(&hash);
     }
     journal.entries[index].hash = hash;
-    journal.save()?;
     journal.verify()?;
+    journal.save()?;
     Ok(journal.entries[index].id.clone())
 }
 
@@ -125,6 +135,7 @@ pub fn rehash(project: &Path, number: &str) -> io::Result<String> {
 /// # Errors
 /// Rejects an invalid journal and history with nothing finished.
 pub fn squash(project: &Path) -> io::Result<String> {
+    let _lock = Lock::acquire(project)?;
     let mut journal = verified(project)?;
     let mut open = 0_usize;
     let mut end = None;
@@ -143,17 +154,10 @@ pub fn squash(project: &Path) -> io::Result<String> {
     let squashed = std::mem::take(&mut journal.entries);
     let schema = journal.snapshots[end - 1].clone();
     let rest_snapshots = journal.snapshots.split_off(end);
+    let rest_sources = journal.sources.split_off(end);
     journal.snapshots.clear();
-    for entry in &squashed {
-        if entry.kind == MigrationKind::Expand {
-            std::fs::remove_file(journal.source_path(&entry.id))?;
-        }
-    }
-    for entry in &squashed[..end - 1] {
-        let number = entry.id.split('_').next().unwrap_or_default();
-        std::fs::remove_file(journal.directory.join(format!("meta/{number}.snapshot.json")))?;
-    }
-    let number = squashed[end - 1].id.split('_').next().unwrap_or_default();
+    journal.sources.clear();
+    let number = journal::number(&squashed[end - 1].id);
     let id = format!("{number}_baseline");
     let entry = Entry {
         id: id.clone(),
@@ -162,15 +166,31 @@ pub fn squash(project: &Path) -> io::Result<String> {
         prev: String::new(),
         hash: String::new(),
     };
-    journal.push(entry, schema, None)?;
+    journal.append(entry, schema, None)?;
     for mut entry in rest {
         entry.prev = journal.entries.last().map(|last| last.hash.clone()).unwrap_or_default();
         journal.entries.push(entry);
     }
     journal.snapshots.extend(rest_snapshots);
-    journal.save()?;
+    journal.sources.extend(rest_sources);
     journal.verify()?;
+    journal.save()?;
+    for entry in &squashed {
+        if entry.kind == MigrationKind::Expand {
+            remove(&journal.source_path(&entry.id))?;
+        }
+    }
+    for entry in &squashed[..end - 1] {
+        remove(&journal.directory.join(format!("meta/{}.snapshot.json", journal::number(&entry.id))))?;
+    }
     Ok(id)
+}
+
+fn remove(path: &Path) -> io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 /// Fails unless the last snapshot reaches `schema` through changes that need no migration.

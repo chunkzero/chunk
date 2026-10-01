@@ -19,9 +19,18 @@ use std::{
 };
 const ENTRY: &str = "\0chunk-entry";
 
+/// A migration source as verified against its hash; the bundle uses `code` instead of rereading `path`.
+pub(super) struct MigrationSource {
+    pub id: String,
+    pub path: PathBuf,
+    pub code: String,
+}
+
 #[derive(Debug)]
 struct Boundary {
     entry: Option<String>,
+    /// Migration code by path. Migrations may import only `#chunk`.
+    migrations: BTreeMap<String, String>,
     exports: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
 }
 impl Plugin for Boundary {
@@ -58,6 +67,12 @@ impl Plugin for Boundary {
             if source == ENTRY {
                 return Ok(Some(HookResolveIdOutput::from_id(ENTRY)));
             }
+            if let Some(importer) = args.importer
+                && self.migrations.contains_key(importer)
+                && source != "#chunk"
+            {
+                anyhow::bail!("{importer} imports {source}; migrations may import only from #chunk");
+            }
             let scheme = source
                 .split_once(':')
                 .is_some_and(|(scheme, _)| !scheme.is_empty() && scheme.bytes().all(|b| b.is_ascii_alphabetic()));
@@ -79,7 +94,10 @@ impl Plugin for Boundary {
                     .as_ref()
                     .map(|code| HookLoadOutput { code: code.as_str().into(), ..Default::default() }));
             }
-            Ok(None)
+            Ok(self
+                .migrations
+                .get(args.id)
+                .map(|code| HookLoadOutput { code: code.as_str().into(), ..Default::default() }))
         })())
     }
 }
@@ -98,14 +116,14 @@ pub(super) async fn build(
     output: &Path,
     sdk: &Path,
     files: &[Source<'_>],
-    migrations: &[(String, PathBuf)],
+    migrations: &[MigrationSource],
     inventory: &Inventory,
 ) -> io::Result<()> {
     let entries: Vec<_> = files.iter().filter(|source| !source.path.to_string_lossy().ends_with(".d.ts")).collect();
     let discovered_exports = Arc::new(Mutex::new(BTreeMap::new()));
     let mut discovery = Bundler::with_plugins(
         options(root, entries.iter().map(|source| source.path.to_string_lossy().into_owned()).collect()),
-        vec![Arc::new(Boundary { entry: None, exports: discovered_exports.clone() })],
+        vec![Arc::new(Boundary { entry: None, migrations: BTreeMap::new(), exports: discovered_exports.clone() })],
     )
     .map_err(error)?;
     let discovered = discovery.generate().await;
@@ -128,9 +146,10 @@ pub(super) async fn build(
         compress: None,
         remove_whitespace: true,
     }));
-    let mut bundler =
-        Bundler::with_plugins(config, vec![Arc::new(Boundary { entry: Some(source), exports: Arc::default() })])
-            .map_err(error)?;
+    let migration_code =
+        migrations.iter().map(|migration| (migration.path.to_string_lossy().into_owned(), migration.code.clone()));
+    let boundary = Boundary { entry: Some(source), migrations: migration_code.collect(), exports: Arc::default() };
+    let mut bundler = Bundler::with_plugins(config, vec![Arc::new(boundary)]).map_err(error)?;
     let result = bundler.generate().await;
     bundler.close().await.map_err(error)?;
     let result = result.map_err(error)?;
@@ -243,7 +262,7 @@ fn entry_source(
 
 /// Registers each migration by ID behind `__chunk_migrate`, and reports which tables have `back` through
 /// `__chunk_migrations`.
-fn migration_source(sdk: &Path, migrations: &[(String, PathBuf)], source: &mut String) -> io::Result<()> {
+fn migration_source(sdk: &Path, migrations: &[MigrationSource], source: &mut String) -> io::Result<()> {
     use std::fmt::Write;
     writeln!(
         source,
@@ -251,7 +270,7 @@ fn migration_source(sdk: &Path, migrations: &[(String, PathBuf)], source: &mut S
         quote(sdk.join("migrations.ts").to_string_lossy())
     )
     .map_err(error)?;
-    for (index, (id, path)) in migrations.iter().enumerate() {
+    for (index, MigrationSource { id, path, .. }) in migrations.iter().enumerate() {
         let message = format!("server/migrations/{id}.ts must default-export defineMigration({})", quote(id));
         writeln!(
             source,

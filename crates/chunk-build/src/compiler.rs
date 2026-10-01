@@ -3,11 +3,7 @@ mod descriptors;
 mod domains;
 mod sources;
 mod typecheck;
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, fs, io, path::Path};
 
 use chunk_contract::{DatabaseSchema, Deployment, MigrationKind};
 use chunk_js::{Cancellation, DeploymentId, Engine, Invocation, Key, Limits, Mode, ReadHost};
@@ -43,12 +39,20 @@ pub fn compile(project: &Path, output: &Path) -> io::Result<()> {
     let migrations: Vec<_> = journal
         .entries
         .iter()
-        .filter(|entry| entry.kind == MigrationKind::Expand)
-        .map(|entry| (entry.id.clone(), journal.source_path(&entry.id)))
+        .zip(&journal.sources)
+        .filter(|(entry, _)| entry.kind == MigrationKind::Expand)
+        .map(|(entry, source)| bundle::MigrationSource {
+            id: entry.id.clone(),
+            path: journal.source_path(&entry.id),
+            code: source.clone(),
+        })
         .collect();
     let files = sources::discover(&project, &inventory)?;
-    let paths: Vec<_> =
-        files.iter().map(|file| file.path.as_path()).chain(migrations.iter().map(|(_, path)| path.as_path())).collect();
+    let paths: Vec<_> = files
+        .iter()
+        .map(|file| file.path.as_path())
+        .chain(migrations.iter().map(|migration| migration.path.as_path()))
+        .collect();
     typecheck::check(&paths, staging.path())?;
     let (mut contract, backs) = bundle_and_extract(&project, staging.path(), &files, &migrations, &inventory)?;
     crate::migrations::require_replayed(&journal, &contract.tables)?;
@@ -112,7 +116,7 @@ fn bundle_and_extract(
     project: &Path,
     staging: &Path,
     files: &[sources::Source<'_>],
-    migrations: &[(String, PathBuf)],
+    migrations: &[bundle::MigrationSource],
     inventory: &crate::project::Inventory,
 ) -> io::Result<(BackendMetadata, Backs)> {
     let sdk = project.join(".chunk/sdk");
