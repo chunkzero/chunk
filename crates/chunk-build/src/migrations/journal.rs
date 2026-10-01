@@ -54,6 +54,10 @@ pub(crate) struct Entry {
     /// The previous entry's hash, so entries written on different branches don't chain.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub prev: String,
+    /// For a baseline, the hash of each source and snapshot file it replaced, keyed by path under the migrations
+    /// directory.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub replaced: BTreeMap<String, String>,
     pub hash: String,
 }
 
@@ -167,41 +171,11 @@ impl Journal {
     }
 
     /// Fails on a `package.json` under the migrations directory and on migration sources and snapshots the journal
-    /// doesn't list. Files numbered at or below a leading baseline are leftovers of an interrupted squash; they are
-    /// deleted when `delete_leftovers` and reported otherwise.
-    pub fn require_listed(&self, delete_leftovers: bool) -> io::Result<()> {
+    /// doesn't list. Unlisted files a committed squash replaced, still matching their recorded hashes, are leftovers
+    /// of an interrupted squash: they fail unless `allow_leftovers`. Any other unlisted file is a branch conflict.
+    pub fn require_listed(&self, allow_leftovers: bool) -> io::Result<()> {
         reject_package_json(&self.directory)?;
-        let listed: BTreeSet<PathBuf> = (0..self.entries.len()).flat_map(|index| self.paths(index)).collect();
-        let floor = self
-            .entries
-            .first()
-            .filter(|entry| entry.kind == MigrationKind::Baseline)
-            .and_then(|entry| number(&entry.id).parse::<u64>().ok());
-        let (mut conflicts, mut leftovers) = (Vec::new(), Vec::new());
-        for (directory, snapshot) in [(self.directory.clone(), false), (self.directory.join("meta"), true)] {
-            let entries = match fs::read_dir(&directory) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            for entry in entries {
-                let path = entry?.path();
-                let file = path.file_name().and_then(|name| name.to_str()).and_then(|name| file_number(name, snapshot));
-                if let Some(file) = file.filter(|_| !listed.contains(&path)) {
-                    if floor.is_some_and(|floor| file <= floor) {
-                        leftovers.push(path);
-                    } else {
-                        conflicts.push(path);
-                    }
-                }
-            }
-        }
-        if delete_leftovers {
-            for path in &leftovers {
-                fs::remove_file(path)?;
-            }
-            leftovers.clear();
-        }
+        let (conflicts, leftovers) = self.unlisted()?;
         if !conflicts.is_empty() {
             return Err(io::Error::other(format!(
                 "the journal doesn't list {}, likely from a merge of different branches. Delete the files of the \
@@ -209,7 +183,7 @@ impl Journal {
                 names(&conflicts)
             )));
         }
-        if !leftovers.is_empty() {
+        if !allow_leftovers && !leftovers.is_empty() {
             return Err(io::Error::other(format!(
                 "{} are left from an interrupted `chunk migrate squash`. Run any `chunk migrate` command to delete \
                  them, or delete them yourself",
@@ -217,6 +191,42 @@ impl Journal {
             )));
         }
         Ok(())
+    }
+
+    /// Deletes the leftovers of an interrupted squash, leaving every other unlisted file.
+    pub fn remove_leftovers(&self) -> io::Result<()> {
+        for path in self.unlisted()?.1 {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    /// The unlisted migration files, as `(conflicts, leftovers)`.
+    fn unlisted(&self) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+        let listed: BTreeSet<PathBuf> = (0..self.entries.len()).flat_map(|index| self.paths(index)).collect();
+        let replaced = self.entries.first().map(|entry| &entry.replaced);
+        let (mut conflicts, mut leftovers) = (Vec::new(), Vec::new());
+        for (directory, prefix) in [(self.directory.clone(), ""), (self.directory.join("meta"), "meta/")] {
+            let entries = match fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            for entry in entries {
+                let path = entry?.path();
+                let name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+                if !is_migration_file(name, !prefix.is_empty()) || listed.contains(&path) {
+                    continue;
+                }
+                let recorded = replaced.and_then(|replaced| replaced.get(&format!("{prefix}{name}")));
+                if recorded.is_some_and(|hash| fs::read(&path).is_ok_and(|bytes| file_hash(&bytes) == *hash)) {
+                    leftovers.push(path);
+                } else {
+                    conflicts.push(path);
+                }
+            }
+        }
+        Ok((conflicts, leftovers))
     }
 
     /// Fails unless the journal on disk is the one this was read as.
@@ -326,14 +336,18 @@ fn names(paths: &[PathBuf]) -> String {
     paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
 }
 
-/// The number of a `NNNN_name.ts` source, or of a `NNNN.snapshot.json` when `snapshot`.
-fn file_number(name: &str, snapshot: bool) -> Option<u64> {
-    let digits =
-        if snapshot { name.strip_suffix(".snapshot.json")? } else { name.strip_suffix(".ts")?.split_once('_')?.0 };
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    digits.parse().ok()
+/// Whether `name` is a `NNNN_name.ts` source, or a `NNNN.snapshot.json` when `snapshot`.
+fn is_migration_file(name: &str, snapshot: bool) -> bool {
+    let digits = if snapshot {
+        name.strip_suffix(".snapshot.json")
+    } else {
+        name.strip_suffix(".ts").and_then(|name| name.split_once('_')).map(|(digits, _)| digits)
+    };
+    digits.is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+pub(crate) fn file_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn reject_package_json(directory: &Path) -> io::Result<()> {

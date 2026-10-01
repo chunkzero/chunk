@@ -79,12 +79,20 @@ pub fn create(pending: Pending, name: &str, renames: &Renames) -> io::Result<Str
     };
     let source =
         (kind == MigrationKind::Expand).then(|| source::migration(&id, &journal.schema(), &schema, &changes, renames));
-    let entry = Entry { id: id.clone(), kind, finishes: None, prev: String::new(), hash: String::new() };
+    let entry = Entry {
+        id: id.clone(),
+        kind,
+        finishes: None,
+        prev: String::new(),
+        replaced: BTreeMap::new(),
+        hash: String::new(),
+    };
     let mut snapshot = schema;
     for (table, shape) in journal.schema() {
         snapshot.entry(table).or_insert(shape);
     }
     journal.push(entry, snapshot, source.as_deref())?;
+    journal.remove_leftovers()?;
     crate::sdk::generate_sdk(&project)?;
     Ok(id)
 }
@@ -108,10 +116,12 @@ pub fn finish(project: &Path, number: &str) -> io::Result<String> {
         kind: MigrationKind::Finish,
         finishes: Some(target.id),
         prev: String::new(),
+        replaced: BTreeMap::new(),
         hash: String::new(),
     };
     let schema = journal.schema();
     journal.push(entry, schema, None)?;
+    journal.remove_leftovers()?;
     crate::sdk::generate_sdk(project)?;
     Ok(id)
 }
@@ -138,6 +148,7 @@ pub fn rehash(project: &Path, number: &str) -> io::Result<String> {
     journal.entries[index].hash = hash;
     journal.verify()?;
     journal.save()?;
+    journal.remove_leftovers()?;
     crate::sdk::generate_sdk(project)?;
     Ok(journal.entries[index].id.clone())
 }
@@ -170,13 +181,15 @@ pub fn squash(project: &Path) -> io::Result<String> {
     journal.sources.clear();
     let number = journal::number(&squashed[end - 1].id);
     let id = format!("{number}_baseline");
-    let entry = Entry {
+    let mut entry = Entry {
         id: id.clone(),
         kind: MigrationKind::Baseline,
         finishes: None,
         prev: String::new(),
+        replaced: BTreeMap::new(),
         hash: String::new(),
     };
+    entry.replaced = replaced_files(&journal.directory, &squashed)?;
     journal.append(entry, schema, None);
     for mut entry in rest {
         entry.prev = journal.entries.last().map(|last| last.hash.clone()).unwrap_or_default();
@@ -187,23 +200,27 @@ pub fn squash(project: &Path) -> io::Result<String> {
     journal.verify()?;
     journal.write_entry(0)?;
     journal.save()?;
-    for entry in &squashed {
-        if entry.kind == MigrationKind::Expand {
-            remove(&journal.source_path(&entry.id))?;
-        }
-    }
-    for entry in &squashed[..end - 1] {
-        remove(&journal.directory.join(format!("meta/{}.snapshot.json", journal::number(&entry.id))))?;
-    }
+    journal.remove_leftovers()?;
     crate::sdk::generate_sdk(project)?;
     Ok(id)
 }
 
-fn remove(path: &Path) -> io::Result<()> {
-    match std::fs::remove_file(path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
+/// The hash of each source and snapshot file squashing `entries` leaves behind. The last snapshot is overwritten by
+/// the baseline's.
+fn replaced_files(directory: &Path, entries: &[Entry]) -> io::Result<BTreeMap<String, String>> {
+    let mut files = Vec::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.kind == MigrationKind::Expand {
+            files.push(format!("{}.ts", entry.id));
+        }
+        if index + 1 < entries.len() {
+            files.push(format!("meta/{}.snapshot.json", journal::number(&entry.id)));
+        }
     }
+    files
+        .into_iter()
+        .map(|file| Ok((file.clone(), journal::file_hash(&std::fs::read(directory.join(&file))?))))
+        .collect()
 }
 
 /// Fails unless the last snapshot reaches `schema` through changes that need no migration.
@@ -223,8 +240,8 @@ pub(crate) fn declarations(journal: &Journal) -> String {
     source::declarations(journal)
 }
 
-/// Reads the journal and checks its files and hashes. `repair` deletes a squash's leftovers, which only commands
-/// holding the lock may do.
+/// Reads the journal and checks its files and hashes. `repair` tolerates a squash's leftovers, which the command
+/// holding the lock deletes once it succeeds.
 pub(crate) fn verified(project: &Path, repair: bool) -> io::Result<Journal> {
     let journal = Journal::read(project)?;
     journal.require_listed(repair)?;

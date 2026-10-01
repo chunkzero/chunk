@@ -51,8 +51,22 @@ fn renames_write_mapped_transforms_and_edits_fail_their_hash() {
     rehash(project.path(), "2").unwrap();
     check(project.path()).unwrap();
     assert_eq!(finish(project.path(), "2").unwrap(), "0003_finish_display_name");
+    let edited = fs::read(&path).unwrap();
     assert_eq!(squash(project.path()).unwrap(), "0003_baseline");
     assert!(!path.exists());
+    fs::write(&path, edited).unwrap();
+    let error = check(project.path()).unwrap_err();
+    assert!(error.to_string().contains("interrupted"), "{error}");
+    assert!(path.exists());
+    let merged = path.with_file_name("0002_other.ts");
+    fs::write(&merged, "// from another branch\n").unwrap();
+    let error = rehash(project.path(), "3").unwrap_err();
+    assert!(error.to_string().contains("0002_other.ts"), "{error}");
+    assert!(merged.exists() && path.exists());
+    fs::remove_file(&merged).unwrap();
+    rehash(project.path(), "3").unwrap();
+    assert!(!path.exists());
+    check(project.path()).unwrap();
     assert_eq!(Journal::read(project.path()).unwrap().schema(), schema(&[("displayName", false)]));
 }
 
@@ -220,7 +234,7 @@ fn compilation_uses_the_captured_migrations_and_ignores_package_imports() {
 }
 
 #[test]
-fn files_the_journal_doesnt_list_are_errors_and_squash_leftovers_are_deleted() {
+fn files_the_journal_doesnt_list_are_errors() {
     let project = tempfile::tempdir().unwrap();
     fs::create_dir_all(project.path().join("server/schema")).unwrap();
     write_schema(project.path(), "name: v.string()");
@@ -237,15 +251,7 @@ fn files_the_journal_doesnt_list_are_errors_and_squash_leftovers_are_deleted() {
     assert!(error.to_string().contains("0002_other.ts"), "{error}");
     let error = finish(project.path(), "1").unwrap_err();
     assert!(error.to_string().contains("0002_other.ts"), "{error}");
-    fs::remove_file(&conflict).unwrap();
-
-    let leftover = directory.join("0001_old.ts");
-    fs::write(&leftover, "").unwrap();
-    let error = check(project.path()).unwrap_err();
-    assert!(error.to_string().contains("chunk migrate"), "{error}");
-    assert!(rehash(project.path(), "1").is_ok());
-    assert!(!leftover.exists());
-    check(project.path()).unwrap();
+    assert!(conflict.exists());
 }
 
 #[test]
@@ -277,8 +283,14 @@ fn tables_stay_in_history_and_the_journal_stops_at_the_contract_limit() {
     let mut journal = journal;
     while journal.entries.len() < 256 {
         let id = journal.next_id("more").unwrap();
-        let entry =
-            Entry { id, kind: MigrationKind::Baseline, finishes: None, prev: String::new(), hash: String::new() };
+        let entry = Entry {
+            id,
+            kind: MigrationKind::Baseline,
+            finishes: None,
+            prev: String::new(),
+            replaced: BTreeMap::new(),
+            hash: String::new(),
+        };
         journal.append(entry, both.clone(), None);
     }
     let entry = Entry {
@@ -286,6 +298,7 @@ fn tables_stay_in_history_and_the_journal_stops_at_the_contract_limit() {
         kind: MigrationKind::Baseline,
         finishes: None,
         prev: String::new(),
+        replaced: BTreeMap::new(),
         hash: String::new(),
     };
     assert!(journal.push(entry, both, None).unwrap_err().to_string().contains("too many migrations"));
