@@ -422,6 +422,29 @@ impl Core {
         Err(io::Error::other("backend stayed busy for 10s; deployment not activated"))
     }
 
+    /// Makes `bundle` resident beside earlier versions as [`Self::deploy`] does, but keeps waiting while the backend is
+    /// busy, such as while it holds as many versions as it can, until `cancel`. Returns whether it deployed.
+    /// # Errors
+    /// Reports a stopped or rejecting backend.
+    pub async fn deploy_when_free(
+        &self,
+        bundle: chunk_contract::Deployment,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> io::Result<bool> {
+        let backend = self.handle.as_ref().ok_or_else(|| io::Error::other("backend is not running"))?;
+        loop {
+            match backend.deploy(bundle.clone()).await {
+                Err(chunk_backend::Error::Busy) => {
+                    tokio::select! {
+                        () = cancel.cancelled() => return Ok(false),
+                        () = tokio::time::sleep(Duration::from_millis(200)) => {}
+                    }
+                }
+                result => return result.map(|()| true).map_err(io::Error::other),
+            }
+        }
+    }
+
     /// Makes `release` control's current release. Local JVMs launch from its release directory under `releases/` in the
     /// state directory. Earlier releases keep their sessions.
     /// # Errors

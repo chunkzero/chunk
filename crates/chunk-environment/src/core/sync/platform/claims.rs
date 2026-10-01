@@ -177,7 +177,9 @@ fn login_request(gateway: &str, operation: &str, login: GatewayLogin) -> control
 fn assigned(assignment: control::Assignment) -> Result<ClaimAssignment, Error> {
     let incomplete = || errors::error(Code::Unavailable, "control returned an incomplete assignment");
     let claim = assignment.claim.ok_or_else(incomplete)?;
-    let session = assignment.delivery.and_then(|delivery| delivery.session).ok_or_else(incomplete)?;
+    let delivery = assignment.delivery.ok_or_else(incomplete)?;
+    let session = delivery.session.ok_or_else(incomplete)?;
+    let deployment = delivery.deployment.ok_or_else(incomplete)?.deployment;
     let configuration = assignment.configuration.ok_or_else(incomplete)?;
     let preparation = assignment.preparation.ok_or_else(incomplete)?;
     let generation = Generation::from_wire(claim.delivery_generation);
@@ -187,5 +189,6 @@ fn assigned(assignment: control::Assignment) -> Result<ClaimAssignment, Error> {
         protocol: configuration.protocol,
         endpoint: preparation.endpoint,
         capability: preparation.capability,
+        deployment,
     })
 }

@@ -95,6 +95,19 @@ fn claims_recover_unknown_with_stable_attempts_and_checked_owner_retry_retention
 }
 
 #[test]
+fn cancelling_a_deployments_jobs_ends_its_pending_and_running_ones() {
+    let (_directory, mut store) = open();
+    store.retain_deployment(&target()).unwrap();
+    let intents = vec![JobIntent::Schedule(job("running")), JobIntent::Schedule(job("pending"))];
+    store.commit_with_jobs(commit("schedule", 1, vec![]), intents).unwrap();
+    store.job_command(JobCommand::Claim { id: "running".into(), attempt: 1, now: 10 }).unwrap();
+    let jobs = store.job_command(JobCommand::CancelDeployment { deployment: job("running").deployment }).unwrap();
+    let state = |id| jobs.records.iter().find(|job| job.id == id).unwrap().state;
+    assert_eq!((state("running"), state("pending")), (JobState::Unknown, JobState::Cancelled));
+    assert!(store.release_deployment("v1").unwrap());
+}
+
+#[test]
 fn full_job_budget_rejects_new_intent_and_its_document_writes() {
     let (_directory, mut store) = open();
     store.retain_deployment(&target()).unwrap();

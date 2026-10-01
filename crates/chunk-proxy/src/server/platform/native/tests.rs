@@ -94,7 +94,7 @@ impl Fixture {
             Box::new(SqliteStore::open(directory.path().join("hooks.db"), "test").unwrap()),
         )
         .unwrap();
-        backend.deploy(deployment()).await.unwrap();
+        backend.deploy(deployment("candidate", false)).await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let platform = Platform::new(PlatformTarget {
             core: format!("http://{}", listener.local_addr().unwrap()),
@@ -200,6 +200,29 @@ async fn real_native_dispatch_orders_admission_rechecks_moves_and_pings_without_
 }
 
 #[tokio::test]
+async fn a_platform_bound_to_another_deployment_runs_its_admission_rules() {
+    let fixture = Fixture::new().await;
+    fixture.hooks.backend.deploy(deployment("replacement", true)).await.unwrap();
+    let mut source = claim("login");
+    source.demand = fixture.platform.route_claim(&source).await.unwrap();
+    let destination = Claim {
+        demand: SessionDemand {
+            key: "arena".into(),
+            session_type: "arena/default".into(),
+            machine_profile: "local".into(),
+        },
+        ..claim("move")
+    };
+    fixture.platform.approve_move(&source, &destination).await.unwrap();
+    let replacement = fixture.platform.bind("replacement");
+    assert_eq!(
+        replacement.approve_move(&source, &destination).await.unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn move_cancels_default_notifications_but_follow_player_retains_its_captured_scope() {
     let fixture = Fixture::new().await;
     let mut source = claim("login");
@@ -266,7 +289,7 @@ async fn an_expired_notification_batch_cancels_its_running_hook() {
     fixture.close().await;
 }
 
-fn deployment() -> Deployment {
+fn deployment(id: &str, denies: bool) -> Deployment {
     let mut manifest:DomainManifest=serde_json::from_value(json!({"version":1,
         "scopes":{"":{"parent":null},"games":{"parent":""},"games/lobby":{"parent":"games"},"games/arena":{"parent":"games"}},
         "apps":{"lobby":"games/lobby","arena":"games/arena"},"hooks":{}})).unwrap();
@@ -313,6 +336,7 @@ export function ban(ctx) { ctx.db.put('state','ban',{value:'yes'}); return null;
                 let sleep = if scope == "games/arena" { 3000 } else { 300 };
                 format!("await ctx.runMutation('record','{name}-start'); await ctx.sleep({sleep}); await ctx.runMutation('record','{name}-end'); return null;")
             }
+            _ if denies=>"return {allow:false,reason:'Closed'};".into(),
             _=>format!("await ctx.runMutation('record','{name}'); return {{allow:!(await ctx.runQuery('banned',null)),reason:'Banned'}};"),
         };
         write!(source, "\nexport async function {export}(ctx) {{ {body} }}").unwrap();
@@ -321,7 +345,7 @@ export function ban(ctx) { ctx.db.put('state','ban',{value:'yes'}); return null;
         contracts: Contracts { domains: Some(manifest), ..Default::default() },
         contract_version: chunk_contract::CONTRACT_VERSION,
         runtime_profile: RuntimeProfile::TransactionalV1,
-        id: "candidate".into(),
+        id: id.into(),
         source,
         tables: serde_json::from_value(json!({"state":{"fields":{"value":{"schema":{"type":"string"}}}}})).unwrap(),
         functions: [

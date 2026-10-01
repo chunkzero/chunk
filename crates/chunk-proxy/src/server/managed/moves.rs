@@ -1,4 +1,4 @@
-use super::{Assignment, Claim, ClaimGuard, ClaimIdentity, Platform, WAIT_TIMEOUT, claim, invalid_data};
+use super::{Assignment, Claim, ClaimGuard, ClaimIdentity, Platform, Retarget, WAIT_TIMEOUT, claim, invalid_data};
 use crate::server::platform::{RPC_TIMEOUT, failure};
 use chunk_proto::sync::v1::{Position, error::Code};
 use std::{io, time::Duration};
@@ -6,11 +6,13 @@ use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
 
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Waits for control to queue a move from the arrived `identity`, then prepares its destination.
+/// Waits for control to queue a move from the arrived `identity`, then prepares its destination, which a move places in
+/// the release `current` names.
 pub(super) async fn next_move(
     source: &ClaimGuard,
     identity: &ClaimIdentity,
     protocol: i32,
+    current: &Retarget,
 ) -> io::Result<(ClaimGuard, Assignment)> {
     let mut abandoned: Option<ClaimGuard> = None;
     // A view past an abandonment no longer shows its move, and failures are final.
@@ -38,13 +40,15 @@ pub(super) async fn next_move(
         });
         let pending = pending.await?;
         let demand = pending.destination.ok_or_else(|| invalid_data("move without destination"))?;
+        let platform = current.platform();
         let claim = Claim {
             operation_id: pending.operation_id,
             demand,
             source: Some(identity.clone()),
+            deployment: platform.target.deployment.clone(),
             ..source.claim.clone()
         };
-        let mut guard = ClaimGuard { platform: source.platform.clone(), claim, armed: true, failure: None };
+        let mut guard = ClaimGuard { platform, claim, armed: true, failure: None };
         match prepare(source, &guard, protocol).await {
             Ok(assignment) => return Ok((guard, assignment)),
             Err(error) => {

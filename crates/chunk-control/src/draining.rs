@@ -7,11 +7,8 @@ use std::{
     time::Duration,
 };
 
-use chunk_proto::control::v1::ClaimRequest;
-use prost::Message;
-
 use crate::{
-    Control, Error, Generation, MoveRequest, Result,
+    Control, Error, Generation, Result,
     state::{Capacity, Claim, Phase, ReleaseDrain, State},
 };
 
@@ -21,8 +18,7 @@ pub const RECONNECT_GRACE: Duration = Duration::from_secs(120);
 /// How long a draining release stays without players before it retires, so players on their way in arrive first.
 const SETTLE_MS: u64 = 10_000;
 
-/// How a release drains once another replaces it. Both limits count from when it started draining; an unset one never
-/// passes.
+/// How a release drains once another replaces it. Both limits count from when it started draining, even when set later; an unset one never passes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrainPolicy {
     /// After this, its sessions take no reconnects and its arrived players move to the current release where they can.
@@ -38,9 +34,6 @@ impl Control {
     /// Rejects the current release and reports a stopped store.
     pub fn drain_release(&self, deployment: &str, policy: DrainPolicy) -> Result<bool> {
         let now = crate::now_ms();
-        let after = |limit: Option<Duration>| {
-            limit.map(|limit| now.saturating_add(u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)))
-        };
         self.update(|state| {
             if state.current.as_deref() == Some(deployment) {
                 return Err(Error::Invalid("the current release cannot retire"));
@@ -50,6 +43,9 @@ impl Control {
             };
             let drain =
                 release.drain.get_or_insert(ReleaseDrain { since: now, reconnects_until: None, stops_at: None });
+            let after = |limit: Option<Duration>| {
+                limit.map(|limit| drain.since.saturating_add(u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)))
+            };
             drain.reconnects_until = earliest(drain.reconnects_until, after(policy.max_age));
             drain.stops_at = earliest(drain.stops_at, after(policy.deadline));
             Ok(())
@@ -57,15 +53,15 @@ impl Control {
         self.release_stopped(deployment)
     }
 
-    /// Retires the longest-draining release of `deployments`, unless one of them retired already and is stopping.
-    /// Returns the one it retired.
+    /// Retires the longest-draining release of `deployments`, unless one of them retired already. Returns the one that
+    /// is retired.
     /// # Errors
     /// Reports a stopped store.
     pub fn retire_longest_draining(&self, deployments: &[String]) -> Result<Option<String>> {
         let state = self.state()?;
         let releases = || deployments.iter().filter_map(|name| Some((name, state.releases.get(name)?)));
-        if releases().any(|(_, release)| release.retired) {
-            return Ok(None);
+        if let Some((retired, _)) = releases().find(|(_, release)| release.retired) {
+            return Ok(Some(retired.clone()));
         }
         let oldest = releases().filter_map(|(name, release)| Some((release.drain.as_ref()?.since, name))).min();
         let Some((_, oldest)) = oldest else { return Ok(None) };
@@ -94,18 +90,11 @@ impl Control {
             if drain.stops_at.is_some_and(|at| now >= at) || !claims.iter().any(kept) {
                 due.push(name.clone());
             } else if drain.reconnects_until.is_some_and(|at| now >= at) {
-                moving.extend(claims.into_iter().filter(|(_, claim)| claim.phase == Phase::Arrived).map(|(_, c)| c));
+                moving.extend(claims.into_iter().filter(|(_, claim)| claim.phase == Phase::Arrived));
             }
         }
-        for claim in moving {
-            let demand = ClaimRequest::decode(claim.request.as_slice())?.demand.unwrap_or_default();
-            let request = MoveRequest {
-                operation_id: uuid::Uuid::new_v4().to_string(),
-                player_id: claim.player.clone(),
-                demand,
-                source: None,
-            };
-            if let Err(error) = self.move_player(request) {
+        for (operation, claim) in moving {
+            if let Err(error) = self.move_player(crate::moves::evacuation(operation, claim)?) {
                 tracing::debug!(%error, player = claim.player, "draining release keeps its player");
             }
         }
@@ -118,11 +107,14 @@ impl Control {
     }
 }
 
-/// The session of a draining release that `player`, logging in, returns to: the one their latest claim left within the
-/// reconnect grace, while it still runs, takes reconnects and has room.
+/// The session of a draining release that `player`, logging in, returns to: the one their latest activated claim left within
+/// the reconnect grace, while it still runs, takes reconnects and has room.
 pub(crate) fn rejoin(state: &State, player: &str, unavailable: &BTreeSet<String>) -> Option<String> {
-    let (operation, _) =
-        state.claims.iter().filter(|(_, claim)| claim.player == player).max_by_key(|(_, claim)| claim.generation)?;
+    let (operation, _) = state
+        .claims
+        .iter()
+        .filter(|(_, claim)| claim.player == player && claim.activated)
+        .max_by_key(|(_, claim)| claim.generation)?;
     let latest = BTreeMap::from([(player, operation.as_str())]);
     let session = returns(state, &latest, operation, crate::now_ms())?;
     let room = state.claims.values().filter(|claim| claim.session == session && claim.phase != Phase::Released).count()
@@ -130,14 +122,19 @@ pub(crate) fn rejoin(state: &State, player: &str, unavailable: &BTreeSet<String>
     (room && !unavailable.contains(&state.sessions[session].host)).then(|| session.to_owned())
 }
 
-/// The session a player may still return to from the claim `operation`: their latest claim, released within the
+/// The sessions of draining releases that a player may still return to, which must not finish.
+pub(crate) fn reconnectable(state: &State, now: u64) -> BTreeSet<String> {
+    let latest = latest_claims(state);
+    state.claims.keys().filter_map(|operation| returns(state, &latest, operation, now)).map(str::to_owned).collect()
+}
+
+/// The session a player may still return to from the claim `operation`: their latest activated claim, released within the
 /// reconnect grace from a running session of a draining release, before its maximum age, whose session type takes
 /// reconnects.
 fn returns<'a>(state: &'a State, latest: &BTreeMap<&str, &str>, operation: &str, now: u64) -> Option<&'a str> {
     let claim = state.claims.get(operation)?;
     let grace = u64::try_from(RECONNECT_GRACE.as_millis()).unwrap_or(u64::MAX);
     if claim.phase != Phase::Released
-        || !claim.activated
         || latest.get(claim.player.as_str()) != Some(&operation)
         || claim.released_at_ms.is_none_or(|at| now.saturating_sub(at) >= grace)
     {
@@ -152,10 +149,10 @@ fn returns<'a>(state: &'a State, latest: &BTreeMap<&str, &str>, operation: &str,
     (reconnect && drain.reconnects_until.is_none_or(|at| now < at)).then_some(claim.session.as_str())
 }
 
-/// Each player's latest claim, by generation.
+/// Each player's latest activated claim, by generation.
 fn latest_claims(state: &State) -> BTreeMap<&str, &str> {
     let mut latest: BTreeMap<&str, (Generation, &str)> = BTreeMap::new();
-    for (operation, claim) in &state.claims {
+    for (operation, claim) in state.claims.iter().filter(|(_, claim)| claim.activated) {
         let entry = latest.entry(claim.player.as_str()).or_insert((claim.generation, operation));
         if claim.generation > entry.0 {
             *entry = (claim.generation, operation);

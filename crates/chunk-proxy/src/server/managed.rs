@@ -88,6 +88,8 @@ struct Assignment {
     #[cfg(feature = "test-support")]
     session: String,
     protocol: i32,
+    /// The deployment of the release the session runs.
+    deployment: String,
     /// The destination JVM's player listener.
     endpoint: String,
     setup: PlayerSetup,
@@ -102,6 +104,7 @@ impl Assignment {
             #[cfg(feature = "test-support")]
             session: assigned.session,
             protocol: assigned.protocol,
+            deployment: assigned.deployment,
             endpoint: assigned.endpoint,
             setup: PlayerSetup { operation_id: claim.operation_id.clone(), capability: assigned.capability },
         })
@@ -147,7 +150,8 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let destination = claim_destination(&login, current);
     let (mut authenticated, mut settings, (mut guard, mut assignment)) =
         configuration::wait_for_destination(authenticated, destination, deadline.min(WAIT_TIMEOUT)).await?;
-    let platform = guard.platform.clone();
+    guard.platform = guard.platform.bind(&assignment.deployment);
+    let mut platform = guard.platform.clone();
     let mut lifecycle = Lifecycle::new(platform.clone());
     let mut commands = commands::Commands::new(&platform).await?;
     loop {
@@ -183,7 +187,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
             &mut authenticated.transport,
             &mut internal,
             &mut settings,
-            Box::pin(next_move(&guard, &identity, authenticated.protocol_version)),
+            Box::pin(next_move(&guard, &identity, authenticated.protocol_version, current)),
             true,
             Some(&mut commands),
         )
@@ -205,6 +209,12 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         guard.armed = false;
         drop(internal);
         (guard, assignment) = next;
+        guard.platform = guard.platform.bind(&assignment.deployment);
+        if guard.platform.target.deployment != platform.target.deployment {
+            platform = guard.platform.clone();
+            lifecycle.rebind(platform.clone());
+            commands = commands::Commands::new(&platform).await?;
+        }
     }
 }
 

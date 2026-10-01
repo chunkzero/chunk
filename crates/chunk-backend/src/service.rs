@@ -757,6 +757,15 @@ impl Backend {
         .map(|_| ())
     }
 
+    /// Cancels `deployment`'s pending jobs and marks its running ones unknown, so none keeps it from being released.
+    /// # Errors
+    /// Reports a busy or unavailable service and persistence failures.
+    pub async fn cancel_deployment_jobs(&self, deployment: DeploymentId) -> Result<()> {
+        let bytes = deployment.as_str().len();
+        let command = chunk_store::JobCommand::CancelDeployment { deployment: deployment.as_str().into() };
+        self.submit_sized(bytes, |reply| Command::JobControl { command, reply }).await.map(|_| ())
+    }
+
     /// Host-adapter handoff: durably install this exact alarm before acknowledging it.
     /// # Errors
     /// Reports unavailable service.

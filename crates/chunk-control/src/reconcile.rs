@@ -37,7 +37,7 @@ impl Control {
                 }
             });
         }
-        self.join_progressing_drains(tasks).await?;
+        self.join_progressing(tasks).await?;
         self.reconcile_sessions()?;
         self.retire_idle_hosts()?;
         self.progress_drains()?;

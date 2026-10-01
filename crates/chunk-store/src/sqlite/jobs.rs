@@ -229,6 +229,21 @@ pub(super) fn command(transaction: &Connection, command: JobCommand, limits: &Jo
             transaction.execute("DELETE FROM _chunk_jobs WHERE id=?1", [id])?;
             changed(transaction)?;
         }
+        JobCommand::CancelDeployment { deployment } => {
+            let mut cancelled = false;
+            for mut job in load(transaction)?.records.into_iter().filter(|job| job.deployment == deployment) {
+                match job.state {
+                    JobState::Pending => job.state = JobState::Cancelled,
+                    JobState::Running => job.state = JobState::Unknown,
+                    _ => continue,
+                }
+                save(transaction, &job)?;
+                cancelled = true;
+            }
+            if cancelled {
+                changed(transaction)?;
+            }
+        }
         JobCommand::AcknowledgeWake { generation, due_at } => {
             let wake = load(transaction)?.wake;
             if wake.generation != generation || wake.due_at != due_at {

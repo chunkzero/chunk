@@ -169,6 +169,8 @@ message ClaimAssignment {
   string endpoint = 4;
   // The 32-byte secret that presents the player to the JVM at login.
   bytes capability = 5;
+  // The deployment of the release the session runs, which the gateway's hooks and commands for the player follow.
+  string deployment = 6;
 }
 
 // Why control refused a claim.

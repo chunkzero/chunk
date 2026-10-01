@@ -43,7 +43,9 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
             state.stall_retries = transient;
         }
         fixture.service.publish();
-        let running = tokio::spawn(async move { super::super::next_move(&source, &identity, 776).await.map(|_| ()) });
+        let current = crate::server::Retarget(Arc::new(std::sync::RwLock::new(source.platform.clone())));
+        let running =
+            tokio::spawn(async move { super::super::next_move(&source, &identity, 776, &current).await.map(|_| ()) });
         if transient {
             tokio::time::timeout(Duration::from_secs(3), async {
                 while movement.lock().unwrap().attempts < 2 {

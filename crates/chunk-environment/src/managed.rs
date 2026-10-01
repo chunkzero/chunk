@@ -22,6 +22,7 @@ pub(crate) use launcher::{Lease, ManagementLauncher};
 pub(crate) use log_store::renewing;
 use log_store::{LogStore, Renewal, Renewer};
 use std::{
+    collections::BTreeSet,
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -117,6 +118,8 @@ struct Deployments {
     rejected: Option<(String, String)>,
     /// How the deployments the latest desired state replaces retire.
     retiring: retire::Retiring,
+    /// The deployments a replacement that asked for it stops at once, whatever desired state arrived since.
+    stop_replaced: BTreeSet<String>,
 }
 
 impl Deployments {
@@ -479,7 +482,9 @@ impl<'a> Managed<'a> {
         if cancel.is_cancelled() {
             return Ok(false);
         }
-        self.core.deploy(loaded.bundle(deployment)).await?;
+        if !self.core.deploy_when_free(loaded.bundle(deployment), cancel).await? {
+            return Ok(false);
+        }
         // Nothing awaits between this check and switching traffic, so the attach loop cannot supersede it meanwhile.
         if cancel.is_cancelled() {
             return Ok(false);
@@ -498,7 +503,9 @@ impl<'a> Managed<'a> {
             _ = activation::clear(&self.activation);
             return Err(error);
         }
-        lock(&self.deployments).unacknowledged = Some(pending);
+        let mut deployments = lock(&self.deployments);
+        deployments.replaced(pending.predecessor.as_deref(), desired.stop_previous);
+        deployments.unacknowledged = Some(pending);
         Ok(true)
     }
 

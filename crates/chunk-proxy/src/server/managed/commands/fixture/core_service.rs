@@ -229,5 +229,6 @@ fn reservation() -> ClaimAssignment {
         protocol: 0,
         endpoint: "127.0.0.1:1".into(),
         capability: vec![0; 32],
+        deployment: "deployment".into(),
     }
 }

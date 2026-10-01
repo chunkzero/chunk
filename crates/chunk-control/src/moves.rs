@@ -4,7 +4,7 @@ use prost::Message;
 
 use crate::{
     Control, Error, Generation, Result,
-    state::{MoveFailure, MoveIntent, Phase, State},
+    state::{Claim, MoveFailure, MoveIntent, Phase, State},
 };
 
 /// A move of `player_id` to a session meeting `demand`, whose destination claim takes `operation_id`.
@@ -22,6 +22,18 @@ pub struct MoveRequest {
 pub struct MoveSource {
     pub claim: ClaimIdentity,
     pub connection_id: String,
+}
+
+/// A move of `claim`'s player, which `operation` names, to where its demand places them now. It is fenced to that claim
+/// and its connection, so it does nothing once the player has moved on.
+pub(crate) fn evacuation(operation: &str, claim: &Claim) -> Result<MoveRequest> {
+    let request = ClaimRequest::decode(claim.request.as_slice())?;
+    Ok(MoveRequest {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        player_id: claim.player.clone(),
+        demand: request.demand.unwrap_or_default(),
+        source: Some(MoveSource { claim: claim.identity(operation), connection_id: request.connection_id }),
+    })
 }
 
 impl Control {
