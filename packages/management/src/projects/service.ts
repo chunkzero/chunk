@@ -4,7 +4,7 @@ import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
 import { notify } from "../changes.ts";
 import { newId } from "../crypto.ts";
 import type { Deps } from "../deps.ts";
-import { deleteEnvironment } from "../environments/store.ts";
+import { advanceRevision, deleteEnvironment } from "../environments/store.ts";
 import { SleepingPingMode } from "../gen/chunk/management/v1/common_pb.ts";
 import {
   CreateEnvironmentResponseSchema,
@@ -23,6 +23,8 @@ import {
   toEnvironment,
   toProject,
 } from "./store.ts";
+
+const maxDrainSeconds = 7 * 24 * 60 * 60;
 
 export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<typeof ProjectService>> {
   return {
@@ -108,12 +110,25 @@ export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<t
       if (sleepingPing !== undefined && ![SleepingPingMode.CACHE, SleepingPingMode.WAKE].includes(sleepingPing)) {
         throw invalid("sleeping_ping must be CACHE or WAKE");
       }
+      const drain = request.drain;
+      if (drain) {
+        const { maxAgeSeconds, deadlineSeconds } = drain;
+        if (maxAgeSeconds < 1 || deadlineSeconds < 1) throw invalid("drain limits must be positive");
+        if (maxAgeSeconds > maxDrainSeconds || deadlineSeconds > maxDrainSeconds) {
+          throw invalid("drain limits must be at most 7 days");
+        }
+        if (deadlineSeconds < maxAgeSeconds) throw invalid("drain deadline_seconds must be at least max_age_seconds");
+      }
       const [row] = await sql<EnvironmentRow[]>`
-        update environments set sleeping_ping = coalesce(${sleepingPing ?? null}::smallint, sleeping_ping)
+        update environments set
+          sleeping_ping = coalesce(${sleepingPing ?? null}::smallint, sleeping_ping),
+          drain_max_age_seconds = coalesce(${drain?.maxAgeSeconds ?? null}::integer, drain_max_age_seconds),
+          drain_deadline_seconds = coalesce(${drain?.deadlineSeconds ?? null}::integer, drain_deadline_seconds)
         where id = ${environment.id}
         returning *`;
       if (!row) throw invalid("environment was deleted");
-      await notify(sql, { kind: "environment", environmentId: row.id });
+      if (drain) await advanceRevision(sql, row.id);
+      else await notify(sql, { kind: "environment", environmentId: row.id });
       return { environment: toEnvironment(row, edge) };
     },
 

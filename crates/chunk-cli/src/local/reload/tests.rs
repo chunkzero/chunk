@@ -1,5 +1,5 @@
 use super::*;
-use chunk_proto::sync::v1::JvmHealth;
+use std::time::Duration;
 
 fn release(id: &str, jar: &str) -> Release {
     Release {
@@ -13,43 +13,12 @@ fn release(id: &str, jar: &str) -> Release {
     }
 }
 
-fn node(phase: NodePhase, players: u32) -> (String, Node) {
-    let health = Some(JvmHealth { players, ..JvmHealth::default() });
-    (String::new(), Node { phase: phase.into(), health, ..Node::default() })
-}
-
 #[test]
 fn identical_jars_make_a_backend_only_reload() {
     let current = release("a", "jar-1");
     assert_eq!(classify(&current, &release("a", "jar-1")), Change::Unchanged);
     assert_eq!(classify(&current, &release("b", "jar-1")), Change::Backend);
     assert_eq!(classify(&current, &release("c", "jar-2")), Change::Jvm);
-}
-
-#[test]
-fn pinned_releases_stop_only_after_staying_empty() {
-    let start = Instant::now();
-    let mut pinned = Retirement::pinned();
-    assert!(!pinned.due(Some(&[node(NodePhase::Online, 2)]), start));
-    assert!(!pinned.due(None, start + Duration::from_secs(3600)));
-    assert!(!pinned.due(Some(&[node(NodePhase::Online, 0)]), start + Duration::from_secs(1)));
-    assert!(!pinned.due(Some(&[node(NodePhase::Starting, 0)]), start + Duration::from_secs(5)));
-    assert!(!pinned.due(Some(&[node(NodePhase::Online, 0)]), start + Duration::from_secs(6)));
-    assert!(pinned.due(Some(&[node(NodePhase::Online, 0)]), start + Duration::from_secs(16)));
-    assert!(Retirement::pinned().due(Some(&[node(NodePhase::Stopped, 0)]), start));
-    assert!(Retirement::pinned().due(Some(&[]), start));
-}
-
-#[test]
-fn draining_releases_stop_at_the_deadline_with_players_remaining() {
-    let start = Instant::now();
-    let mut draining = Retirement::until(start + Duration::from_secs(30));
-    assert!(!draining.due(Some(&[node(NodePhase::Online, 3)]), start + Duration::from_secs(29)));
-    assert!(draining.due(None, start + Duration::from_secs(30)));
-    let mut pinned = Retirement::pinned();
-    pinned.drain_by(start + Duration::from_secs(5));
-    pinned.drain_by(start + Duration::from_secs(60));
-    assert!(pinned.due(Some(&[node(NodePhase::Online, 3)]), start + Duration::from_secs(5)));
 }
 
 #[test]
@@ -97,4 +66,22 @@ fn top_level_directories_created_after_startup_are_watched() {
     while changes.try_recv().is_ok() {}
     std::fs::write(assets.join("example.txt"), "").unwrap();
     assert!(std::iter::from_fn(|| next(&mut changes)).any(|path| path == assets.join("example.txt")));
+}
+
+#[test]
+fn a_drain_asks_control_for_the_same_deadline_however_long_it_has_run() {
+    let mut drain = Drain::until(Some(Duration::from_secs(30)));
+    drain.since = Instant::now().checked_sub(Duration::from_secs(20)).unwrap();
+    assert_eq!(drain.policy().deadline, Some(Duration::from_secs(30)));
+}
+
+#[test]
+fn superseding_a_pinned_release_counts_the_deadline_from_its_drain_start() {
+    let mut pinned = Drain::until(None);
+    pinned.since = Instant::now().checked_sub(Duration::from_secs(3600)).unwrap();
+    pinned.drain_within(Duration::from_secs(30));
+    let deadline = pinned.policy().deadline.unwrap();
+    assert!(deadline >= Duration::from_secs(3630) && deadline < Duration::from_secs(3640));
+    pinned.drain_within(Duration::from_secs(300));
+    assert_eq!(pinned.policy().deadline, Some(deadline));
 }

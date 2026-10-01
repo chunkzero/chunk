@@ -36,7 +36,8 @@ mod watches;
 
 pub(crate) use readers::Evaluated;
 
-const MAX_DEPLOYMENTS: usize = 16;
+/// How many deployments the backend holds at once.
+pub const MAX_DEPLOYMENTS: usize = 16;
 
 struct Mutation {
     operation: Operation,
@@ -71,6 +72,10 @@ pub(crate) struct Actor {
     /// Increments when staged writes roll back, so queries that read them run again.
     epoch: u64,
     versions: BTreeMap<DeploymentId, Option<Arc<Deployment>>>,
+    /// The resident deployments, oldest install first.
+    installed: Vec<DeploymentId>,
+    /// Resident deployments being retired, which accept no work.
+    retired: BTreeSet<DeploymentId>,
     /// Resident deployments that wait on work, refusing calls until it is done.
     unready: BTreeSet<DeploymentId>,
     work: readiness::Work,
@@ -103,9 +108,10 @@ impl Actor {
         memory: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
         let (committer, initial) = Committer::new(store, events.clone())?;
-        let crate::commit::Initial { snapshot, deployments, jobs: scheduled, work } = initial;
+        let crate::commit::Initial { snapshot, deployments, jobs: scheduled, work, retiring } = initial;
         let mut js = Engine::new()?;
         let mut versions = BTreeMap::new();
+        let mut installed = Vec::new();
         let mut unready = BTreeSet::new();
         let mut sources = BTreeMap::new();
         for deployment in deployments {
@@ -119,7 +125,12 @@ impl Actor {
             let secrets = effects.secrets.clone();
             let source = readers::Source { code: deployment.source.clone(), limits: Limits::default(), env, secrets };
             sources.insert(id.clone(), Arc::new(source));
+            installed.push(id.clone());
             versions.insert(id, Some(Arc::new(deployment)));
+        }
+        let mut retired = BTreeSet::new();
+        for id in &retiring {
+            retired.insert(DeploymentId::new(id)?);
         }
         let readers = readers::Readers::new(readers, &events)?;
         Ok(Self {
@@ -135,6 +146,8 @@ impl Actor {
             rerun_turn: false,
             epoch: 0,
             versions,
+            installed,
+            retired,
             unready,
             work: readiness::Work::new(work),
             deploying: None,
@@ -316,6 +329,7 @@ impl Actor {
                                 secrets: self.actions.effects.secrets.clone(),
                             }),
                         );
+                        self.installed.push(id.clone());
                         self.versions.insert(id, None);
                     })
                 };
@@ -325,7 +339,7 @@ impl Actor {
             Command::Readiness { id, reply } => reply.finish(self.readiness(&id)),
             Command::Release { id, reply } => self.start_release(id, reply),
             Command::CheckDeployment { id, reply } => reply.finish(self.check_deployment(&id)),
-            Command::Deployments { reply } => reply.finish(Ok(self.versions.keys().cloned().collect())),
+            Command::Deployments { reply } => reply.finish(Ok(self.installed.clone())),
             Command::Query { mut call, reply } => match self.normalize_call(&mut call) {
                 Ok(()) => self.query(call, reply),
                 Err(error) => reply.finish(Err(error)),
@@ -347,6 +361,9 @@ impl Actor {
     }
 
     fn check_deployment(&self, id: &DeploymentId) -> Result<()> {
+        if self.retired.contains(id) {
+            return Err(Error::Retired);
+        }
         if self.releasing.as_ref().is_some_and(|(releasing, _)| releasing == id) {
             return Err(Error::Busy);
         }
@@ -378,6 +395,9 @@ impl Actor {
     }
 
     fn resolve(&self, call: &Call, mode: Mode) -> Result<Option<Function>> {
+        if self.retired.contains(&call.deployment) {
+            return Err(Error::Retired);
+        }
         if self.releasing.as_ref().is_some_and(|(id, _)| id == &call.deployment) {
             return Err(Error::Busy);
         }
@@ -426,6 +446,11 @@ impl Actor {
 
     pub fn activity(&self) -> chunk_service::Activity {
         self.actions.activity.clone()
+    }
+
+    /// The resident deployments whose retirement is durable but not yet complete.
+    pub fn retiring(&self) -> Vec<DeploymentId> {
+        self.retired.iter().cloned().collect()
     }
 
     pub fn lane(&self) -> Arc<crate::system::Lane> {

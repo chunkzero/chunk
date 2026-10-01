@@ -299,7 +299,7 @@ async fn release_stops_the_machine_and_revokes_its_credential() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_machine_that_boots_again_fails_its_host() {
     let (fixture, _runner, machines) = start(READINESS).await;
-    fixture.control.activate_release(release()).unwrap();
+    fixture.control.activate_release(release(), chunk_control::DrainPolicy::default()).unwrap();
     let control = fixture.control.clone();
     let claim = tokio::spawn(async move { control.claim(super::super::runtime::login()).await });
     let calls = machines.wait(|call| matches!(call, Call::Launch { .. })).await;

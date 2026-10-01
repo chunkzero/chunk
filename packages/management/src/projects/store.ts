@@ -30,6 +30,8 @@ export interface EnvironmentRow {
   active_deployment_id: string;
   hostname: string;
   sleeping_ping: SleepingPingMode;
+  drain_max_age_seconds: number;
+  drain_deadline_seconds: number;
   online_players: number;
   forked_from_environment_id: string;
   forked_from_snapshot_id: string;
@@ -54,6 +56,7 @@ export function toEnvironment(row: EnvironmentRow, edge: Edge | undefined): Envi
     activeDeploymentId: row.active_deployment_id,
     hostname: row.hostname,
     sleepingPing: row.sleeping_ping,
+    drain: { maxAgeSeconds: row.drain_max_age_seconds, deadlineSeconds: row.drain_deadline_seconds },
     onlinePlayers: row.online_players,
     forkedFromEnvironmentId: row.forked_from_environment_id,
     forkedFromSnapshotId: row.forked_from_snapshot_id,

@@ -24,6 +24,9 @@ use std::{
 use tokio::{net::TcpListener, sync::oneshot};
 use tokio_util::sync::CancellationToken;
 
+/// How long a deployment waits for the backend to have room for it.
+const SLOT_WAIT: Duration = Duration::from_mins(5);
+
 pub struct CoreConfig {
     /// The backend deployment served first. Without one, the backend serves only the deployments it retained.
     pub bundle: Option<PathBuf>,
@@ -54,6 +57,8 @@ pub struct CoreConfig {
     /// that outlived it. Only a core with a launcher can stop remote machines, so one without refuses to start while
     /// any are recorded, and so does a core whose stops aren't confirmed.
     pub fresh: bool,
+    /// Whether the caller retires drained releases, as under management, rather than control itself.
+    pub defers_retirement: bool,
     /// Where the log replicates; unset keeps it local only.
     pub replication: Option<chunk_store::Replication>,
 }
@@ -269,7 +274,10 @@ impl Core {
             system: self.system()?,
             listener,
             network,
-            control: chunk_control::Config { environment: config.environment.clone() },
+            control: chunk_control::Config {
+                environment: config.environment.clone(),
+                defers_retirement: config.defers_retirement,
+            },
             host,
             fresh: config.fresh,
             services: Some(sync::services(
@@ -422,12 +430,56 @@ impl Core {
         Err(io::Error::other("backend stayed busy for 10s; deployment not activated"))
     }
 
+    /// Makes `bundle` resident beside earlier versions as [`Self::deploy`] does, but keeps waiting while the backend is
+    /// busy, such as while it holds as many versions as it can, until `cancel` or five minutes have passed. Returns whether
+    /// it deployed.
+    /// # Errors
+    /// Reports a stopped or rejecting backend, and a backend that stayed busy.
+    pub async fn deploy_when_free(
+        &self,
+        bundle: chunk_contract::Deployment,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> io::Result<bool> {
+        let backend = self.handle.as_ref().ok_or_else(|| io::Error::other("backend is not running"))?;
+        let waiting = tokio::time::Instant::now();
+        loop {
+            match backend.deploy(bundle.clone()).await {
+                Err(chunk_backend::Error::Busy) => {
+                    if waiting.elapsed() >= SLOT_WAIT {
+                        return Err(io::Error::other(format!(
+                            "the backend held {} deployments and none retired within {} minutes to make room",
+                            chunk_backend::MAX_DEPLOYMENTS,
+                            SLOT_WAIT.as_secs() / 60
+                        )));
+                    }
+                    tokio::select! {
+                        () = cancel.cancelled() => return Ok(false),
+                        () = tokio::time::sleep(Duration::from_millis(200)) => {}
+                    }
+                }
+                result => return result.map(|()| true).map_err(io::Error::other),
+            }
+        }
+    }
+
     /// Makes `release` control's current release. Local JVMs launch from its release directory under `releases/` in the
-    /// state directory. Earlier releases keep their sessions.
+    /// state directory. Earlier releases start draining under `drain` and keep their sessions.
     /// # Errors
     /// Reports a stopped control or a rejected release.
-    pub fn activate(&self, release: chunk_control::Release) -> io::Result<()> {
-        self.control()?.activate_release(release).map_err(io::Error::other)
+    pub fn activate(&self, release: chunk_control::Release, drain: chunk_control::DrainPolicy) -> io::Result<()> {
+        self.activate_stopping(release, drain, &BTreeSet::new())
+    }
+
+    /// Like [`Self::activate`], and in the same commit asks `stop` to stop at once rather than drain.
+    /// # Errors
+    /// Reports a stopped control or a rejected release.
+    pub fn activate_stopping(
+        &self,
+        release: chunk_control::Release,
+        drain: chunk_control::DrainPolicy,
+        stop: &BTreeSet<String>,
+    ) -> io::Result<()> {
+        self.control()?.activate_release_stopping(release, drain, stop).map_err(io::Error::other)
     }
 
     /// Whether the backend stopped.

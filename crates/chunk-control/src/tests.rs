@@ -64,7 +64,7 @@ impl Executor {
 
 /// The environment `release` belongs to.
 fn environment(release: &Release) -> Config {
-    Config { environment: release.deployment.environment.clone() }
+    Config { environment: release.deployment.environment.clone(), defers_retirement: false }
 }
 
 /// Opens control on an environment store of its own at `path`, through that store's backend, with `release` current.
@@ -72,7 +72,7 @@ fn open(path: &std::path::Path, release: Release, host: Arc<dyn Host>) -> Result
     let store = chunk_store::SqliteStore::open(path, &release.deployment.environment)?;
     let backend = chunk_backend::Backend::new(release.deployment.environment.clone(), Box::new(store))?;
     let control = Control::open(backend.system(), environment(&release), host, false)?;
-    control.activate_release(release)?;
+    control.activate_release(release, crate::DrainPolicy::default())?;
     Ok(control)
 }
 
@@ -163,6 +163,7 @@ fn request(operation: &str, player: &str) -> ClaimRequest {
         }),
         source: None,
         deployment: String::new(),
+        reconnect_session: String::new(),
     }
 }
 
@@ -706,6 +707,7 @@ fn control_refuses_a_short_persisted_credential() {
 mod capacity;
 mod creation;
 mod destinations;
+mod draining;
 mod gateway;
 mod launch;
 mod log;

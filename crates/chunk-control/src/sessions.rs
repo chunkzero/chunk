@@ -69,6 +69,7 @@ impl Control {
                 .filter(|claim| claim.phase != Phase::Released)
                 .map(|claim| claim.session.clone())
                 .collect();
+            let reconnectable = crate::draining::reconnectable(state, now);
             for (id, session) in
                 state.sessions.iter_mut().filter(|(_, session)| session.host == host && !session.finished)
             {
@@ -87,7 +88,7 @@ impl Control {
                             now.saturating_sub(since) >= u64::from(policy.empty_timeout_seconds) * 1000
                         })
                     });
-                if expired || (empty && session.retired) {
+                if (expired || (empty && session.retired)) && !reconnectable.contains(id) {
                     session.retired = true;
                     session.finish_requested = true;
                 }

@@ -4,7 +4,7 @@ use prost::Message;
 
 use crate::{
     Control, Error, Generation, Result,
-    state::{MoveFailure, MoveIntent, Phase, State},
+    state::{Claim, MoveFailure, MoveIntent, Phase, State},
 };
 
 /// A move of `player_id` to a session meeting `demand`, whose destination claim takes `operation_id`.
@@ -24,11 +24,23 @@ pub struct MoveSource {
     pub connection_id: String,
 }
 
+/// A move of `claim`'s player, which `operation` names, to where its demand places them now. It is fenced to that claim
+/// and its connection, so it does nothing once the player has moved on.
+pub(crate) fn evacuation(operation: &str, claim: &Claim) -> Result<MoveRequest> {
+    let request = ClaimRequest::decode(claim.request.as_slice())?;
+    Ok(MoveRequest {
+        operation_id: uuid::Uuid::new_v4().to_string(),
+        player_id: claim.player.clone(),
+        demand: request.demand.unwrap_or_default(),
+        source: Some(MoveSource { claim: claim.identity(operation), connection_id: request.connection_id }),
+    })
+}
+
 impl Control {
     /// Queues one move for the proxy that owns the player's public connection.
     /// # Errors
     /// Rejects changed operations, and refuses with [`Error::Refused`] a player who is offline, still arriving or
-    /// already moving, and a destination the player's release doesn't offer or that is full.
+    /// already moving, and a destination the current release doesn't offer or that is full.
     pub fn move_player(&self, request: MoveRequest) -> Result<ClaimRequest> {
         validate(&request)?;
         self.update(|state| queue(state, request))
@@ -118,7 +130,7 @@ pub(crate) fn validate(request: &MoveRequest) -> Result<()> {
     Ok(())
 }
 
-/// Queues `request`'s move within its source's release in the current update, returning the destination claim request.
+/// Queues `request`'s move to the current release in the current update, returning the destination claim request.
 /// Refuses a player without any claim as offline, and a source or player that can't move now as stale.
 pub(crate) fn queue(state: &mut State, request: MoveRequest) -> Result<ClaimRequest> {
     let online =
@@ -166,7 +178,7 @@ pub(crate) fn queue(state: &mut State, request: MoveRequest) -> Result<ClaimRequ
     destination.operation_id = request.operation_id;
     destination.demand = Some(request.demand);
     destination.source = Some(claim.identity(source));
-    let (name, release) = state.placing(&destination)?;
+    let (name, release) = state.placing(&destination, "")?;
     let demand = destination.demand.as_ref().ok_or(Error::Invalid("missing destination"))?;
     crate::placement::admit_move(state, &name, &release, demand)?;
     let sequence = Generation::PENDING.wire();

@@ -16,6 +16,7 @@ pub(in crate::server) struct Lifecycle {
 }
 
 struct Arrival {
+    platform: Platform,
     manifest: Arc<DomainManifest>,
     domain: String,
     claim: Claim,
@@ -32,6 +33,11 @@ impl Lifecycle {
         }
     }
 
+    /// Continues with `platform`, which a move into another deployment's session bound the connection to.
+    pub(in crate::server) fn rebind(&mut self, platform: Platform) {
+        self.platform = platform;
+    }
+
     pub(in crate::server) fn cutover(&mut self, claim: &Claim) {
         self.session.cancel();
         self.session = CancellationToken::new();
@@ -43,19 +49,33 @@ impl Lifecycle {
             return Ok(());
         };
         let domain = domain(manifest, &claim.demand)?.to_owned();
-        let events = transition(self.arrived.as_ref().map(|arrival| arrival.domain.as_str()), &domain);
-        let mut notifications = Vec::new();
-        for (event, scope) in events {
-            let origin = if event == HookEvent::DomainLeave {
-                self.arrived.as_ref().map(|arrival| arrival.claim.clone())
-            } else {
-                None
+        if let Some(old) =
+            self.arrived.as_ref().filter(|old| old.platform.target.deployment != self.platform.target.deployment)
+        {
+            // Another deployment's domains share no scopes with this one's.
+            let leaves = ancestors(&old.domain)
+                .into_iter()
+                .rev()
+                .map(|scope| ((HookEvent::DomainLeave, scope), old.claim.clone()));
+            old.platform.notify(&old.manifest, leaves.collect(), true, &self.session, &self.connection);
+            let enters = ancestors(&domain).into_iter().map(|scope| ((HookEvent::DomainEnter, scope), claim.clone()));
+            self.platform.notify(manifest, enters.collect(), true, &self.session, &self.connection);
+        } else {
+            let events = transition(self.arrived.as_ref().map(|arrival| arrival.domain.as_str()), &domain);
+            let mut notifications = Vec::new();
+            for (event, scope) in events {
+                let origin = if event == HookEvent::DomainLeave {
+                    self.arrived.as_ref().map(|arrival| arrival.claim.clone())
+                } else {
+                    None
+                }
+                .unwrap_or_else(|| claim.clone());
+                notifications.push(((event, scope), origin));
             }
-            .unwrap_or_else(|| claim.clone());
-            notifications.push(((event, scope), origin));
+            self.platform.notify(manifest, notifications, true, &self.session, &self.connection);
         }
-        self.platform.notify(manifest, notifications, true, &self.session, &self.connection);
-        self.arrived = Some(Arrival { manifest: manifest.clone(), domain, claim: claim.clone() });
+        self.arrived =
+            Some(Arrival { platform: self.platform.clone(), manifest: manifest.clone(), domain, claim: claim.clone() });
         self.cleanup_claim = Some(claim.clone());
         Ok(())
     }
@@ -71,8 +91,8 @@ impl Drop for Lifecycle {
         let Some(claim) = self.cleanup_claim.take() else {
             return;
         };
-        let platform = self.platform.clone();
-        self.platform.cleanup.spawn(async move {
+        let platform = arrival.platform.clone();
+        platform.cleanup.clone().spawn(async move {
             let result = async {
                 let operation = &claim.operation_id;
                 let (result, _): (DepartResult, _) = platform.call("depart", operation, &(), RPC_TIMEOUT).await?;

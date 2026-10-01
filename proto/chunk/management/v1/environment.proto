@@ -109,6 +109,10 @@ message AttachResponse {
   uint64 lease = 9;
   // The environment's name, which selects the release's `[env.<name>.vars]`.
   string environment_name = 10;
+  // How deployments that deployment_id replaces drain.
+  DrainSettings drain = 11;
+  // Stop the deployments that deployment_id replaces at once instead of draining them, as its deploy asked.
+  bool stop_previous = 12;
 }
 
 // A release archive (`dist/<id>.tar.gz` from `chunk build`) to download.

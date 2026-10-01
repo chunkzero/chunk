@@ -281,3 +281,76 @@ async fn observed_application_failure_is_terminal_and_does_not_undo_prior_effect
     assert!(failed.result.is_none());
     assert_eq!(count(&backend, "alice").await, 41);
 }
+
+#[tokio::test]
+async fn retiring_a_deployment_frees_its_slot_despite_a_scheduled_job_and_a_subscription() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = backend(&directory);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    for index in 1..crate::MAX_DEPLOYMENTS {
+        backend.deploy(deployment(&format!("d{index}"), 1)).await.unwrap();
+    }
+    let id = schedule(&backend, "one", now() + 60_000, 0).await;
+    let mut group = backend.subscribe_group(vec![call("old", "read", "alice", json!(null))]).await.unwrap();
+    group.next().await.unwrap();
+    assert!(matches!(backend.deploy(deployment("next", 1)).await, Err(Error::Busy)));
+    assert!(matches!(backend.release(DeploymentId::new("old").unwrap()).await, Err(Error::Busy)));
+
+    assert!(backend.retire(DeploymentId::new("old").unwrap()).await.unwrap());
+    assert!(matches!(group.next().await, Err(Error::Retired)));
+    assert_eq!(job(&backend, &id).await.state, JobState::Cancelled);
+    assert!(backend.query(call("old", "read", "alice", json!(null))).await.is_err());
+    backend.deploy(deployment("next", 1)).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_retirement_completes_though_its_caller_stops_waiting() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = backend(&directory);
+    backend.deploy(deployment("old", 1)).await.unwrap();
+    let old = DeploymentId::new("old").unwrap();
+    assert!(tokio::time::timeout(Duration::ZERO, backend.retire(old)).await.is_err());
+    for _ in 0..100 {
+        if backend.deployments().await.unwrap().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("the deployment was never released");
+}
+
+#[tokio::test]
+async fn a_restart_after_the_retirement_committed_completes_it_and_cancels_a_late_job() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = backend(&directory);
+    first.deploy(deployment("old", 1)).await.unwrap();
+    drop(first);
+    let mut store = SqliteStore::open(directory.path().join("jobs.db"), "jobs").unwrap();
+    store.job_command(chunk_store::JobCommand::CancelDeployment { deployment: "old".into() }).unwrap();
+    // Work admitted before the retirement schedules a job after it committed.
+    let late = Job {
+        id: "late".into(),
+        deployment: "old".into(),
+        function: "flow".into(),
+        arguments: json!(0),
+        caller: json!({"player":"alice"}),
+        due_at: now(),
+        attempt: 1,
+        state: JobState::Pending,
+        result: None,
+    };
+    let operation = chunk_store::Operation { id: "late".into(), fingerprint: [0; 32] };
+    let expected = store.snapshot().unwrap().revision;
+    let commit = chunk_store::Commit { expected, operation, writes: vec![], result: json!(null) };
+    store.commit_with_jobs(commit, vec![chunk_store::JobIntent::Schedule(late)]).unwrap();
+    drop(store);
+    let restarted = backend(&directory);
+    for _ in 0..100 {
+        if restarted.deployments().await.unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(restarted.deployments().await.unwrap().is_empty());
+    assert_eq!(job(&restarted, "late").await.state, JobState::Cancelled);
+}

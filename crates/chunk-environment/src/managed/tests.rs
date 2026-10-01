@@ -3,7 +3,7 @@ use crate::{CoreConfig, GatewayConfig, ManagementConfig, core::Archives};
 use bytes::Bytes;
 use chunk_contract::ControlConnection;
 use chunk_management::v1::{
-    AttachRequest, AttachResponse, DeploymentProgress, DeploymentState, ObjectStore, ReleaseArtifact,
+    AttachRequest, AttachResponse, DeploymentProgress, DeploymentState, DrainSettings, ObjectStore, ReleaseArtifact,
     ReportStatusRequest,
 };
 use chunk_proto::sync::v1::{CallRequest, call_response::Outcome, core_client::CoreClient, error::Code};
@@ -59,6 +59,8 @@ struct Management {
     /// The object storage each desired state grants.
     log_store: Mutex<Option<ObjectStore>>,
     telemetry: Mutex<telemetry::Reports>,
+    /// The drain settings each desired state carries, which management applies unless the environment sets its own.
+    drain: Mutex<DrainSettings>,
 }
 
 /// Management's record of the environment's deployments, oldest first, kept by the rules of `packages/management`.
@@ -66,6 +68,8 @@ struct Management {
 struct Records {
     revision: u64,
     deployments: Vec<(String, ReleaseArtifact, DeploymentState)>,
+    /// The deployments whose desired state asks to stop the ones they replace.
+    stopping: BTreeSet<String>,
 }
 
 impl Management {
@@ -133,6 +137,8 @@ impl Management {
             deployment_id: served.map(|(id, _, _)| id.clone()).unwrap_or_default(),
             release: served.map(|(_, release, _)| release.clone()),
             log_store: self.log_store.lock().unwrap().clone(),
+            stop_previous: served.is_some_and(|(id, _, _)| records.stopping.contains(id)),
+            drain: Some(*self.drain.lock().unwrap()),
             ..Default::default()
         });
     }
@@ -278,8 +284,17 @@ fn publish(root: &Path, status: u8) -> std::path::PathBuf {
     .unwrap();
     fs::write(project.join("apps/lobby/app.toml"), "").unwrap();
     fs::write(project.join("apps/lobby/build.gradle.kts"), "").unwrap();
-    fs::write(backend.join("source.mjs"), format!("export function status() {{ return {status}; }}")).unwrap();
-    fs::write(backend.join("contract.json"), r#"{"contract_version":3,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
+    fs::write(
+        backend.join("source.mjs"),
+        format!(
+            "export function status() {{ return {status}; }}\n\
+             export function hold(ctx, args) {{ return ctx.scheduler.runAt(args.at, 'flow', null); }}\n\
+             export async function flow() {{ return null; }}\n\
+             export async function wait(ctx) {{ await ctx.sleep(30000); return null; }}"
+        ),
+    )
+    .unwrap();
+    fs::write(backend.join("contract.json"), r#"{"contract_version":3,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}},"hold":{"kind":"mutation","visibility":"public","export":"hold","arguments":{"type":"object","fields":{"at":{"schema":{"type":"integer"}}}},"result":{"type":"string"}},"flow":{"kind":"action","visibility":"internal","export":"flow","arguments":{"type":"null"},"result":{"type":"null"}},"wait":{"kind":"action","visibility":"public","export":"wait","arguments":{"type":"null"},"result":{"type":"null"}}}}"#).unwrap();
     let mut jar = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let class = vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 69, 1];
     for (name, bytes) in [
@@ -377,6 +392,7 @@ impl Harness {
             epochs: Mutex::default(),
             log_store: Mutex::default(),
             telemetry: Mutex::default(),
+            drain: Mutex::new(DrainSettings { max_age_seconds: 3 * 3600, deadline_seconds: 4 * 3600 }),
         });
         let url = serve(management.clone()).await;
         let release = (release_id, fs::read(&archive).unwrap());
@@ -399,6 +415,12 @@ impl Harness {
     }
 
     fn deploy(&self, deployment: &str, release: ReleaseArtifact) {
+        self.management.deploy(deployment, release);
+    }
+
+    /// Like [`Harness::deploy`], with a desired state that stops the deployments it replaces.
+    fn deploy_stopping(&self, deployment: &str, release: ReleaseArtifact) {
+        self.management.records.lock().unwrap().stopping.insert(deployment.into());
         self.management.deploy(deployment, release);
     }
 
@@ -429,6 +451,7 @@ impl Harness {
             java: "java".into(),
             environment_token: None,
             fresh: false,
+            defers_retirement: true,
             replication: None,
         }
     }
@@ -436,6 +459,12 @@ impl Harness {
     /// Leaves `count` backend versions resident that control never ran, as a run that crashed after each commit would.
     async fn abandon(&self, count: usize) {
         let core = crate::Core::start(self.core(), || {}).await.unwrap();
+        self.abandon_in(&core, count).await;
+        core.stop(|| {}).await.unwrap();
+    }
+
+    /// Deploys `count` versions to `core` that nothing serves.
+    async fn abandon_in(&self, core: &crate::Core, count: usize) {
         let status = chunk_contract::Function {
             kind: chunk_contract::FunctionKind::Query,
             visibility: chunk_contract::Visibility::Public,
@@ -455,7 +484,6 @@ impl Harness {
             };
             core.deploy(bundle).await.unwrap();
         }
-        core.stop(|| {}).await.unwrap();
     }
 
     fn start(&self) -> (CancellationToken, tokio::task::JoinHandle<std::io::Result<()>>) {
@@ -561,6 +589,53 @@ async fn keeps_the_replaced_deployment_until_management_accepts_the_next_and_fal
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_previous_activation_stops_every_resident_deployment_even_across_a_restart() {
+    let mut harness = Harness::new().await;
+    harness.deploy("dep_a", harness.valid());
+    let (stop, running) = harness.start();
+    harness.expect(1, "dep_a", DeploymentState::InProgress).await;
+    harness.expect(1, "dep_a", DeploymentState::Active).await;
+    harness.deploy("dep_b", harness.valid());
+    harness.expect(2, "dep_b", DeploymentState::InProgress).await;
+    harness.expect(2, "dep_b", DeploymentState::Active).await;
+
+    // dep_c stops dep_a and dep_b, but management doesn't accept it, so dep_b stays as its fallback. Then dep_d
+    // arrives before dep_b stops.
+    *harness.management.refused.lock().unwrap() = Some("dep_c".into());
+    harness.deploy_stopping("dep_c", harness.valid());
+    harness.expect(3, "dep_c", DeploymentState::InProgress).await;
+    harness.refused().await;
+    harness.deploy("dep_d", artifact(&harness.management, &harness.url, "rejected", invalid()));
+    harness.released("dep_a").await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(harness.serves("dep_b").await);
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+
+    // A crash after dep_d's record was written, before control activated it, leaves dep_c's predecessor as it was,
+    // and control keeps dep_b's stop.
+    let activations = harness.state().join("managed.json");
+    let mut recorded: serde_json::Value = serde_json::from_slice(&fs::read(&activations).unwrap()).unwrap();
+    recorded["pending"] = serde_json::json!({"predecessor": "dep_c", "activated": "dep_d"});
+    fs::write(&activations, recorded.to_string()).unwrap();
+
+    // Restarted, the core still stops dep_b once management accepts dep_c.
+    let (stop, running) = harness.start();
+    harness.refused().await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(harness.serves("dep_b").await);
+    *harness.management.refused.lock().unwrap() = None;
+    harness.expect(4, "dep_c", DeploymentState::Active).await;
+    harness.expect(4, "dep_d", DeploymentState::InProgress).await;
+    harness.expect(4, "dep_d", DeploymentState::Failed).await;
+    harness.expect(5, "dep_c", DeploymentState::Active).await;
+    harness.released("dep_b").await;
+
+    stop.cancel();
+    tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deployment_superseded_mid_download_never_activates_and_a_fenced_core_stops() {
     let mut harness = Harness::new().await;
     harness.deploy("dep_a", harness.valid());
@@ -620,12 +695,15 @@ async fn restarts_retire_only_what_management_no_longer_needs() {
     assert_eq!(chunk_build::verify_release(&installed).unwrap().id, harness.release.0);
 
     // dep_d activates, but the core stops before management accepts it, and dep_e supersedes it meanwhile.
+    // The drain of dep_c, which dep_d replaced, expires while the core is down.
     *harness.management.refused.lock().unwrap() = Some("dep_d".into());
+    harness.management.drain.lock().unwrap().deadline_seconds = 1;
     harness.deploy("dep_d", harness.valid());
     harness.expect(4, "dep_d", DeploymentState::InProgress).await;
     harness.refused().await;
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
     harness.deploy("dep_e", artifact(&harness.management, &harness.url, "rejected", invalid()));
 
     // Restarted, the core keeps dep_c until management accepts dep_d, which it falls back to once dep_e fails.
@@ -753,6 +831,7 @@ async fn a_restart_resumes_the_current_deployment_unchecked_unless_its_archive_i
 
 mod launcher;
 mod replication;
+mod retirement;
 mod runner_image;
 mod status;
 mod suspend;

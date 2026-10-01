@@ -98,6 +98,14 @@ pub(super) fn changed(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn retiring(connection: &Connection, deployment: &str) -> Result<bool> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _chunk_retired_deployments WHERE id=?1)",
+        [deployment],
+        |row| row.get(0),
+    )?)
+}
+
 pub(super) fn apply(connection: &Connection, intents: &[JobIntent], limits: &JobLimits) -> Result<()> {
     if intents.len() > 16 {
         return Err(Error::Capacity);
@@ -128,7 +136,11 @@ pub(super) fn apply(connection: &Connection, intents: &[JobIntent], limits: &Job
                 if exists {
                     return Err(Error::Invalid("scheduled job ID reused"));
                 }
-                save(connection, job)?;
+                let mut job = job.clone();
+                if retiring(connection, &job.deployment)? {
+                    job.state = JobState::Cancelled;
+                }
+                save(connection, &job)?;
             }
             JobIntent::Cancel { id, caller } => {
                 let mut job = get(connection, id)?;
@@ -154,7 +166,8 @@ pub(super) fn apply(connection: &Connection, intents: &[JobIntent], limits: &Job
                 }
                 due(*due_at)?;
                 target(connection, &job)?;
-                job.state = JobState::Pending;
+                job.state =
+                    if retiring(connection, &job.deployment)? { JobState::Cancelled } else { JobState::Pending };
                 job.due_at = *due_at;
                 job.attempt = job.attempt.checked_add(1).ok_or(Error::Capacity)?;
                 job.result = None;
@@ -228,6 +241,22 @@ pub(super) fn command(transaction: &Connection, command: JobCommand, limits: &Jo
             }
             transaction.execute("DELETE FROM _chunk_jobs WHERE id=?1", [id])?;
             changed(transaction)?;
+        }
+        JobCommand::CancelDeployment { deployment } => {
+            super::deployments::retire(transaction, &deployment)?;
+            let mut cancelled = false;
+            for mut job in load(transaction)?.records.into_iter().filter(|job| job.deployment == deployment) {
+                match job.state {
+                    JobState::Pending => job.state = JobState::Cancelled,
+                    JobState::Running => job.state = JobState::Unknown,
+                    _ => continue,
+                }
+                save(transaction, &job)?;
+                cancelled = true;
+            }
+            if cancelled {
+                changed(transaction)?;
+            }
         }
         JobCommand::AcknowledgeWake { generation, due_at } => {
             let wake = load(transaction)?.wake;

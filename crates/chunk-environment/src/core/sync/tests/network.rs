@@ -61,7 +61,7 @@ async fn every_gateway_follows_the_deployment_topic_until_its_own_credential_is_
         let value = GatewayDeployment { deployment: deployment.into() }.encode_to_vec();
         [Entry { key: "current".into(), state: Some(State::Value(value.into())) }]
     };
-    fixture.control.activate_release(runtime::release()).unwrap();
+    fixture.control.activate_release(runtime::release(), chunk_control::DrainPolicy::default()).unwrap();
     for updates in &mut streams {
         let update = next(updates).await;
         assert!(update.snapshot && update.position.is_some() && update.error.is_none());
@@ -72,7 +72,7 @@ async fn every_gateway_follows_the_deployment_topic_until_its_own_credential_is_
     assert_eq!(next(&mut streams[0]).await.error.unwrap().code(), Code::Stopped);
     let mut release = runtime::release();
     release.deployment.deployment = "next".into();
-    fixture.control.activate_release(release).unwrap();
+    fixture.control.activate_release(release, chunk_control::DrainPolicy::default()).unwrap();
     let update = next(&mut streams[1]).await;
     assert!(update.snapshot && update.error.is_none());
     assert_eq!(update.upserts, current("next"));

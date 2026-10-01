@@ -195,7 +195,12 @@ async fn client() -> Client {
 async fn unary_calls_round_trip_binary_protobuf() {
     let client = client().await;
     let response = client
-        .deploy(&DeployRequest { request_id: "abc".into(), environment_id: "env_1".into(), release_id: "r1".into() })
+        .deploy(&DeployRequest {
+            request_id: "abc".into(),
+            environment_id: "env_1".into(),
+            release_id: "r1".into(),
+            stop_previous: false,
+        })
         .await
         .expect("deploy");
     assert_eq!(response.deployment.expect("deployment").id, "dep_abc");

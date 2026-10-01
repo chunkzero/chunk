@@ -46,7 +46,8 @@ describe.skipIf(!databaseUrl)("EnvironmentService", () => {
     const deploymentId = await deployRelease(h, projectId, environmentId, "r1");
     const stream = attach(client, {});
     const first = (await stream.messages.next()).value;
-    expect(first).toMatchObject({ environmentId, projectId, deploymentId, lease: 0n });
+    expect(first).toMatchObject({ environmentId, projectId, deploymentId, lease: 0n, stopPrevious: false });
+    expect(first.drain).toMatchObject({ maxAgeSeconds: 10_800, deadlineSeconds: 14_400 });
     const download = await fetch(first.release.url);
     expect(
       createHash("sha256")

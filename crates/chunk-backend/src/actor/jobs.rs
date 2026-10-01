@@ -128,6 +128,11 @@ impl Actor {
         match &result {
             Ok(snapshot) => {
                 self.scheduled.snapshot = snapshot.clone();
+                if let JobCommand::CancelDeployment { deployment } = &command
+                    && let Ok(id) = DeploymentId::new(deployment)
+                {
+                    self.fence(&id);
+                }
                 if let JobCommand::Claim { id, attempt, .. } = command
                     && let Some(job) = snapshot
                         .records
@@ -241,6 +246,7 @@ impl Actor {
             .records
             .iter()
             .filter(|job| job.state == JobState::Pending && job.due_at <= now)
+            .filter(|job| !self.retired.iter().any(|retired| retired.as_str() == job.deployment))
             .min_by_key(|job| (job.due_at, &job.id))
         {
             self.send_scheduling(JobCommand::Claim { id: job.id.clone(), attempt: job.attempt, now });

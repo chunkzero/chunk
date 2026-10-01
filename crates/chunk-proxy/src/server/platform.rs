@@ -50,6 +50,14 @@ impl Platform {
         Self::with(target, self.sync.clone(), self.cleanup.clone(), self.reports.clone())
     }
 
+    /// This platform for `deployment`, whose manifest and hooks it then uses. An empty `deployment` keeps the target's.
+    pub fn bind(&self, deployment: &str) -> Self {
+        if deployment.is_empty() || self.target.deployment == deployment {
+            return self.clone();
+        }
+        self.retarget(PlatformTarget { deployment: deployment.into(), ..self.target.clone() })
+    }
+
     fn with(
         target: PlatformTarget,
         sync: Arc<sync::Connection>,

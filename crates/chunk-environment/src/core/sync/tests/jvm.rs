@@ -204,7 +204,7 @@ fn health(tick_count: u64, draining: bool) -> JvmHealth {
 /// Reserves a session for the fake player on the fake JVM's host, returning the host once it launched. The claim
 /// itself gives up after a second, since these tests' JVM never prepares the player.
 async fn place(fixture: &Fixture, jvm: &Launches) -> String {
-    fixture.control.activate_release(runtime::release()).unwrap();
+    fixture.control.activate_release(runtime::release(), chunk_control::DrainPolicy::default()).unwrap();
     let control = fixture.control.clone();
     drop(tokio::spawn(tokio::time::timeout(
         Duration::from_secs(1),

@@ -1,11 +1,12 @@
-//! The releases one control runs side by side. A login is placed on the release its proxy routed it with; every other
-//! placement, and recovery, uses the release of the host a row runs on. A release is forgotten once none of its hosts
-//! remain and every launch that may still run a JVM has a host row naming its release.
+//! The releases one control runs side by side. New sessions are placed on the current release only: a login routed
+//! with another one is routed again, and a move out of another one goes to the current release. Recovery uses the
+//! release of the host a row runs on. A release is forgotten once none of its hosts remain and every launch that may
+//! still run a JVM has a host row naming its release.
 
 use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
-    Control, Error, Release, Result,
+    Control, DrainPolicy, Error, Release, Result,
     state::{Capacity, ReleaseState, State},
 };
 
@@ -24,16 +25,31 @@ impl Launches {
 }
 
 impl Control {
-    /// Records `release` if it is new, and makes it current. Sessions of earlier releases keep running.
+    /// Records `release` if it is new, and makes it current, ending its drain. Every other release that is not retired
+    /// starts draining under `policy` now, unless it drains already, and keeps its sessions.
     /// # Errors
     /// Rejects an invalid release, one of another environment, a changed or retired release, and a stopped store.
-    pub fn activate_release(&self, release: Release) -> Result<()> {
+    pub fn activate_release(&self, release: Release, policy: DrainPolicy) -> Result<()> {
+        self.activate_release_stopping(release, policy, &BTreeSet::new())
+    }
+
+    /// Activates `release` like [`Self::activate_release`], and in the same commit adds `stop` to the deployments asked
+    /// to stop at once instead of draining. The activated deployment is never one of them.
+    /// # Errors
+    /// Rejects what [`Self::activate_release`] does.
+    pub fn activate_release_stopping(
+        &self,
+        release: Release,
+        policy: DrainPolicy,
+        stop: &BTreeSet<String>,
+    ) -> Result<()> {
         release.validate()?;
         if release.deployment.environment != self.config.environment {
             return Err(Error::Invalid("release belongs to another environment"));
         }
         let name = release.deployment.deployment.clone();
         let recorded = serde_json::to_vec(&release)?;
+        let now = crate::now_ms();
         self.update(|state| {
             match state.releases.get(&name) {
                 Some(existing) if existing.retired => return Err(Error::Invalid("release retired")),
@@ -42,10 +58,39 @@ impl Control {
                 }
                 Some(_) => {}
                 None => {
-                    state.releases.insert(name.clone(), ReleaseState { release: Arc::new(release), retired: false });
+                    let release = ReleaseState { release: Arc::new(release), retired: false, drain: None };
+                    state.releases.insert(name.clone(), release);
                 }
             }
+            if let Some(release) = state.releases.get_mut(&name) {
+                release.drain = None;
+            }
+            for release in state.releases.iter_mut().filter(|(other, _)| **other != name).map(|(_, release)| release) {
+                if !release.retired {
+                    release.start_draining(now, policy);
+                }
+            }
+            state.stopping.extend(stop.iter().cloned());
+            state.stopping.remove(&name);
             state.current = Some(name);
+            Ok(())
+        })
+    }
+
+    /// The deployments asked to stop at once, rather than drain, which stay so across a restart and a restore until
+    /// [`Self::forget_stopping`].
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn stopping(&self) -> Result<BTreeSet<String>> {
+        Ok(self.state()?.stopping.clone())
+    }
+
+    /// Forgets the deployments asked to stop that are not among `resident`.
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn forget_stopping(&self, resident: &BTreeSet<String>) -> Result<()> {
+        self.update(|state| {
+            state.stopping.retain(|name| resident.contains(name));
             Ok(())
         })
     }
@@ -64,6 +109,7 @@ impl Control {
                 return Ok(());
             };
             release.retired = true;
+            release.drain = None;
             let hosts: Vec<_> =
                 state.hosts.iter().filter(|(_, host)| host.release == deployment).map(|(id, _)| id.clone()).collect();
             for id in hosts {
@@ -72,9 +118,33 @@ impl Control {
             Ok(())
         })?;
         self.wake_capacity();
+        self.release_stopped(deployment)
+    }
+
+    /// Durably asks `deployment` to stop at once, which stays so until [`Self::forget_stopping`], and retires its
+    /// release as [`Self::retire_release`] does.
+    /// # Errors
+    /// Rejects the current release and reports a stopped store.
+    pub fn stop_release(&self, deployment: &str) -> Result<bool> {
+        self.update(|state| {
+            if state.current.as_deref() == Some(deployment) {
+                return Err(Error::Invalid("the current release cannot retire"));
+            }
+            state.stopping.insert(deployment.to_owned());
+            Ok(())
+        })?;
+        self.retire_release(deployment)
+    }
+
+    /// Whether `deployment`'s release retired and every one of its hosts has stopped, as for an unknown release, and no
+    /// launch of an unknown release may still run.
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn release_stopped(&self, deployment: &str) -> Result<bool> {
         let launches = self.launches()?;
         let state = self.state()?;
         Ok(launches.attributed(&state)
+            && state.releases.get(deployment).is_none_or(|release| release.retired)
             && !state.hosts.values().any(|host| host.release == deployment && host.capacity != Capacity::Released))
     }
 

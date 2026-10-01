@@ -106,12 +106,19 @@ message ActiveArguments {
 // - `chunk:withdraw` takes no arguments and returns WithdrawResult.
 // - `chunk:abandon_move` takes AbandonMoveArguments and returns WithdrawResult.
 // - `chunk:depart` takes no arguments and returns DepartResult.
+// - `chunk:reservation` takes no arguments and returns ReservationResult.
+// - `chunk:reconnect` takes ReconnectArguments and returns ReservationResult. Its operation ID is the login's, which
+//   it creates nothing under.
 
 // Arguments of `chunk:claim`.
 message ClaimArguments {
   // The player a login admits. Unset to claim the destination of the move control queued under the operation ID,
   // which the gateway saw as a GatewayMove.
   GatewayLogin login = 1;
+  // The deployment whose hooks admitted the claim, which core places it in only while it is the current one, and
+  // otherwise refuses it as CLAIM_REFUSAL_ROUTE_AGAIN. Empty places it with the current one. A login names the same one
+  // in GatewayLogin.
+  string deployment = 2;
 }
 
 // A player the gateway authenticated and routed. The claim control makes from it, with the gateway's ID, the operation
@@ -125,6 +132,10 @@ message GatewayLogin {
   SessionDemand demand = 3;
   // The deployment whose routing chose `demand`. Empty places the login with the current one.
   string deployment = 4;
+  // The session of an earlier deployment the gateway admitted the login to as a reconnect, whose deployment is
+  // `deployment`. Control places the login only there, and asks the gateway to route again when that session no longer
+  // takes it. Empty places the login by `demand`, never in a reconnect.
+  string reconnect_session = 5;
 }
 
 // A player as their login authenticated them.
@@ -169,12 +180,18 @@ message ClaimAssignment {
   string endpoint = 4;
   // The 32-byte secret that presents the player to the JVM at login.
   bytes capability = 5;
+  // The deployment of the release the session runs, which the gateway's hooks and commands for the player follow.
+  string deployment = 6;
+  // The session's destination, which a login whose player returned to a session of another deployment than the one
+  // that routed it is admitted to there.
+  SessionDemand destination = 7;
 }
 
 // Why control refused a claim.
 enum ClaimRefusal {
   CLAIM_REFUSAL_UNSPECIFIED = 0;
-  // The login's deployment no longer accepts logins. Route it again and claim again under the same operation ID.
+  // The deployment the claim was admitted in no longer accepts it. Admit it again in the current deployment, routing a
+  // login again, and claim again under the same operation ID.
   CLAIM_REFUSAL_ROUTE_AGAIN = 1;
   // The player already holds a claim, such as through another connection.
   CLAIM_REFUSAL_ALREADY_CONNECTED = 2;
@@ -197,6 +214,23 @@ message WithdrawResult {
   // Control holds no claim or queued move under the operation ID, such as while its claim is still reserving, so
   // nothing changed.
   bool unknown = 1;
+}
+
+// Arguments of `chunk:reconnect`.
+message ReconnectArguments {
+  // The UUID of the player logging in, lowercase and hyphenated.
+  string player = 1;
+}
+
+// The result of `chunk:reservation` and `chunk:reconnect`.
+message ReservationResult {
+  // The deployment whose session holds the operation's live claim, or for a reconnect the session the player may
+  // return to; empty when there is none, and then the claim is admitted in the current deployment.
+  string deployment = 1;
+  // The reserved session's destination.
+  SessionDemand destination = 2;
+  // The reserved session, or for a reconnect the session the player may return to.
+  string session = 3;
 }
 
 // The result of `chunk:depart`.

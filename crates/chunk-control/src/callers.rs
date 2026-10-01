@@ -1,6 +1,6 @@
 //! Who a request to core may act for, checked against control's current state.
 
-use chunk_proto::control::v1::{ClaimIdentity, ClaimRequest};
+use chunk_proto::control::v1::{ClaimIdentity, ClaimRequest, SessionDemand};
 use prost::Message;
 
 use crate::{Control, Error, Result, state::Phase};
@@ -31,6 +31,14 @@ pub struct StoredClaim {
     pub request: ClaimRequest,
     /// The claim's identity, once the operation has claimed.
     pub identity: Option<ClaimIdentity>,
+}
+
+/// The deployment, session and destination a live claim reserved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reservation {
+    pub deployment: String,
+    pub session: String,
+    pub destination: SessionDemand,
 }
 
 impl Control {
@@ -99,6 +107,35 @@ impl Control {
             session_type: session.session_type.clone(),
             scope: SessionScope { app: host.app.clone(), deployment: host.release.clone() },
         })
+    }
+
+    /// The deployment and destination of the live claim `operation` holds, if any.
+    /// # Errors
+    /// Reports unreadable state and a claim whose session is missing.
+    pub fn reservation(&self, operation: &str) -> Result<Option<Reservation>> {
+        let state = self.state()?;
+        let Some(claim) =
+            state.claims.get(operation).filter(|claim| !matches!(claim.phase, Phase::Withdrawing | Phase::Released))
+        else {
+            return Ok(None);
+        };
+        let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
+        let deployment = state.host_release(&session.host)?.deployment.deployment.clone();
+        let destination = crate::placement::destination(&state, &claim.session, &session.host);
+        Ok(Some(Reservation { deployment, session: claim.session.clone(), destination }))
+    }
+
+    /// The deployment, session and destination a login of `player` may return to.
+    /// # Errors
+    /// Reports unreadable state.
+    pub fn reconnect(&self, player: &str) -> Result<Option<Reservation>> {
+        let state = self.state()?;
+        let unavailable = self.unavailable()?;
+        let Some(session) = crate::draining::rejoin(&state, player, &unavailable) else { return Ok(None) };
+        let host = &state.sessions[&session].host;
+        let deployment = state.host_release(host)?.deployment.deployment.clone();
+        let destination = crate::placement::destination(&state, &session, host);
+        Ok(Some(Reservation { deployment, session, destination }))
     }
 
     /// The claim or queued move stored under `operation`, if any.

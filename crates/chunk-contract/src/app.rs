@@ -6,6 +6,18 @@ use std::collections::BTreeMap;
 pub struct SessionDeclaration {
     pub machine_profile: String,
     pub capacity: u32,
+    /// Whether a player who left one of its sessions on a draining release returns to it on logging in again.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub reconnect: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde passes the field by reference")]
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -95,6 +95,44 @@ fn claims_recover_unknown_with_stable_attempts_and_checked_owner_retry_retention
 }
 
 #[test]
+fn cancelling_a_deployments_jobs_ends_its_pending_and_running_ones() {
+    let (_directory, mut store) = open();
+    store.retain_deployment(&target()).unwrap();
+    let intents = vec![JobIntent::Schedule(job("running")), JobIntent::Schedule(job("pending"))];
+    store.commit_with_jobs(commit("schedule", 1, vec![]), intents).unwrap();
+    store.job_command(JobCommand::Claim { id: "running".into(), attempt: 1, now: 10 }).unwrap();
+    let jobs = store.job_command(JobCommand::CancelDeployment { deployment: job("running").deployment }).unwrap();
+    let state = |id| jobs.records.iter().find(|job| job.id == id).unwrap().state;
+    assert_eq!((state("running"), state("pending")), (JobState::Unknown, JobState::Cancelled));
+    assert_eq!(store.retiring().unwrap(), ["v1"]);
+    assert!(store.release_deployment("v1").unwrap());
+    assert!(store.retiring().unwrap().is_empty());
+}
+
+#[test]
+fn retrying_a_job_of_a_retiring_deployment_leaves_it_cancelled() {
+    let (_directory, mut store) = open();
+    store.retain_deployment(&target()).unwrap();
+    let owner = job("one").caller;
+    store.commit_with_jobs(commit("schedule", 1, vec![]), vec![JobIntent::Schedule(job("one"))]).unwrap();
+    store
+        .commit_with_jobs(
+            commit("cancel", 2, vec![]),
+            vec![JobIntent::Cancel { id: "one".into(), caller: owner.clone() }],
+        )
+        .unwrap();
+    store.job_command(JobCommand::CancelDeployment { deployment: job("one").deployment }).unwrap();
+    store
+        .commit_with_jobs(
+            commit("retry", 3, vec![]),
+            vec![JobIntent::Retry { id: "one".into(), caller: owner, due_at: 20, acknowledge_possible_effects: true }],
+        )
+        .unwrap();
+    assert_eq!(store.jobs().unwrap().records[0].state, JobState::Cancelled);
+    assert!(store.release_deployment("v1").unwrap());
+}
+
+#[test]
 fn full_job_budget_rejects_new_intent_and_its_document_writes() {
     let (_directory, mut store) = open();
     store.retain_deployment(&target()).unwrap();

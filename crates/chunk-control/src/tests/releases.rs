@@ -26,11 +26,11 @@ async fn arrived(fixture: &Fixture, control: &Control, operation: &str) -> Claim
 }
 
 #[tokio::test]
-async fn new_logins_use_the_current_release_while_earlier_sessions_and_their_moves_stay() {
+async fn new_logins_and_moves_use_the_current_release_while_earlier_sessions_stay() {
     let fixture = Fixture::new();
     let control = fixture.control().await;
     let first = arrived(&fixture, &control, "first").await;
-    control.activate_release(next(&fixture)).unwrap();
+    control.activate_release(next(&fixture), crate::DrainPolicy::default()).unwrap();
     arrived(&fixture, &control, "second").await;
     assert_eq!(release_of(&control, "first"), "build");
     assert_eq!(release_of(&control, "second"), "next");
@@ -47,8 +47,12 @@ async fn new_logins_use_the_current_release_while_earlier_sessions_and_their_mov
             source: None,
         })
         .unwrap();
-    control.claim(destination).await.unwrap();
-    assert_eq!(release_of(&control, "move"), "build");
+    // A move approved while `build` was current is refused, so its gateway approves it again.
+    let refused = control.claim_approved(destination.clone(), "build").await;
+    assert!(matches!(refused, Err(Error::Unresolved(crate::ROUTE_AGAIN))));
+    assert!(!control.state().unwrap().claims.contains_key("move"));
+    control.claim_approved(destination, "next").await.unwrap();
+    assert_eq!(release_of(&control, "move"), "next");
     let nodes = control.nodes().unwrap();
     let releases: BTreeSet<_> = nodes.iter().map(|node| node.deployment.as_str()).collect();
     assert_eq!(releases, BTreeSet::from(["build", "next"]));
@@ -61,7 +65,7 @@ async fn a_retired_release_is_forgotten_once_its_last_host_is_released() {
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
     assert!(control.retire_release("build").is_err());
-    control.activate_release(next(&fixture)).unwrap();
+    control.activate_release(next(&fixture), crate::DrainPolicy::default()).unwrap();
     arrived(&fixture, &control, "second").await;
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["first"].session].host.clone();
@@ -82,7 +86,7 @@ async fn recovery_after_a_restart_keeps_every_live_release() {
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
     let next = next(&fixture);
-    control.activate_release(next.clone()).unwrap();
+    control.activate_release(next.clone(), crate::DrainPolicy::default()).unwrap();
     arrived(&fixture, &control, "second").await;
     drop(control);
     // Reopening activates `next` again, which is already current.
@@ -99,24 +103,21 @@ async fn recovery_after_a_restart_keeps_every_live_release() {
 }
 
 #[tokio::test]
-async fn a_login_routed_with_a_retired_release_is_rejected_for_routing_again() {
+async fn a_login_routed_with_a_replaced_release_is_rejected_for_routing_again() {
     let fixture = Fixture::new();
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
-    control.activate_release(next(&fixture)).unwrap();
-    // Routed with the earlier release before activation switched, a login still reserves on it.
+    control.activate_release(next(&fixture), crate::DrainPolicy::default()).unwrap();
+    // Routed with the earlier release before activation switched, a login reserves nothing.
     let routed = |operation: &str, deployment: &str| ClaimRequest {
         deployment: deployment.into(),
         ..request(operation, &uuid::Uuid::new_v4().to_string())
     };
-    control.claim(routed("second", "build")).await.unwrap();
-    assert_eq!(release_of(&control, "second"), "build");
-    eventually(|| control.retire_release("build").unwrap()).await;
-    let rejected = control.claim(routed("third", "build")).await;
+    let rejected = control.claim(routed("second", "build")).await;
     assert!(matches!(rejected, Err(Error::Unresolved(crate::ROUTE_AGAIN))));
-    assert!(!control.state().unwrap().claims.contains_key("third"));
-    control.claim(routed("third", "next")).await.unwrap();
-    assert_eq!(release_of(&control, "third"), "next");
+    assert!(!control.state().unwrap().claims.contains_key("second"));
+    control.claim(routed("second", "next")).await.unwrap();
+    assert_eq!(release_of(&control, "second"), "next");
     fixture.close().await;
 }
 
@@ -125,7 +126,7 @@ async fn a_release_is_not_retired_while_a_launch_without_a_host_row_may_run_it()
     let fixture = Fixture::new();
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
-    control.activate_release(next(&fixture)).unwrap();
+    control.activate_release(next(&fixture), crate::DrainPolicy::default()).unwrap();
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["first"].session].host.clone();
     // A restore loses the host row while its JVM still holds its launch, before recovery records it again.
@@ -153,7 +154,7 @@ async fn an_orphan_whose_release_a_restore_lost_re_attaches_after_another_restar
     let control = fixture.control().await;
     arrived(&fixture, &control, "first").await;
     let next = next(&fixture);
-    control.activate_release(next.clone()).unwrap();
+    control.activate_release(next.clone(), crate::DrainPolicy::default()).unwrap();
     let state = control.state().unwrap();
     let host = state.sessions[&state.claims["first"].session].host.clone();
     // A restore loses the host, its login and the release it ran, while its JVM keeps running.

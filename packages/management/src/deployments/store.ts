@@ -90,6 +90,7 @@ export async function createDeployment(
   releaseId: string,
   trigger: DeploymentTrigger,
   jvmImageTemplate: string | undefined,
+  stopPrevious = false,
 ): Promise<Deployment> {
   const release = await findRelease(db, environment.project_id, releaseId);
   if (!release) throw notFound("release");
@@ -101,8 +102,8 @@ export async function createDeployment(
     update deployments set state = ${DeploymentState.SUPERSEDED}, update_time = now()
     where environment_id = ${environment.id} and state in ${db(unfinished)}`;
   const [row] = await db<DeploymentRow[]>`
-    insert into deployments (id, environment_id, release_id, state, trigger)
-    values (${newId("dep")}, ${environment.id}, ${release.id}, ${DeploymentState.PENDING}, ${trigger})
+    insert into deployments (id, environment_id, release_id, state, trigger, stop_previous)
+    values (${newId("dep")}, ${environment.id}, ${release.id}, ${DeploymentState.PENDING}, ${trigger}, ${stopPrevious})
     returning *`;
   if (!row) throw new Error("deployment insert returned no row");
   await advanceRevision(db, environment.id);

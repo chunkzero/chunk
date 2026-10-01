@@ -248,3 +248,28 @@ async fn a_session_whose_creation_a_restore_lost_on_a_surviving_host_is_finished
     assert!(control.state().unwrap().sessions[&session].finished);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn a_restore_keeps_the_deployments_asked_to_stop() {
+    let fixture = Fixture::new();
+    let path = fixture.directory.path().join("control.sqlite");
+    let storage = Arc::new(Memory::default());
+    let control = fixture.control().await;
+    let mut release = fixture.release.clone();
+    release.deployment.deployment = "next".into();
+    let stop = std::collections::BTreeSet::from(["older".to_owned()]);
+    control.activate_release_stopping(release, crate::DrainPolicy::default(), &stop).unwrap();
+    drop(control);
+    fixture.detach().await;
+    let (store, replicator) = SqliteStore::open_replicated(&path, "test", Replication::new(storage.clone())).unwrap();
+    replicator.flush().unwrap();
+    drop((store, replicator));
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    drop(SqliteStore::open_replicated(&path, "test", Replication::new(storage)).unwrap());
+
+    let control = fixture.control().await;
+    assert_eq!(control.stopping().unwrap(), stop);
+    fixture.close().await;
+}

@@ -58,6 +58,7 @@ fn core_config(directory: &Path) -> CoreConfig {
         java: "java".into(),
         environment_token: None,
         fresh: false,
+        defers_retirement: false,
         replication: None,
     }
 }
@@ -259,11 +260,11 @@ async fn a_gateway_machine_follows_the_current_deployment_until_its_credential_i
     // No release is current, so the gateway takes no logins yet.
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(addresses.is_empty());
-    core.control().unwrap().activate_release(release("test")).unwrap();
+    core.control().unwrap().activate_release(release("test"), chunk_control::DrainPolicy::default()).unwrap();
     let address = listening(&mut addresses).await;
     until_motd(address, Some("Serving test")).await;
     core.deploy(bundle("next", "Serving next")).await.unwrap();
-    core.control().unwrap().activate_release(release("next")).unwrap();
+    core.control().unwrap().activate_release(release("next"), chunk_control::DrainPolicy::default()).unwrap();
     until_motd(address, Some("Serving next")).await;
 
     core.revoke_gateway("remote").unwrap();
@@ -283,7 +284,7 @@ async fn a_gateway_machine_follows_core_across_restarts_until_core_rejects_its_c
     };
     let core = start(Some("127.0.0.1:0".parse().unwrap())).await.unwrap();
     let network = core.network_address();
-    core.control().unwrap().activate_release(release("test")).unwrap();
+    core.control().unwrap().activate_release(release("test"), chunk_control::DrainPolicy::default()).unwrap();
     let remote = RemoteCore {
         endpoint: format!("http://{}", network.unwrap()),
         credential: core.gateway_credential("remote").unwrap(),
@@ -297,7 +298,7 @@ async fn a_gateway_machine_follows_core_across_restarts_until_core_rejects_its_c
     core.stop(|| {}).await.unwrap();
     let core = start(network).await.unwrap();
     core.deploy(bundle("next", "Serving next")).await.unwrap();
-    core.control().unwrap().activate_release(release("next")).unwrap();
+    core.control().unwrap().activate_release(release("next"), chunk_control::DrainPolicy::default()).unwrap();
     until_motd(address, Some("Serving next")).await;
 
     // Core revokes the credential while the gateway can't reach it, so it rejects the gateway's next subscription.

@@ -59,6 +59,8 @@ pub(crate) struct Initial {
     pub deployments: Vec<chunk_contract::Deployment>,
     pub jobs: chunk_store::Jobs,
     pub work: Vec<PendingWork>,
+    /// The deployments whose retirement an earlier run committed.
+    pub retiring: Vec<String>,
 }
 
 /// How far the log has advanced.
@@ -89,6 +91,7 @@ impl Committer {
                     deployments: store.deployments()?,
                     jobs: store.job_command(chunk_store::JobCommand::Recover)?,
                     work: store.pending_work()?,
+                    retiring: store.retiring()?,
                 })
             })();
             let Ok(Initial { snapshot, .. }) = &initial else {

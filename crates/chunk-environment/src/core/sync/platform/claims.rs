@@ -11,7 +11,8 @@ use chunk_proto::{
     control::v1 as control,
     sync::v1::{
         AbandonMoveArguments, ActivateResult, CallRequest, ClaimArguments, ClaimAssignment, ClaimRefusal, ClaimResult,
-        DepartResult, Error, GatewayLogin, Position, WithdrawResult, claim_result::Outcome, error::Code,
+        DepartResult, Error, GatewayLogin, Position, ReconnectArguments, ReservationResult, SessionDemand,
+        WithdrawResult, claim_result::Outcome, error::Code,
     },
 };
 use prost::Message;
@@ -23,6 +24,8 @@ pub(super) enum Method {
     Withdraw,
     AbandonMove,
     Depart,
+    Reservation,
+    Reconnect,
 }
 
 impl Method {
@@ -33,6 +36,8 @@ impl Method {
             "withdraw" => Self::Withdraw,
             "abandon_move" => Self::AbandonMove,
             "depart" => Self::Depart,
+            "reservation" => Self::Reservation,
+            "reconnect" => Self::Reconnect,
             _ => return None,
         })
     }
@@ -47,7 +52,9 @@ pub(super) async fn call(
 ) -> Result<Vec<u8>, Error> {
     let operation = request.operation_id.as_str();
     let arguments = request.arguments.as_slice();
-    if matches!(method, Method::Activate | Method::Withdraw | Method::Depart) && !arguments.is_empty() {
+    if matches!(method, Method::Activate | Method::Withdraw | Method::Depart | Method::Reservation)
+        && !arguments.is_empty()
+    {
         return Err(errors::invalid("the method takes no arguments"));
     }
     let result = match method {
@@ -59,6 +66,8 @@ pub(super) async fn call(
             withdraw(service, gateway, operation, Some(reason)).await?.encode_to_vec()
         }
         Method::Depart => depart(service, gateway, operation).await?.encode_to_vec(),
+        Method::Reservation => reservation(service, gateway, operation)?.encode_to_vec(),
+        Method::Reconnect => reconnect(service, &decode(arguments)?)?.encode_to_vec(),
     };
     Ok(result)
 }
@@ -73,6 +82,7 @@ async fn claim(
     if arguments.login.is_some() {
         app::reject_operator(operation)?;
     }
+    let approved = arguments.deployment;
     let request = match (arguments.login, held(service, gateway, operation)?) {
         (Some(_), Some(stored)) if stored.request.source.is_some() => {
             return Err(errors::error(Code::OperationMismatch, "the operation ID names a move"));
@@ -83,7 +93,8 @@ async fn claim(
         (None, None) => return Err(errors::invalid("no move is queued under this operation ID")),
     };
     let control = service.control.clone();
-    let outcome = match service.operations.admit(async move { control.claim(request).await }).await {
+    let outcome = match service.operations.admit(async move { control.claim_approved(request, &approved).await }).await
+    {
         Ok(assignment) => Outcome::Assignment(assigned(assignment)?),
         Err(Failure::Unresolved(ROUTE_AGAIN)) => Outcome::Refusal(ClaimRefusal::RouteAgain.into()),
         Err(Failure::Invalid(ALREADY_OWNED)) => Outcome::Refusal(ClaimRefusal::AlreadyConnected.into()),
@@ -135,6 +146,31 @@ async fn depart(service: &SyncService, gateway: &str, operation: &str) -> Result
     Ok(DepartResult { departed })
 }
 
+/// The deployment and destination of the live claim under `operation`, if it holds one.
+fn reservation(service: &SyncService, gateway: &str, operation: &str) -> Result<ReservationResult, Error> {
+    held(service, gateway, operation)?;
+    let reserved = service.control.reservation(operation).map_err(|failure| errors::operation(&failure))?;
+    Ok(reservation_result(reserved))
+}
+
+/// The deployment and destination of the session `arguments`' player's login returns to, if any.
+fn reconnect(service: &SyncService, arguments: &ReconnectArguments) -> Result<ReservationResult, Error> {
+    let target = service.control.reconnect(&arguments.player).map_err(|failure| errors::operation(&failure))?;
+    Ok(reservation_result(target))
+}
+
+fn reservation_result(reserved: Option<chunk_control::Reservation>) -> ReservationResult {
+    reserved.map_or_else(ReservationResult::default, |reserved| ReservationResult {
+        deployment: reserved.deployment,
+        session: reserved.session,
+        destination: Some(SessionDemand {
+            key: reserved.destination.key,
+            session_type: reserved.destination.session_type,
+            machine_profile: reserved.destination.machine_profile,
+        }),
+    })
+}
+
 /// The claim or queued move stored under `operation`, which must be `gateway`'s.
 fn held(service: &SyncService, gateway: &str, operation: &str) -> Result<Option<StoredClaim>, Error> {
     let stored = service.control.stored_claim(operation).map_err(|failure| errors::operation(&failure))?;
@@ -171,13 +207,16 @@ fn login_request(gateway: &str, operation: &str, login: GatewayLogin) -> control
         demand,
         source: None,
         deployment: login.deployment,
+        reconnect_session: login.reconnect_session,
     }
 }
 
 fn assigned(assignment: control::Assignment) -> Result<ClaimAssignment, Error> {
     let incomplete = || errors::error(Code::Unavailable, "control returned an incomplete assignment");
     let claim = assignment.claim.ok_or_else(incomplete)?;
-    let session = assignment.delivery.and_then(|delivery| delivery.session).ok_or_else(incomplete)?;
+    let delivery = assignment.delivery.ok_or_else(incomplete)?;
+    let session = delivery.session.ok_or_else(incomplete)?;
+    let deployment = delivery.deployment.ok_or_else(incomplete)?.deployment;
     let configuration = assignment.configuration.ok_or_else(incomplete)?;
     let preparation = assignment.preparation.ok_or_else(incomplete)?;
     let generation = Generation::from_wire(claim.delivery_generation);
@@ -187,5 +226,11 @@ fn assigned(assignment: control::Assignment) -> Result<ClaimAssignment, Error> {
         protocol: configuration.protocol,
         endpoint: preparation.endpoint,
         capability: preparation.capability,
+        deployment,
+        destination: assignment.destination.map(|demand| SessionDemand {
+            key: demand.key,
+            session_type: demand.session_type,
+            machine_profile: demand.machine_profile,
+        }),
     })
 }

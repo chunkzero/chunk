@@ -15,7 +15,7 @@ use crate::{Config, Error, Release, Result};
 use entities::Stamp;
 pub(crate) use entities::{
     Capacity, Claim, Drain, HostState, Machine, Meta, MoveFailure, MoveIntent, OperatorCall, OperatorMethod, Phase,
-    PlayerState, ReleaseState, Roster, SessionState,
+    PlayerState, ReleaseDrain, ReleaseState, Roster, SessionState,
 };
 pub use entities::{Generation, Launch, MachineKind};
 
@@ -24,6 +24,8 @@ pub(crate) struct State {
     pub config: Vec<u8>,
     /// The release new placements use.
     pub current: Option<String>,
+    /// The deployments asked to stop at once, rather than drain, until their backend versions are released.
+    pub stopping: BTreeSet<String>,
     pub releases: BTreeMap<String, ReleaseState>,
     pub hosts: BTreeMap<String, HostState>,
     pub sessions: BTreeMap<String, SessionState>,
@@ -74,32 +76,16 @@ impl State {
         Ok(&self.releases.get(name).ok_or(Error::Invalid("unknown release"))?.release)
     }
 
-    /// The release that places `request`: for a login, the one its proxy routed it with, or the current one when it
-    /// names none; for a move, its source's. Retired releases place nothing, and a login routed with one is
-    /// rejected as unavailable so its proxy routes it again.
-    pub fn placing(&self, request: &ClaimRequest) -> Result<(String, Arc<Release>)> {
-        let name = match &request.source {
-            None if request.deployment.is_empty() => {
-                self.current.clone().ok_or(Error::Invalid("no current release"))?
-            }
-            None => {
-                if self.releases.get(&request.deployment).is_none_or(|release| release.retired) {
-                    return Err(Error::Unresolved(crate::ROUTE_AGAIN));
-                }
-                request.deployment.clone()
-            }
-            Some(source) => {
-                let claim = self.claims.get(&source.operation_id).ok_or(Error::Invalid("missing move source"))?;
-                let session = self.sessions.get(&claim.session).ok_or(Error::Invalid("missing move source"))?;
-                self.hosts.get(&session.host).ok_or(Error::Invalid("missing move source"))?.release.clone()
-            }
-        };
-        let release = self.releases.get(&name).ok_or(Error::Invalid("unknown release"))?;
-        if release.retired {
-            return Err(Error::Invalid("release retired"));
+    /// The release that places `request`, which is always the current one. A claim admitted in another release, as a
+    /// login names in its request and a move in `approved`, is rejected as unavailable so its proxy admits it again.
+    pub fn placing(&self, request: &ClaimRequest, approved: &str) -> Result<(String, Arc<Release>)> {
+        let name = self.current.clone().ok_or(Error::Invalid("no current release"))?;
+        let admitted = if request.source.is_none() { request.deployment.as_str() } else { approved };
+        if !admitted.is_empty() && admitted != name {
+            return Err(Error::Unresolved(crate::ROUTE_AGAIN));
         }
-        let release = release.release.clone();
-        Ok((name, release))
+        let release = self.releases.get(&name).ok_or(Error::Invalid("unknown release"))?;
+        Ok((name, release.release.clone()))
     }
 
     /// Re-indexes [`State::move_sources`] for the `written` moves, as they were in `previous` and are now.

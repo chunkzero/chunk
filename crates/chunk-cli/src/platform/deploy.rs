@@ -27,6 +27,9 @@ pub(crate) struct Options {
     path: PathBuf,
     #[command(flatten)]
     environment: EnvironmentArgs,
+    /// Stop the deployments this one replaces at once, disconnecting their players, instead of draining them.
+    #[arg(long)]
+    stop_previous: bool,
 }
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -46,7 +49,7 @@ pub(super) async fn run(options: Options) -> io::Result<()> {
         let deployment = tokio::select! {
             deployment = async {
                 upload(client, &project.id, &release, archive).await?;
-                deploy(client, &environment, &release).await
+                deploy(client, &environment, &release, options.stop_previous).await
             } => deployment?,
             () = stop.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "deploy stopped")),
         };
@@ -117,11 +120,17 @@ async fn warn_missing_secrets(client: &Client, environment: &Environment, releas
 }
 
 /// Deploys once however often an unreachable platform makes it retry, by reusing one request ID.
-async fn deploy(client: &Client, environment: &Environment, release_id: &str) -> io::Result<Deployment> {
+async fn deploy(
+    client: &Client,
+    environment: &Environment,
+    release_id: &str,
+    stop_previous: bool,
+) -> io::Result<Deployment> {
     let request = DeployRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         environment_id: environment.id.clone(),
         release_id: release_id.into(),
+        stop_previous,
     };
     let mut attempt = 1;
     loop {

@@ -6,8 +6,8 @@ use tokio::{sync::Semaphore, task::JoinSet};
 use crate::{Control, Result, state::Phase};
 
 impl Control {
-    /// Expires unactivated reservations, withdraws claims whose capacity is retired or released, and repairs what JVMs
-    /// reported. Unreachable owners remain fenced.
+    /// Expires unactivated reservations, withdraws claims whose capacity is retired or released, repairs what JVMs
+    /// reported, and advances host drains and draining releases. Unreachable owners remain fenced.
     /// # Errors
     /// Reports durable-state errors. Individual unavailable runtimes are retained for a later pass.
     pub async fn reconcile_all(self: &Arc<Self>) -> Result<()> {
@@ -37,10 +37,11 @@ impl Control {
                 }
             });
         }
-        self.join_progressing_drains(tasks).await?;
+        self.join_progressing(tasks).await?;
         self.reconcile_sessions()?;
         self.retire_idle_hosts()?;
         self.progress_drains()?;
+        self.progress_releases()?;
         Ok(())
     }
 }

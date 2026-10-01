@@ -117,6 +117,11 @@ pub trait Storage: Send {
     /// Reports I/O, corruption or unsupported metadata.
     fn deployments(&self) -> Result<Vec<chunk_contract::Deployment>>;
 
+    /// The retained deployments a cancellation of their jobs recorded as retiring, which accept no more work.
+    /// # Errors
+    /// Reports I/O or corruption.
+    fn retiring(&self) -> Result<Vec<String>>;
+
     /// Durably retains an immutable deployment without changing document revisions.
     /// The backend must establish schema readiness before exposing its functions.
     /// # Errors

@@ -288,6 +288,10 @@ impl Storage for SqliteStore {
         deployments::load(&self.connection)
     }
 
+    fn retiring(&self) -> Result<Vec<String>> {
+        deployments::retiring(&self.connection)
+    }
+
     fn retain_deployment(&mut self, deployment: &chunk_contract::Deployment) -> Result<()> {
         log::write(&self.connection, self.log.as_mut(), &[], |transaction| deployments::insert(transaction, deployment))
     }

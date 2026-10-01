@@ -1,16 +1,18 @@
-use super::{Assignment, Claim, ClaimGuard, ClaimIdentity, Platform, WAIT_TIMEOUT, claim, invalid_data};
+use super::{Assignment, Claim, ClaimGuard, ClaimIdentity, Platform, Retarget, WAIT_TIMEOUT, claim, invalid_data};
 use crate::server::platform::{RPC_TIMEOUT, failure};
-use chunk_proto::sync::v1::{Position, error::Code};
+use chunk_proto::sync::v1::{Position, ReservationResult, SessionDemand, error::Code};
 use std::{io, time::Duration};
 use tokio::time::{Instant, sleep, sleep_until, timeout, timeout_at};
 
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Waits for control to queue a move from the arrived `identity`, then prepares its destination.
+/// Waits for control to queue a move from the arrived `identity`, then prepares its destination, which a move places in
+/// the release `current` names.
 pub(super) async fn next_move(
     source: &ClaimGuard,
     identity: &ClaimIdentity,
     protocol: i32,
+    current: &Retarget,
 ) -> io::Result<(ClaimGuard, Assignment)> {
     let mut abandoned: Option<ClaimGuard> = None;
     // A view past an abandonment no longer shows its move, and failures are final.
@@ -38,15 +40,22 @@ pub(super) async fn next_move(
         });
         let pending = pending.await?;
         let demand = pending.destination.ok_or_else(|| invalid_data("move without destination"))?;
+        let platform = current.platform();
         let claim = Claim {
             operation_id: pending.operation_id,
             demand,
             source: Some(identity.clone()),
+            deployment: platform.target.deployment.clone(),
             ..source.claim.clone()
         };
-        let mut guard = ClaimGuard { platform: source.platform.clone(), claim, armed: true, failure: None };
-        match prepare(source, &guard, protocol).await {
-            Ok(assignment) => return Ok((guard, assignment)),
+        let mut guard = ClaimGuard { platform, claim, armed: true, failure: None };
+        match prepare(source, &mut guard, protocol).await {
+            Ok(Some(assignment)) => return Ok((guard, assignment)),
+            // The deployment that approved the move is no longer current, so a newer one approves it again.
+            Ok(None) => {
+                guard.armed = false;
+                sleep(RETRY_INTERVAL).await;
+            }
             Err(error) => {
                 let reason = failure_reason(&error);
                 let reason = if reason.is_empty() { "move preparation failed".into() } else { reason };
@@ -58,11 +67,13 @@ pub(super) async fn next_move(
     }
 }
 
-async fn prepare(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Assignment> {
+/// Prepares `destination` under its deployment's approval, or returns `None` when core no longer places moves there.
+/// A move core already reserved in another deployment is approved there too, and `destination` is bound to it.
+async fn prepare(source: &ClaimGuard, destination: &mut ClaimGuard, protocol: i32) -> io::Result<Option<Assignment>> {
     let deadline = Instant::now() + WAIT_TIMEOUT;
     let mut last_error = None;
     loop {
-        let error = match timeout_at(deadline, attempt(source, destination, protocol)).await {
+        let error = match timeout_at(deadline, attempt(source, &mut *destination, protocol)).await {
             Ok(Ok(assignment)) => return Ok(assignment),
             Ok(Err(error)) => error,
             Err(_) => {
@@ -96,17 +107,33 @@ fn preparation_timeout(last_error: Option<&io::Error>) -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, reason)
 }
 
-async fn attempt(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Assignment> {
-    let platform = &destination.platform;
-    check_move(platform, &destination.claim).await?;
-    platform.approve_move(&source.claim, &destination.claim).await?;
-    check_move(platform, &destination.claim).await?;
-    let assignment = claim(destination).await?.ok_or_else(|| invalid_data("core refused the move"))?;
+async fn attempt(source: &ClaimGuard, destination: &mut ClaimGuard, protocol: i32) -> io::Result<Option<Assignment>> {
+    check_move(&destination.platform, &destination.claim).await?;
+    // A reservation is admitted only by the deployment that placed it, whatever the current deployment says.
+    let (reservation, _): (ReservationResult, _) =
+        destination.platform.call("reservation", &destination.claim.operation_id, &(), RPC_TIMEOUT).await?;
+    if let Some(demand) = reservation.destination.filter(|_| !reservation.deployment.is_empty()) {
+        bind(destination, &reservation.deployment, demand);
+    }
+    let platform = destination.platform.clone();
+    platform.approve_move(&source.platform, &source.claim, &destination.claim).await?;
+    check_move(&platform, &destination.claim).await?;
+    let Some(assignment) = claim(destination).await? else { return Ok(None) };
+    if !assignment.deployment.is_empty() && assignment.deployment != destination.claim.deployment {
+        bind(destination, &assignment.deployment, assignment.destination.clone());
+        destination.platform.approve_move(&source.platform, &source.claim, &destination.claim).await?;
+    }
     if assignment.protocol != protocol {
         return Err(invalid_data("destination protocol differs from client"));
     }
-    check_move(platform, &destination.claim).await?;
-    Ok(assignment)
+    check_move(&destination.platform, &destination.claim).await?;
+    Ok(Some(assignment))
+}
+
+/// Binds `destination` to `deployment` and the `demand` its session serves.
+fn bind(destination: &mut ClaimGuard, deployment: &str, demand: SessionDemand) {
+    destination.platform = destination.platform.bind(deployment);
+    destination.claim = Claim { deployment: deployment.into(), demand, ..destination.claim.clone() };
 }
 
 /// Whether `error` may pass on a retry under the same operation ID.

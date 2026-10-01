@@ -338,6 +338,28 @@ struct Owner {
     activity: chunk_service::Activity,
     stopped: Arc<AtomicBool>,
     thread: std::sync::Mutex<Option<JoinHandle<()>>>,
+    retirements: Retirements,
+}
+
+/// A thread that runs the backend's retirements, so they finish whichever task or runtime started them. It ends when
+/// the backend is dropped.
+struct Retirements {
+    runtime: tokio::runtime::Handle,
+    _shutdown: oneshot::Sender<()>,
+}
+
+impl Retirements {
+    fn start() -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build()?;
+        let handle = runtime.handle().clone();
+        let (shutdown, closed) = oneshot::channel::<()>();
+        std::thread::Builder::new().name("chunk-retire".into()).spawn(move || {
+            runtime.block_on(async {
+                let _ = closed.await;
+            });
+        })?;
+        Ok(Self { runtime: handle, _shutdown: shutdown })
+    }
 }
 
 impl Owner {
@@ -387,6 +409,7 @@ impl Backend {
             activity: chunk_service::Activity::default(),
             stopped: Arc::default(),
             thread: std::sync::Mutex::new(None),
+            retirements: Retirements::start().expect("retirement thread"),
         }));
         (backend, incoming, memory)
     }
@@ -456,7 +479,7 @@ impl Backend {
         let thread = std::thread::Builder::new().name("chunk-environment".into()).spawn(move || {
             match Actor::new(store, outgoing, effects, action_bytes, readers, dequeued, retained) {
                 Ok(actor) => {
-                    if ready.send(Ok((actor.lane(), actor.activity()))).is_ok() {
+                    if ready.send(Ok((actor.lane(), actor.activity(), actor.retiring()))).is_ok() {
                         actor.run(incoming, &stop);
                     }
                 }
@@ -465,14 +488,15 @@ impl Backend {
                 }
             }
         })?;
-        let (lane, activity) = match initialized.recv().map_err(|_| Error::Closed).and_then(|ready| ready) {
+        let retirements = Retirements::start()?;
+        let (lane, activity, retiring) = match initialized.recv().map_err(|_| Error::Closed).and_then(|ready| ready) {
             Ok(ready) => ready,
             Err(error) => {
                 let _ = thread.join();
                 return Err(error);
             }
         };
-        Ok(Self(Arc::new(Owner {
+        let owner = Arc::new(Owner {
             environment,
             moves,
             secrets,
@@ -484,7 +508,13 @@ impl Backend {
             activity,
             stopped,
             thread: std::sync::Mutex::new(Some(thread)),
-        })))
+            retirements,
+        });
+        let backend = Self(owner);
+        for id in retiring {
+            backend.spawn_retirement(id, None);
+        }
+        Ok(backend)
     }
 
     /// Serves the moves actions ask for with `moves`, instead of any served before. Until then, an action's move fails.
@@ -647,7 +677,55 @@ impl Backend {
         self.submit(|reply| Command::Release { id, reply }).await
     }
 
-    /// The deployments resident beside each other, including one being released.
+    /// Retires `id`. One commit cancels its jobs and durably records it as retiring, and only then does the backend
+    /// refuse its new calls, reads and subscriptions with [`Error::Retired`] and close its subscriptions, so a restart
+    /// keeps refusing its work, never runs its jobs and completes the retirement itself. A job scheduled later by work
+    /// admitted earlier is cancelled when it commits. Waits for the running mutations and actions, then releases the
+    /// version. Returns whether it was resident.
+    /// # Errors
+    /// Reports an unavailable service or a failure to release.
+    pub async fn retire(&self, id: DeploymentId) -> Result<bool> {
+        let (done, finished) = oneshot::channel();
+        self.spawn_retirement(id, Some(done));
+        finished.await.map_err(|_| Error::Closed)?
+    }
+
+    /// Runs the retirement of `id` on the backend's own thread until it releases the version or the backend is dropped,
+    /// whatever happens to the caller waiting on `done`.
+    fn spawn_retirement(&self, id: DeploymentId, done: Option<oneshot::Sender<Result<bool>>>) {
+        let owner = Arc::downgrade(&self.0);
+        self.0.retirements.runtime.spawn(async move {
+            let mut cancelled = false;
+            let result = loop {
+                let Some(owner) = owner.upgrade() else { return };
+                let step = Self(owner).retire_step(&id, &mut cancelled).await;
+                if let Some(resident) = step.transpose() {
+                    break resident;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            };
+            if let Some(done) = done {
+                let _ = done.send(result);
+            }
+        });
+    }
+
+    /// One attempt to commit the retirement of `id`, then to release it; `None` while either is busy or overloaded.
+    async fn retire_step(&self, id: &DeploymentId, cancelled: &mut bool) -> Result<Option<bool>> {
+        if !*cancelled {
+            match self.cancel_deployment_jobs(id.clone()).await {
+                Ok(()) => *cancelled = true,
+                Err(Error::Busy | Error::Overloaded(_)) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        match self.release(id.clone()).await {
+            Err(Error::Busy | Error::Overloaded(_)) => Ok(None),
+            result => result.map(Some),
+        }
+    }
+
+    /// The deployments resident beside each other, oldest install first, including one being released.
     /// # Errors
     /// Reports an unavailable service.
     pub async fn deployments(&self) -> Result<Vec<DeploymentId>> {
@@ -755,6 +833,14 @@ impl Backend {
         })
         .await
         .map(|_| ())
+    }
+
+    /// Commits `deployment`'s retirement: its pending jobs cancelled, its running ones unknown, and it recorded as
+    /// retiring, which the actor then fences.
+    async fn cancel_deployment_jobs(&self, deployment: DeploymentId) -> Result<()> {
+        let bytes = deployment.as_str().len();
+        let command = chunk_store::JobCommand::CancelDeployment { deployment: deployment.as_str().into() };
+        self.submit_sized(bytes, |reply| Command::JobControl { command, reply }).await.map(|_| ())
     }
 
     /// Host-adapter handoff: durably install this exact alarm before acknowledging it.

@@ -64,8 +64,28 @@ pub struct Jobs {
 #[derive(Clone, Debug)]
 pub enum JobCommand {
     Recover,
-    Claim { id: String, attempt: u32, now: i64 },
-    Finish { id: String, attempt: u32, state: JobState, result: Option<Value> },
-    Forget { id: String, caller: Value },
-    AcknowledgeWake { generation: u64, due_at: Option<i64> },
+    Claim {
+        id: String,
+        attempt: u32,
+        now: i64,
+    },
+    Finish {
+        id: String,
+        attempt: u32,
+        state: JobState,
+        result: Option<Value>,
+    },
+    Forget {
+        id: String,
+        caller: Value,
+    },
+    /// Cancels the deployment's pending jobs and marks its running ones unknown, and in the same commit records the
+    /// deployment as retiring, so [`Storage::retiring`] keeps naming it until it is released.
+    CancelDeployment {
+        deployment: String,
+    },
+    AcknowledgeWake {
+        generation: u64,
+        due_at: Option<i64>,
+    },
 }

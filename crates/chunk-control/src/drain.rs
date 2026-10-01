@@ -1,10 +1,8 @@
-use chunk_proto::control::v1::ClaimRequest;
-use prost::Message;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
 use crate::{
-    Control, Error, MoveRequest, Result,
+    Control, Error, Result,
     state::{Capacity, Claim, Drain, Phase, State},
 };
 
@@ -34,13 +32,16 @@ pub(crate) fn retire_host(
 }
 
 impl Control {
-    /// Waits for `tasks`, advancing drains every second so evacuation deadlines still fire.
-    pub(crate) async fn join_progressing_drains(&self, mut tasks: JoinSet<()>) -> Result<()> {
+    /// Waits for `tasks`, advancing host drains and draining releases every second so their deadlines still fire.
+    pub(crate) async fn join_progressing(&self, mut tasks: JoinSet<()>) -> Result<()> {
         let mut drains = tokio::time::interval(Duration::from_secs(1));
         while !tasks.is_empty() {
             tokio::select! {
                 _ = tasks.join_next() => {}
-                _ = drains.tick() => self.progress_drains()?,
+                _ = drains.tick() => {
+                    self.progress_drains()?;
+                    self.progress_releases()?;
+                }
             }
         }
         Ok(())
@@ -58,15 +59,8 @@ impl Control {
             if claims.is_empty() || crate::now_ms() >= drain.deadline_ms {
                 releasing.push(drain.host.clone());
             } else {
-                for claim in claims.iter().filter(|c| c.phase == Phase::Arrived) {
-                    let source = ClaimRequest::decode(claim.request.as_slice())?;
-                    let result = self.move_player(MoveRequest {
-                        operation_id: uuid::Uuid::new_v4().to_string(),
-                        player_id: claim.player.clone(),
-                        demand: source.demand.unwrap_or_default(),
-                        source: None,
-                    });
-                    if let Err(error) = result {
+                for (operation, claim) in claims.iter().filter(|(_, c)| c.phase == Phase::Arrived) {
+                    if let Err(error) = self.move_player(crate::moves::evacuation(operation, claim)?) {
                         tracing::debug!(%error, "drain awaits pending player move");
                     }
                 }
@@ -102,6 +96,6 @@ pub(crate) fn player_host(state: &State, player: &str) -> Result<String> {
     Ok(host.clone())
 }
 
-fn open_claims<'a>(state: &'a State, host: &'a str) -> impl Iterator<Item = &'a Claim> {
-    state.claims.values().filter(move |c| c.phase != Phase::Released && state.sessions[&c.session].host == host)
+fn open_claims<'a>(state: &'a State, host: &'a str) -> impl Iterator<Item = (&'a String, &'a Claim)> {
+    state.claims.iter().filter(move |(_, c)| c.phase != Phase::Released && state.sessions[&c.session].host == host)
 }

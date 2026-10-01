@@ -4,6 +4,7 @@ mod callers;
 mod capacity;
 mod delivery;
 mod drain;
+mod draining;
 pub mod gateway;
 mod host;
 mod idle;
@@ -25,7 +26,8 @@ mod session_methods;
 mod sessions;
 mod state;
 mod sync;
-pub use callers::{ArrivedClaim, SessionScope, StoredClaim};
+pub use callers::{ArrivedClaim, Reservation, SessionScope, StoredClaim};
+pub use draining::{DrainPolicy, RECONNECT_GRACE};
 pub use nodes::NodeStatus;
 pub use session_methods::{CapturedSession, MethodOutcome, PreparedSessionMethod};
 
@@ -93,6 +95,10 @@ pub const NOT_HOSTED: &str = "the player's claim is not on this host";
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub environment: String,
+    /// Whether the caller, instead of control, retires drained releases through [`Control::due_releases`]. Control then
+    /// only moves arrived players away from releases past their maximum age. Not part of the durable configuration.
+    #[serde(skip)]
+    pub defers_retirement: bool,
 }
 
 /// One deployment version's apps, profiles and limits. Control runs every release that still has hosts, and new

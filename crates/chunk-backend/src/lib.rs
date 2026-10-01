@@ -31,6 +31,7 @@ mod system;
 mod timing;
 
 pub use actions::{ActionHandle, ActionId, ActionIdentity, ActionStatus};
+pub use actor::MAX_DEPLOYMENTS;
 pub use chunk_js::DeploymentId;
 pub use commands::{
     CommandCatalog, CommandEffect, CommandEffects, CommandIdentity, CommandRequest, CommandScope,
@@ -71,6 +72,8 @@ pub enum Error {
     Unknown,
     #[error("deployment is not ready")]
     NotReady,
+    #[error("deployment is retiring")]
+    Retired,
     #[error("operation ID was reused for a different request")]
     OperationMismatch,
     #[error("commit pipeline failed; recover the operation outcome after restarting the backend")]

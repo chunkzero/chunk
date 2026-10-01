@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Command, Options, Settings, Staged,
-    reload::{self, Change, Retirement},
+    reload::{self, Change, Drain},
     report::{self, Deployment, Reporter},
     services::{self, Observed, Shared, Version},
     short,
@@ -32,17 +32,17 @@ enum Trigger {
     Restart,
 }
 
-/// A running release; the current one has no retirement.
+/// A running release; the current one has no drain.
 struct Live {
     version: Version,
-    retirement: Option<Retirement>,
+    drain: Option<Drain>,
     nodes: Option<Vec<(String, Node)>>,
     players: Vec<(String, OperatorPlayer)>,
 }
 
 impl Live {
     fn new(version: Version) -> Self {
-        Self { version, retirement: None, nodes: None, players: Vec::new() }
+        Self { version, drain: None, nodes: None, players: Vec::new() }
     }
 }
 
@@ -228,24 +228,21 @@ impl<'a> Session<'a> {
     /// Starts `staged` beside the current release and routes new players to it.
     async fn deploy(&mut self, staged: Staged) -> io::Result<String> {
         self.check_environment(&staged)?;
-        let current = self.live.iter().position(|live| live.retirement.is_none());
+        let current = self.live.iter().position(|live| live.drain.is_none());
         let change =
             current.map_or(Change::Jvm, |index| reload::classify(&self.live[index].version.release, &staged.release));
         let drain = Duration::from_secs(self.options.drain_seconds);
         let (deadline, summary) = match change {
             Change::Unchanged => return Ok("no changes".into()),
             Change::Backend => (None, "backend only; existing sessions stay pinned".to_owned()),
-            Change::Jvm => (
-                Some(Instant::now() + drain),
-                format!("JVM change; earlier releases drain within {}s", drain.as_secs()),
-            ),
+            Change::Jvm => (Some(drain), format!("JVM change; earlier releases drain within {}s", drain.as_secs())),
         };
         let id = staged.release.id.clone();
         let resumed = self.live.iter().position(|live| live.version.release.id == id);
         let next = if let Some(index) = resumed {
             self.shared.activate(&self.live[index].version)?;
             self.shared.route(&self.live[index].version)?;
-            self.live[index].retirement = None;
+            self.live[index].drain = None;
             index
         } else {
             let version = self.launch(staged).await?;
@@ -254,9 +251,9 @@ impl<'a> Session<'a> {
         };
         for (index, live) in self.live.iter_mut().enumerate().filter(|(index, _)| *index != next) {
             if Some(index) == current {
-                live.retirement = Some(deadline.map_or_else(Retirement::pinned, Retirement::until));
-            } else if let (Some(deadline), Some(retirement)) = (deadline, &mut live.retirement) {
-                retirement.drain_by(deadline);
+                live.drain = Some(Drain::until(deadline));
+            } else if let (Some(deadline), Some(drain)) = (deadline, &mut live.drain) {
+                drain.drain_within(deadline);
             }
         }
         let resumed = if resumed.is_some() { " resumed" } else { "" };
@@ -296,7 +293,7 @@ impl<'a> Session<'a> {
         Ok(version)
     }
 
-    /// Takes every release's latest nodes and players and stops retiring releases that are due.
+    /// Takes every release's latest nodes and players, and drains each replaced release in control until it stops.
     fn observe(&mut self, observed: &watch::Receiver<Option<Observed>>) -> io::Result<()> {
         if self.shared.failed() {
             return Err(io::Error::other("local backend or proxy stopped"));
@@ -332,13 +329,22 @@ impl<'a> Session<'a> {
             self.release(deployment);
         }
         let now = Instant::now();
+        let control = self.shared.control().ok();
         let mut index = 0;
         while index < self.live.len() {
-            let live = &mut self.live[index];
-            let due = live.retirement.as_mut().is_some_and(|retirement| retirement.due(live.nodes.as_deref(), now));
-            if due {
+            let live = &self.live[index];
+            let stopped = match (&live.drain, &control) {
+                (Some(drain), Some(control)) => {
+                    control.drain_release(&live.version.deployment, drain.policy()).unwrap_or_else(|error| {
+                        tracing::warn!(%error, deployment = live.version.deployment, "release not draining");
+                        false
+                    })
+                }
+                _ => false,
+            };
+            if stopped {
                 let live = self.live.remove(index);
-                self.retire(live.version);
+                self.stopped(live.version);
             } else {
                 index += 1;
             }
@@ -350,7 +356,7 @@ impl<'a> Session<'a> {
                 .rev()
                 .map(|live| Deployment {
                     id: live.version.release.id.clone(),
-                    state: live.retirement.as_ref().map_or_else(|| "current".into(), |r| r.describe(now)),
+                    state: live.drain.as_ref().map_or_else(|| "current".into(), |drain| drain.describe(now)),
                     nodes: live.nodes.clone().unwrap_or_default(),
                     players: live.players.clone(),
                     destinations: live.version.destinations.clone(),
@@ -389,11 +395,7 @@ impl<'a> Session<'a> {
         let Ok(control) = self.shared.control() else { return };
         for version in std::mem::take(&mut self.stopping) {
             match control.retire_release(&version.deployment) {
-                Ok(true) => {
-                    self.reporter.done("Retire", format!("{} stopped", short(&version.release.id)));
-                    self.stale = true;
-                    self.release(version.deployment);
-                }
+                Ok(true) => self.stopped(version),
                 Ok(false) => self.stopping.push(version),
                 Err(error) => {
                     tracing::warn!(%error, deployment = version.deployment, "retired release not yet stopping");
@@ -401,6 +403,13 @@ impl<'a> Session<'a> {
                 }
             }
         }
+    }
+
+    /// Releases the backend version of `version`, whose JVMs have all confirmed their exit.
+    fn stopped(&mut self, version: Version) {
+        self.reporter.done("Retire", format!("{} stopped", short(&version.release.id)));
+        self.stale = true;
+        self.release(version.deployment);
     }
 
     fn release(&mut self, deployment: String) {

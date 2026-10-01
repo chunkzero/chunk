@@ -66,7 +66,32 @@ impl Platform {
         .map_err(io::Error::other)?
     }
 
-    pub(in crate::server) async fn approve_move(&self, source: &Claim, destination: &Claim) -> io::Result<()> {
+    /// Admits `claim`'s login to its destination under this platform's deployment, which routing already admitted it
+    /// to in the deployment that routed it.
+    pub(in crate::server) async fn admit_login(&self, claim: &Claim) -> io::Result<()> {
+        tokio::time::timeout(RPC_TIMEOUT, async {
+            let Some(manifest) = self.manifest().await? else {
+                let player = &claim.player;
+                return self.admit(&json!({"uuid": player.uuid, "username": player.username}), None).await;
+            };
+            let mut payload = payload(claim);
+            payload["destination"] = demand_json(&claim.demand);
+            let scopes = ancestors(domain(&manifest, &claim.demand)?);
+            self.run_hooks(&manifest, HookEvent::PlayerLogin, &scopes, &payload, None).await?;
+            Ok(())
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    /// Approves `destination`'s move under this platform's deployment, which places it. The source's domain is the one
+    /// `source`'s deployment gives its claim.
+    pub(in crate::server) async fn approve_move(
+        &self,
+        source: &Self,
+        source_claim: &Claim,
+        destination: &Claim,
+    ) -> io::Result<()> {
         tokio::time::timeout(RPC_TIMEOUT, async {
             let Some(manifest) = self.manifest().await? else {
                 return self.legacy_approve_move(destination).await;
@@ -74,7 +99,10 @@ impl Platform {
             let demand = &destination.demand;
             let mut payload = payload(destination);
             payload["destination"] = demand_json(demand);
-            payload["sourceDomain"] = domain(&manifest, &source.demand)?.into();
+            payload["sourceDomain"] = match source.manifest().await? {
+                Some(source_manifest) => domain(&source_manifest, &source_claim.demand)?.into(),
+                None => "".into(),
+            };
             let scopes = ancestors(domain(&manifest, demand)?);
             // The player holds their source claim throughout.
             let player = Some(destination.player.uuid.as_str());

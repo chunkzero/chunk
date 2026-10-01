@@ -4,12 +4,9 @@ use std::{
 };
 
 use chunk_build::Release;
-use chunk_proto::sync::v1::{Node, NodePhase};
+use chunk_control::DrainPolicy;
 use notify::{EventKind, RecursiveMode, Watcher as _};
 use tokio::sync::mpsc;
-
-/// How long a retiring release must stay empty before it stops.
-const SETTLE: Duration = Duration::from_secs(10);
 
 const IGNORED: [&str; 8] = ["build", ".gradle", ".chunk", ".git", ".idea", ".kotlin", "node_modules", "dist"];
 
@@ -31,50 +28,35 @@ pub(super) fn classify(current: &Release, next: &Release) -> Change {
     }
 }
 
-/// When a replaced release stops: once it is empty, or at a drain deadline that disconnects remaining players.
-pub(super) struct Retirement {
-    deadline: Option<Instant>,
-    empty_since: Option<Instant>,
+/// A replaced release draining in control, which stops it once its sessions have no players, or at its deadline.
+pub(super) struct Drain {
+    since: Instant,
+    /// How long after `since` the release stops, whoever remains.
+    deadline: Option<Duration>,
 }
 
-impl Retirement {
-    /// Keeps existing sessions on the old version until their players leave.
-    pub fn pinned() -> Self {
-        Self { deadline: None, empty_since: None }
+impl Drain {
+    /// Keeps existing sessions on the old version until their players leave, or until `deadline` after now.
+    pub fn until(deadline: Option<Duration>) -> Self {
+        Self { since: Instant::now(), deadline }
     }
 
-    pub fn until(deadline: Instant) -> Self {
-        Self { deadline: Some(deadline), empty_since: None }
-    }
-
-    /// Applies `deadline` unless an earlier one is already set; used when a JVM change supersedes pinned sessions.
-    pub fn drain_by(&mut self, deadline: Instant) {
+    /// Stops the release `within` from now unless it stops sooner anyway; used when a JVM change supersedes pinned
+    /// sessions.
+    pub fn drain_within(&mut self, within: Duration) {
+        let deadline = self.since.elapsed() + within;
         self.deadline = Some(self.deadline.map_or(deadline, |current| current.min(deadline)));
     }
 
-    /// Whether the release can stop now; `nodes` is `None` while its control is unreachable.
-    pub fn due(&mut self, nodes: Option<&[(String, Node)]>, now: Instant) -> bool {
-        if self.deadline.is_some_and(|deadline| now >= deadline) {
-            return true;
-        }
-        let Some(nodes) = nodes else { return false };
-        let live: Vec<_> =
-            nodes.iter().map(|(_, node)| node).filter(|node| node.phase() != NodePhase::Stopped).collect();
-        if live.is_empty() {
-            return true;
-        }
-        if live.iter().any(|node| {
-            node.phase() == NodePhase::Starting || node.health.as_ref().is_some_and(|health| health.players > 0)
-        }) {
-            self.empty_since = None;
-            return false;
-        }
-        now.duration_since(*self.empty_since.get_or_insert(now)) >= SETTLE
+    /// Control's policy: the deadline as a duration from when the drain started.
+    pub fn policy(&self) -> DrainPolicy {
+        DrainPolicy { max_age: None, deadline: self.deadline }
     }
 
     pub fn describe(&self, now: Instant) -> String {
-        match self.deadline {
-            Some(deadline) => format!("drains in {}s", deadline.saturating_duration_since(now).as_secs()),
+        match self.deadline.map(|deadline| (self.since + deadline).saturating_duration_since(now)) {
+            Some(remaining) if remaining.is_zero() => "stopping".into(),
+            Some(remaining) => format!("drains in {}s", remaining.as_secs()),
             None => "pinned".into(),
         }
     }

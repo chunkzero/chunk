@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::{Error, Result};
 
 pub(super) fn load(connection: &Connection) -> Result<Vec<Deployment>> {
-    let mut statement = connection.prepare("SELECT contract FROM _chunk_deployments ORDER BY id")?;
+    let mut statement = connection.prepare("SELECT contract FROM _chunk_deployments ORDER BY rowid")?;
     let contracts = statement.query_map([], |row| row.get::<_, String>(0))?;
     let mut deployments = Vec::new();
     for contract in contracts {
@@ -62,6 +62,22 @@ pub(super) fn insert(transaction: &Connection, deployment: &Deployment) -> Resul
     Ok(())
 }
 
+pub(super) fn retiring(connection: &Connection) -> Result<Vec<String>> {
+    let mut statement = connection.prepare(
+        "SELECT id FROM _chunk_deployments WHERE id IN (SELECT id FROM _chunk_retired_deployments) ORDER BY rowid",
+    )?;
+    Ok(statement.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Records a retained deployment as retiring, which its release completes.
+pub(super) fn retire(transaction: &Connection, id: &str) -> Result<()> {
+    transaction.execute(
+        "INSERT OR IGNORE INTO _chunk_retired_deployments SELECT id FROM _chunk_deployments WHERE id = ?1",
+        [id],
+    )?;
+    Ok(())
+}
+
 pub(super) fn release(transaction: &Connection, id: &str) -> Result<bool> {
     let referenced: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM _chunk_jobs WHERE deployment=?1 AND state IN ('pending','running'))",
@@ -73,7 +89,7 @@ pub(super) fn release(transaction: &Connection, id: &str) -> Result<bool> {
     }
     let removed = transaction.execute("DELETE FROM _chunk_deployments WHERE id = ?1", [id])? != 0;
     if removed {
-        transaction.execute("INSERT INTO _chunk_retired_deployments VALUES (?1)", [id])?;
+        transaction.execute("INSERT OR IGNORE INTO _chunk_retired_deployments VALUES (?1)", [id])?;
     }
     Ok(removed)
 }

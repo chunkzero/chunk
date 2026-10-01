@@ -189,13 +189,17 @@ fn parse(path: &Path, app: bool) -> io::Result<Declaration> {
                 return Err(invalid(path, "implementations requires at most 128 valid implementation IDs"));
             }
             let fields = object_fields(path, value)?;
-            if fields.keys().any(|name| !["runtime", "config"].contains(name)) {
+            if fields.keys().any(|name| !["runtime", "config", "reconnect"].contains(name)) {
                 return Err(invalid(path, "unsupported implementation field"));
             }
-            sessions.insert(
-                name.into(),
-                fields.get("runtime").map(|value| runtime_requirements(path, value)).transpose()?.unwrap_or_default(),
-            );
+            let mut requirements =
+                fields.get("runtime").map(|value| runtime_requirements(path, value)).transpose()?.unwrap_or_default();
+            requirements.reconnect = match fields.get("reconnect") {
+                Some(Expression::BooleanLiteral(value)) => Some(value.value),
+                Some(_) => return Err(invalid(path, "reconnect must be a literal boolean")),
+                None => None,
+            };
+            sessions.insert(name.into(), requirements);
         }
     }
     if fields.contains_key("implementations") && sessions.is_empty() {

@@ -16,12 +16,14 @@ mod telemetry;
 mod usage;
 
 use crate::{Core, CoreConfig, Gateway, GatewayConfig};
-use activation::Activation;
+use activation::{Activation, Records};
+use chunk_control::DrainPolicy;
 use chunk_management::{Client, Code, v1};
 pub(crate) use launcher::{Lease, ManagementLauncher};
 pub(crate) use log_store::renewing;
 use log_store::{LogStore, Renewal, Renewer};
 use std::{
+    collections::BTreeSet,
     io,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -83,6 +85,8 @@ pub(crate) struct Managed<'a> {
     /// The gateway to start once a deployment is active.
     gateway_config: Option<GatewayConfig>,
     deployments: Mutex<Deployments>,
+    /// The backend retirements in flight.
+    retirements: retire::Retirements,
     reporter: status::Reporter,
     alarm: alarm::Alarm,
     idle: idle::Idle,
@@ -115,6 +119,8 @@ struct Deployments {
     loading: Option<String>,
     /// The latest deployment this core rejected, and why.
     rejected: Option<(String, String)>,
+    /// How replaced deployments drain, from the latest desired state this process received.
+    drain: DrainPolicy,
 }
 
 impl Deployments {
@@ -197,6 +203,7 @@ impl<'a> Managed<'a> {
             gateway,
             gateway_config,
             deployments: Mutex::default(),
+            retirements: retire::Retirements::default(),
             stopping,
         }
     }
@@ -298,16 +305,18 @@ impl<'a> Managed<'a> {
         error
     }
 
-    /// Protects an activation an earlier run recorded until management accepts it, if control made it current.
+    /// Protects an activation an earlier run recorded until management accepts it, and restores the deployments it
+    /// was to stop, if control made it current.
     fn recover(&self) -> io::Result<()> {
-        let Some(recorded) = activation::read(&self.activation)? else { return Ok(()) };
         let current = self.core.control()?.current_release().map_err(io::Error::other)?;
-        if current.as_ref() == Some(&recorded.activated) {
-            lock(&self.deployments).unacknowledged = Some(recorded);
-            Ok(())
-        } else {
-            activation::clear(&self.activation)
-        }
+        let activations = activation::recorded::<Activation>(&self.activation)?;
+        let unacknowledged = [activations.pending, activations.committed]
+            .into_iter()
+            .flatten()
+            .find(|recorded| current.as_ref() == Some(&recorded.activated));
+        Records { committed: unacknowledged.as_ref(), pending: None }.store(&self.activation)?;
+        lock(&self.deployments).unacknowledged = unacknowledged;
+        Ok(())
     }
 
     async fn follow(&self) -> io::Error {
@@ -361,7 +370,9 @@ impl<'a> Managed<'a> {
                         let mut deployments = lock(&self.deployments);
                         deployments.revision = desired.revision;
                         deployments.desired = Some(desired.deployment_id.clone());
+                        deployments.drain = retire::drain_policy(&desired);
                     }
+                    self.apply_drain_policy(&desired);
                     if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
                         work.cancel.cancel();
                     }
@@ -476,26 +487,46 @@ impl<'a> Managed<'a> {
         if cancel.is_cancelled() {
             return Ok(false);
         }
-        self.core.deploy(loaded.bundle(deployment)).await?;
+        if !self.core.deploy_when_free(loaded.bundle(deployment), cancel).await? {
+            return Ok(false);
+        }
+        let resident = match self.core.backend() {
+            Some(backend) => backend.deployments().await.map_err(io::Error::other)?,
+            None => return Err(io::Error::other("backend is not running")),
+        };
         // Nothing awaits between this check and switching traffic, so the attach loop cannot supersede it meanwhile.
         if cancel.is_cancelled() {
             return Ok(false);
         }
-        // Recorded first, so a crash once control has activated it still protects the predecessor. Activating the
-        // unaccepted deployment again keeps its predecessor.
-        let current = self.core.control()?.current_release().map_err(io::Error::other)?;
-        let predecessor = match &lock(&self.deployments).unacknowledged {
+        let control = self.core.control()?;
+        let current = control.current_release().map_err(io::Error::other)?;
+        let mut deployments = lock(&self.deployments);
+        // Recorded beside the committed record first, so a crash once control has activated it still protects the
+        // predecessor, and one before keeps what the record held. Activating the unaccepted deployment again keeps its
+        // predecessor.
+        let predecessor = match &deployments.unacknowledged {
             Some(pending) if pending.activated == *deployment => pending.predecessor.clone(),
-            _ => current.filter(|current| current != deployment),
+            _ => current.clone().filter(|current| current != deployment),
         };
         let pending = Activation { predecessor, activated: deployment.clone() };
-        activation::write(&self.activation, &pending)?;
+        let stop = if desired.stop_previous {
+            resident.iter().map(|id| id.as_str().to_owned()).collect()
+        } else {
+            BTreeSet::new()
+        };
+        let earlier = deployments.unacknowledged.clone();
+        Records { committed: earlier.as_ref(), pending: Some(&pending) }.store(&self.activation)?;
         let release = loaded.control(&self.environment, deployment);
-        if let Err(error) = self.core.activate(release) {
-            _ = activation::clear(&self.activation);
+        if let Err(error) = self.core.activate_stopping(release, deployments.drain, &stop) {
+            _ = Records { committed: earlier.as_ref(), pending: None }.store(&self.activation);
             return Err(error);
         }
-        lock(&self.deployments).unacknowledged = Some(pending);
+        // Should these writes fail, recovery promotes the pending records of an activation control committed.
+        let activation = Records { committed: Some(&pending), pending: None }.store(&self.activation);
+        if let Err(error) = activation {
+            tracing::warn!(%error, "activation not recorded as committed");
+        }
+        deployments.unacknowledged = Some(pending);
         Ok(true)
     }
 

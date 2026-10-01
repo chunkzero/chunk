@@ -18,6 +18,11 @@ export interface AppRuntime {
 export interface ImplementationOptions {
   readonly runtime?: AppRuntime;
   readonly config?: ObjectValidator<Shape>;
+  /**
+   * Whether a player who leaves one of its sessions while its release drains returns to that session on logging in
+   * again. Defaults to true; set false for sessions such as lobbies that should follow the current release.
+   */
+  readonly reconnect?: boolean;
 }
 type Implementations = Readonly<Record<string, ImplementationOptions>>;
 type Config<I extends ImplementationOptions> = I extends { readonly config: infer V extends ObjectValidator<Shape> }

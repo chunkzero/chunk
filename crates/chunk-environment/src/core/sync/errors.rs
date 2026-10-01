@@ -42,6 +42,7 @@ pub(super) fn backend(failure: &chunk_backend::Error) -> Error {
         },
         Backend::Busy
         | Backend::NotReady
+        | Backend::Retired
         | Backend::Retry
         | Backend::Closed
         | Backend::Cancelled

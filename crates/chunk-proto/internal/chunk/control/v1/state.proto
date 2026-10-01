@@ -14,6 +14,9 @@ message ClaimRequest {
   // accepts logins, and otherwise rejects it as unavailable so the proxy routes it again. Empty uses the current
   // release; a move stays on its source's release.
   string deployment = 7;
+  // The session of a draining release a login returns to, which the gateway admitted it to. Control reserves the login
+  // only there, and rejects it as unavailable when the session no longer takes it. Empty places it by its demand.
+  string reconnect_session = 8;
 }
 
 message SessionDemand {
@@ -48,6 +51,8 @@ message Assignment {
   PlayerDelivery delivery = 3;
   ConfigurationResponse configuration = 4;
   PlayerPreparation preparation = 5;
+  // The session's destination. Control fills it in when it answers a claim and does not store it.
+  SessionDemand destination = 6;
 }
 
 enum ClaimPhase {

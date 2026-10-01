@@ -59,7 +59,7 @@ async fn refused(gateway: &Gateway) {
 async fn shutdown_refuses_new_claims_while_it_awaits_admitted_ones() {
     let launches = Launches::default();
     let mut fixture = Fixture::with_host(Arc::new(launches.clone())).await;
-    fixture.control.activate_release(runtime::release()).unwrap();
+    fixture.control.activate_release(runtime::release(), chunk_control::DrainPolicy::default()).unwrap();
     let (updates, gateway) = Gateway::follow(&mut fixture).await;
     // Until its JVM registers, an admitted claim waits for it. Control launches the host once the claim reserved it.
     let admitted = tokio::spawn({
@@ -125,7 +125,7 @@ async fn reopen(fixture: &Fixture) -> io::Result<()> {
         connection: fixture.directory.path().join("control.json"),
         listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
         network: None,
-        control: chunk_control::Config { environment: "test".into() },
+        control: chunk_control::Config { environment: "test".into(), defers_retirement: false },
         host: Arc::new(Host),
         fresh: false,
         services: None,

@@ -83,6 +83,7 @@ impl Store {
             config: meta.config,
             method_sequence: meta.method_sequence,
             current: meta.current,
+            stopping: meta.stopping,
             releases: scan(&snapshot, RELEASES, budget)?,
             hosts: scan(&snapshot, HOSTS, budget)?,
             sessions: scan(&snapshot, SESSIONS, budget)?,
@@ -115,11 +116,13 @@ impl Store {
         if previous.config != next.config
             || previous.method_sequence != next.method_sequence
             || previous.current != next.current
+            || previous.stopping != next.stopping
         {
             let meta = Meta {
                 config: next.config.clone(),
                 method_sequence: next.method_sequence,
                 current: next.current.clone(),
+                stopping: next.stopping.clone(),
             };
             writes.put(key(META, "control")?, meta)?;
         }
@@ -224,8 +227,12 @@ fn schema() -> DatabaseSchema {
     }});
     let strings = json!({"type": "array", "items": string});
     let tables = json!({
-        META: {"config": string, "method_sequence": integer, "current?": string},
-        RELEASES: {"release": string, "retired": boolean},
+        META: {"config": string, "method_sequence": integer, "current?": string, "stopping?": strings},
+        RELEASES: {"release": string, "retired": boolean, "drain?": {"type": "object", "fields": {
+            "since": {"schema": integer},
+            "reconnects_until": {"schema": integer, "optional": true},
+            "stops_at": {"schema": integer, "optional": true},
+        }}},
         HOSTS: {
             "release?": string, "app": string, "profile": string, "retired": boolean, "idle_since_ms?": integer,
             "capacity?": {"type": "enum", "values": Capacity::NAMES}, "failure?": string,

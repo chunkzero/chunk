@@ -26,7 +26,14 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
       const releaseId = required(request.releaseId, "release_id");
       return idempotent({ sql, keys, caller, method: DeploymentService.method.deploy, request }, async (tx) => {
         const environment = await loadEnvironment(tx, caller, request.environmentId, { lock: true });
-        const deployment = await createDeployment(tx, environment, releaseId, DeploymentTrigger.DEPLOY, deps.jvmImage);
+        const deployment = await createDeployment(
+          tx,
+          environment,
+          releaseId,
+          DeploymentTrigger.DEPLOY,
+          deps.jvmImage,
+          request.stopPrevious,
+        );
         return create(DeployResponseSchema, { deployment });
       });
     },

@@ -93,16 +93,8 @@ impl Control {
                     Ok(destination)
                 })
                 .collect::<Result<Vec<_>>>()?;
-            // Every member moves within its source's release, so all of them must share one.
-            let releases =
-                destinations.iter().map(|destination| state.placing(destination)).collect::<Result<Vec<_>>>()?;
-            let [(name, release), rest @ ..] = releases.as_slice() else {
-                return Err(Error::Invalid("invalid roster"));
-            };
-            if rest.iter().any(|(other, _)| other != name) {
-                return Err(Error::Invalid("roster members run different releases"));
-            }
-            let session = select_room(state, name, release, &request.demand, &unavailable, destinations.len())?;
+            let (name, release) = state.placing(destinations.first().ok_or(Error::Invalid("invalid roster"))?, "")?;
+            let session = select_room(state, &name, &release, &request.demand, &unavailable, destinations.len())?;
             for destination in &destinations {
                 let owner = owner(state, destination)?;
                 insert_claim(state, destination, owner, session.clone(), Some(request.operation_id.clone()))?;

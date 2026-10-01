@@ -165,3 +165,26 @@ async fn malformed_or_undeclared_creation_is_rejected_before_reservation_or_laun
     assert!(pending_move(&control, &source).is_none());
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn a_session_keeps_its_own_release_creation_configuration_while_a_newer_release_is_current() {
+    let mut fixture = Fixture::new();
+    configured_destinations(&mut fixture);
+    let control = fixture.control().await;
+    control.claim(demand("before", "small")).await.unwrap();
+    let mut next = fixture.release.clone();
+    next.deployment.deployment = "next".into();
+    let small = next.contracts.destinations.as_mut().unwrap().entries.get_mut("apps/bridge/destinations/small");
+    small.unwrap().creation.as_mut().unwrap().configuration = json!({"map":"desert"});
+    control.activate_release(next, crate::DrainPolicy::default()).unwrap();
+    let after = ClaimRequest { deployment: "next".into(), ..demand("after", "small") };
+    control.claim(after).await.unwrap();
+    let state = control.state().unwrap();
+    let session = |operation: &str| state.claims[operation].session.clone();
+    assert_ne!(session("before"), session("after"));
+    assert_eq!(state.sessions[&session("before")].configuration, json!({"map":"forest"}));
+    assert_eq!(state.sessions[&session("after")].configuration, json!({"map":"desert"}));
+    let commands = fixture.runtime.sessions.lock().unwrap().clone();
+    assert_eq!(commands[&session("before")].configuration_json, br#"{"map":"forest"}"#);
+    fixture.close().await;
+}
