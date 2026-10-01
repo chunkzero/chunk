@@ -243,6 +243,20 @@ fn migration_snapshots_must_follow_their_declared_changes() {
     ];
     validate_migrations(&good).unwrap();
 
+    let additive = |schema| entry("0002_additive", MigrationKind::Additive, None, &[], schema);
+    let mut grown = old.clone();
+    grown
+        .get_mut("fighters")
+        .unwrap()
+        .fields
+        .insert("nickname".into(), Field { schema: Schema::String, optional: true });
+    validate_migrations(&[baseline.clone(), additive(grown.clone())]).unwrap();
+    let mut required = grown.clone();
+    required.get_mut("fighters").unwrap().fields.get_mut("nickname").unwrap().optional = false;
+    for schema in [required, new.clone()] {
+        assert!(validate_migrations(&[baseline.clone(), additive(schema)]).is_err());
+    }
+
     let undeclared = schema(&[("name", Schema::Number)]);
     let wrong_table = [("players", table(&["displayName"], &["name"], true))];
     let rejected = [

@@ -1,0 +1,69 @@
+{
+  "fighters": {
+    "fields": {
+      "captures": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      },
+      "deaths": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      },
+      "kills": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      },
+      "matches": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      },
+      "name": {
+        "schema": {
+          "type": "string"
+        },
+        "optional": false
+      },
+      "player": {
+        "schema": {
+          "type": "player"
+        },
+        "optional": false
+      },
+      "rankCaptures": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      },
+      "rankWins": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      },
+      "wins": {
+        "schema": {
+          "type": "integer"
+        },
+        "optional": false
+      }
+    },
+    "indexes": {
+      "by_player": [
+        "player"
+      ],
+      "by_rank": [
+        "rankWins",
+        "rankCaptures"
+      ]
+    }
+  }
+}

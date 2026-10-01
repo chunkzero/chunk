@@ -20,6 +20,8 @@ const MAX_MIGRATIONS: usize = 256;
 ///   is present only where `MigrationTable::back` is set.
 /// - `Finish` drops the old shape of the expand named by `finishes`. Its `tables` repeat that expand's `removed`
 ///   fields, and `schema` is unchanged.
+/// - `Additive` records changes that need no migration: new tables, new optional fields and index changes. It has no
+///   source and no tables, and `schema` is the previous snapshot plus only those changes.
 /// - `Baseline` comes first in its namespace and stands in for every earlier entry numbered up to its own, whose
 ///   resulting schema is `schema`. It has no tables.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ pub enum MigrationKind {
     Expand,
     Finish,
     Baseline,
+    Additive,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +118,11 @@ pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str>
                     return Err("a finish migration keeps the schema and repeats exactly its expand's removed fields");
                 }
             }
+            MigrationKind::Additive => {
+                if migration.finishes.is_some() || !migration.tables.is_empty() || !only_additions(before, migration) {
+                    return Err("an additive migration has no tables and only adds to the previous snapshot");
+                }
+            }
             MigrationKind::Baseline => {
                 if !first || migration.finishes.is_some() || !migration.tables.is_empty() {
                     return Err("a baseline comes first in its namespace and has no tables");
@@ -123,6 +131,16 @@ pub fn validate_migrations(migrations: &[Migration]) -> Result<(), &'static str>
         }
     }
     Ok(())
+}
+
+/// Whether `additive.schema` keeps every field of `before` and adds only optional fields.
+fn only_additions(before: &DatabaseSchema, additive: &Migration) -> bool {
+    before.iter().all(|(name, old)| {
+        additive.schema.get(name).is_some_and(|table| {
+            old.fields.iter().all(|(field, definition)| table.fields.get(field) == Some(definition))
+                && table.fields.iter().all(|(field, definition)| old.fields.contains_key(field) || definition.optional)
+        })
+    })
 }
 
 fn repeats_removed(expand: &Migration, finish: &Migration) -> bool {

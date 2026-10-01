@@ -36,7 +36,7 @@ pub(super) async fn run(options: Options) -> io::Result<()> {
     let session = Session::open()?;
     let (project, environment) = session.environment(&options.environment).await?;
     chunk_service::run(|stop| async move {
-        let local = building::prepare(&building::Options { project: options.path, output: None })?;
+        let local = building::prepare(&building::Options { project: options.path, output: None, frozen: false })?;
         cliclack::log::info("Building application release…")?;
         let built = building::execute(&local, BuildMode::Release, stop.clone(), Progress::default()).await?;
         let client = &session.client;

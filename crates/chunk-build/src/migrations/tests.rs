@@ -310,3 +310,81 @@ fn directory_has(project: &Path, number: &str) -> bool {
         .unwrap()
         .any(|entry| entry.unwrap().file_name().to_string_lossy().starts_with(number))
 }
+
+#[test]
+fn additive_changes_enter_history_before_later_breaking_ones() {
+    let project = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("server/schema")).unwrap();
+    write_schema(project.path(), "name: v.string()");
+    create(pending(project.path()).unwrap(), "init", &Renames::new()).unwrap();
+
+    write_schema(project.path(), "name: v.string(), nickname: v.optional(v.string())");
+    let error = require_recorded(project.path()).unwrap_err();
+    assert!(error.to_string().contains("additive"), "{error}");
+    assert!(!directory_has(project.path(), "0002"));
+    crate::compile(project.path(), output.path()).unwrap();
+    assert!(directory_has(project.path(), "0002"));
+    require_recorded(project.path()).unwrap();
+    check(project.path()).unwrap();
+
+    write_schema(project.path(), "name: v.string(), displayName: v.optional(v.string())");
+    let error = crate::compile(project.path(), output.path()).unwrap_err();
+    assert!(error.to_string().contains("chunk migrate new"), "{error}");
+    let renames = [("fighters".into(), [("nickname".into(), "displayName".into())].into())].into();
+    assert_eq!(create(pending(project.path()).unwrap(), "display_name", &renames).unwrap(), "0003_display_name");
+    crate::compile(project.path(), output.path()).unwrap();
+}
+
+#[test]
+fn tables_added_automatically_enter_history_too() {
+    let project = tempfile::tempdir().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("server/schema")).unwrap();
+    let write = |score: &str| {
+        fs::write(
+            project.path().join("server/schema/index.ts"),
+            format!("import {{defineSchema,defineTable,v}} from '#chunk/schema'; export default defineSchema({{fighters: defineTable({{name: v.string()}}), stats: defineTable({{score: v.{score}()}})}});"),
+        )
+        .unwrap();
+    };
+    write("number");
+    crate::compile(project.path(), output.path()).unwrap();
+    assert!(directory_has(project.path(), "0001"));
+    write("string");
+    let error = crate::compile(project.path(), output.path()).unwrap_err();
+    assert!(error.to_string().contains("chunk migrate new"), "{error}");
+    let changes = pending(project.path()).unwrap();
+    assert_eq!(changes.changes()["stats"].added, ["score"]);
+}
+
+#[test]
+fn a_second_squash_keeps_the_first_ones_cleanup_provenance() {
+    let project = tempfile::tempdir().unwrap();
+    let directory = project.path().join("server/migrations");
+    fs::create_dir_all(project.path().join("server/schema")).unwrap();
+    write_schema(project.path(), "a: v.string()");
+    let step = |to: &str, name: &str, from: &str| {
+        let pending =
+            pending_from(project.path().to_owned(), Journal::read(project.path()).unwrap(), schema(&[(to, false)]));
+        let renames = [("fighters".into(), [(from.into(), to.into())].into())].into();
+        create(pending, name, &renames).unwrap();
+    };
+    let start =
+        pending_from(project.path().to_owned(), Journal::read(project.path()).unwrap(), schema(&[("a", false)]));
+    create(start, "init", &Renames::new()).unwrap();
+    step("b", "to_b", "a");
+    finish(project.path(), "2").unwrap();
+    step("c", "to_c", "b");
+    let leftovers = ["0002_to_b.ts", "meta/0001.snapshot.json", "meta/0002.snapshot.json"]
+        .map(|file| (directory.join(file), fs::read(directory.join(file)).unwrap()));
+    let restore = || leftovers.iter().for_each(|(path, bytes)| fs::write(path, bytes).unwrap());
+
+    squash(project.path()).unwrap();
+    restore();
+    finish(project.path(), "4").unwrap();
+    restore();
+    squash(project.path()).unwrap();
+    check(project.path()).unwrap();
+    assert!(leftovers.iter().all(|(path, _)| !path.exists()));
+}

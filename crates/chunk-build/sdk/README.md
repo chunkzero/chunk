@@ -65,8 +65,9 @@ changing a field, or adding a required field to an existing table, needs a migra
 ### Migrations
 
 `server/migrations/` holds the migration journal: `NNNN_<name>.ts` files, `meta/journal.json`, and a
-`meta/NNNN.snapshot.json` of the full schema after each entry. `chunk build` fails until the last snapshot reaches
-`server/schema/` through additive changes only.
+`meta/NNNN.snapshot.json` of the full schema after each entry. `chunk dev` and `chunk build` record additive changes
+(new tables, optional fields and indexes) as an entry with only a snapshot, and fail on any other change until you run
+`chunk migrate new`. Commit what they write. `chunk build --frozen`, for CI, writes nothing and fails instead.
 
 - `chunk migrate new <name>` diffs `server/schema/` against the last snapshot, asks whether removed fields were renamed
   (`--rename table.old=new` answers without a terminal), and writes the migration. In a project without a journal it

@@ -72,7 +72,7 @@ pub fn create(pending: Pending, name: &str, renames: &Renames) -> io::Result<Str
         MigrationKind::Baseline
     } else if changes.is_empty() {
         return Err(io::Error::other(
-            "server/schema/ has no changes that need a migration; additive changes apply automatically",
+            "server/schema/ has no changes that need a migration; `chunk dev` and `chunk build` record additive ones",
         ));
     } else {
         MigrationKind::Expand
@@ -87,10 +87,7 @@ pub fn create(pending: Pending, name: &str, renames: &Renames) -> io::Result<Str
         replaced: BTreeMap::new(),
         hash: String::new(),
     };
-    let mut snapshot = schema;
-    for (table, shape) in journal.schema() {
-        snapshot.entry(table).or_insert(shape);
-    }
+    let snapshot = snapshot_of(&journal, schema);
     journal.push(entry, snapshot, source.as_deref())?;
     journal.remove_leftovers()?;
     crate::sdk::generate_sdk(&project)?;
@@ -165,7 +162,7 @@ pub fn squash(project: &Path) -> io::Result<String> {
         match entry.kind {
             MigrationKind::Expand => open += 1,
             MigrationKind::Finish => open -= 1,
-            MigrationKind::Baseline => {}
+            MigrationKind::Baseline | MigrationKind::Additive => {}
         }
         if open == 0 && index > 0 {
             end = Some(index + 1);
@@ -189,7 +186,9 @@ pub fn squash(project: &Path) -> io::Result<String> {
         replaced: BTreeMap::new(),
         hash: String::new(),
     };
-    entry.replaced = replaced_files(&journal.directory, &squashed)?;
+    entry.replaced = squashed.first().map(|first| first.replaced.clone()).unwrap_or_default();
+    entry.replaced.retain(|file, _| journal.directory.join(file).exists());
+    entry.replaced.extend(replaced_files(&journal.directory, &squashed)?);
     journal.append(entry, schema, None);
     for mut entry in rest {
         entry.prev = journal.entries.last().map(|last| last.hash.clone()).unwrap_or_default();
@@ -221,6 +220,60 @@ fn replaced_files(directory: &Path, entries: &[Entry]) -> io::Result<BTreeMap<St
         .into_iter()
         .map(|file| Ok((file.clone(), journal::file_hash(&std::fs::read(directory.join(&file))?))))
         .collect()
+}
+
+/// The snapshot after `schema`: its tables, and the recorded tables it no longer defines.
+fn snapshot_of(journal: &Journal, mut schema: DatabaseSchema) -> DatabaseSchema {
+    for (table, shape) in journal.schema() {
+        schema.entry(table).or_insert(shape);
+    }
+    schema
+}
+
+/// Appends an `Additive` entry when `schema` differs from the last snapshot only by changes that need no
+/// migration, and returns the journal with it. Fails on a change that needs one.
+pub(crate) fn record_additive(
+    project: &Path,
+    journal: &Journal,
+    schema: &DatabaseSchema,
+) -> io::Result<Option<Journal>> {
+    require_replayed(journal, schema)?;
+    let snapshot = snapshot_of(journal, schema.clone());
+    if snapshot == journal.schema() {
+        return Ok(None);
+    }
+    let _lock = Lock::acquire(project)?;
+    journal.require_unchanged(project)?;
+    journal.require_listed(true)?;
+    let mut journal = journal.clone();
+    let id = journal.next_id("additive")?;
+    let entry = Entry {
+        id: id.clone(),
+        kind: MigrationKind::Additive,
+        finishes: None,
+        prev: String::new(),
+        replaced: BTreeMap::new(),
+        hash: String::new(),
+    };
+    journal.push(entry, snapshot, None)?;
+    journal.remove_leftovers()?;
+    eprintln!("Recorded additive schema changes as migration {id} in server/migrations/meta/; commit it");
+    Ok(Some(journal))
+}
+
+/// Fails unless the journal records every change to `server/schema/`, as `chunk build --frozen` requires.
+/// # Errors
+/// Reports an invalid journal, a change that needs a migration, or additive changes not yet recorded.
+pub fn require_recorded(project: &Path) -> io::Result<()> {
+    let Pending { journal, schema, .. } = pending(project)?;
+    require_replayed(&journal, &schema)?;
+    if snapshot_of(&journal, schema) == journal.schema() {
+        return Ok(());
+    }
+    Err(io::Error::other(
+        "server/schema/ has additive changes the migration journal doesn't record. Run `chunk build` or `chunk dev` \
+         and commit server/migrations/",
+    ))
 }
 
 /// Fails unless the last snapshot reaches `schema` through changes that need no migration.

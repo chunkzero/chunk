@@ -135,6 +135,6 @@ jvm-image java="25":
 # Run a managed core whose JVM runs in the chunk-jvm image under podman, from a release of the local example.
 jvm-e2e: toolchain (jvm-image "25")
     rm -rf target/jvm-e2e
-    target/debug/chunk build examples/local --output target/jvm-e2e
+    target/debug/chunk build --frozen examples/local --output target/jvm-e2e
     CHUNK_E2E_IMAGE=chunk-jvm:25 CHUNK_E2E_RELEASE="$(realpath target/jvm-e2e/*.tar.gz)" \
         cargo test -p chunk-environment --lib runner_image -- --ignored --nocapture

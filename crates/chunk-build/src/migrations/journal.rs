@@ -62,6 +62,7 @@ pub(crate) struct Entry {
 }
 
 /// `server/migrations/meta/journal.json` with each entry's snapshot.
+#[derive(Clone)]
 pub(crate) struct Journal {
     pub directory: PathBuf,
     pub entries: Vec<Entry>,
@@ -317,7 +318,7 @@ impl Journal {
                             .collect()
                     })
                     .unwrap_or_default(),
-                MigrationKind::Baseline => BTreeMap::new(),
+                MigrationKind::Baseline | MigrationKind::Additive => BTreeMap::new(),
             };
             migrations.push(Migration {
                 id: entry.id.clone(),

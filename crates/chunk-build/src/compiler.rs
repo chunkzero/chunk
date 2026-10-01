@@ -52,7 +52,8 @@ pub(crate) fn compile_journal(project: &Path, output: &Path, journal: &crate::mi
         .collect();
     typecheck::check(&paths, &stage.chunk, staging.path())?;
     let (mut contract, backs) = bundle_and_extract(project, staging.path(), &files, migrations, &inventory)?;
-    crate::migrations::require_replayed(journal, &contract.tables)?;
+    let recorded = crate::migrations::record_additive(project, journal, &contract.tables)?;
+    let journal = recorded.as_ref().unwrap_or(journal);
     contract.contracts.migrations = journal.contract(&backs);
     for migration in contract.contracts.migrations.iter().filter(|migration| migration.kind == MigrationKind::Expand) {
         if !backs.get(&migration.id).is_some_and(|tables| tables.keys().eq(migration.tables.keys())) {

@@ -17,6 +17,9 @@ pub(crate) struct Options {
     /// Release output directory (defaults to PROJECT/dist).
     #[arg(long)]
     pub output: Option<PathBuf>,
+    /// Fail instead of recording additive schema changes in server/migrations/, for CI.
+    #[arg(long)]
+    pub frozen: bool,
 }
 
 pub(crate) struct Project {
@@ -60,6 +63,9 @@ pub(crate) fn inspect(root: PathBuf, output: PathBuf) -> io::Result<Project> {
 pub(crate) async fn run(options: Options) -> io::Result<()> {
     chunk_service::run(|stop| async move {
         let project = prepare(&options)?;
+        if options.frozen {
+            chunk_build::migrations::require_recorded(&project.root)?;
+        }
         cliclack::log::info("Building application release…")?;
         let built = execute(&project, BuildMode::Release, stop, Progress::default()).await?;
         warn_irreversible(&project.root.join(".chunk/build/backend/contract.json"))?;
