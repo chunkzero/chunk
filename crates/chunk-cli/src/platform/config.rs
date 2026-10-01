@@ -34,7 +34,7 @@ impl Target {
         }
     }
 
-    /// The URL without a trailing slash, equal for targets that reach the same API. It names the token's keychain entry.
+    /// The URL without a trailing slash, equal for targets that reach the same API.
     fn endpoint(&self) -> &str {
         self.url().trim_end_matches('/')
     }
@@ -125,7 +125,7 @@ pub(super) fn save(target: &Target, token: Secret) -> io::Result<()> {
 pub(super) fn load_at(path: &Path) -> io::Result<Config> {
     let config = load_from(path)?;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let config = Config { token: keychain::get(config.target.endpoint())?, ..config };
+    let config = Config { token: keychain::get(&account(path, &config.target)?)?, ..config };
     Ok(config)
 }
 
@@ -133,15 +133,30 @@ pub(super) fn save_at(path: &Path, target: &Target, token: Secret) -> io::Result
     let _lock = lock(path)?;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        let previous = load_from(path).ok().map(|config| config.target);
-        keychain::set(target.endpoint(), &token)?;
-        if let Some(previous) = previous.filter(|previous| previous.endpoint() != target.endpoint()) {
-            keychain::delete(previous.endpoint())?;
+        let previous = load_from(path).ok().map(|config| account(path, &config.target)).transpose()?;
+        let account = account(path, target)?;
+        keychain::set(&account, &token)?;
+        if let Some(previous) = previous.filter(|previous| *previous != account) {
+            keychain::delete(&previous)?;
         }
         save_to(path, &Config { target: target.clone(), token: None })
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     save_to(path, &Config { target: target.clone(), token: Some(token) })
+}
+
+/// The keychain account of the token saved by the configuration file at `path` for `target`: a digest of the file's
+/// absolute path and the exact endpoint, so each file owns its entry and endpoints that differ only in case stay apart.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn account(path: &Path, target: &Target) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    let path = std::path::absolute(path)?;
+    let digest = Sha256::new()
+        .chain_update(path.as_os_str().as_encoded_bytes())
+        .chain_update(b"\n")
+        .chain_update(target.endpoint())
+        .finalize();
+    Ok(digest[..16].iter().fold(String::from("chunk-"), |name, byte| name + &format!("{byte:02x}")))
 }
 
 pub(super) fn lock_path(path: &Path) -> PathBuf {
@@ -193,11 +208,12 @@ pub(super) fn forget_at(path: &Path, token: &Secret) -> io::Result<()> {
     let _lock = lock(path)?;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        let account = load_from(path)?.target;
-        if keychain::get(account.endpoint())?.as_ref() == Some(token) {
-            keychain::delete(account.endpoint())?;
+        let target = load_from(path)?.target;
+        let account = account(path, &target)?;
+        if keychain::get(&account)?.as_ref() == Some(token) {
+            keychain::delete(&account)?;
         }
-        Ok(())
+        save_to(path, &Config { target, token: None })
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {

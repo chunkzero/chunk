@@ -1,3 +1,5 @@
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use super::config::account;
 use super::config::{
     Config, Secret, Target, forget_at, load_at, load_from, lock, lock_path, parse_url, resolve, save_at, save_to,
 };
@@ -92,6 +94,16 @@ fn the_token_is_saved_in_one_place_and_forgotten_only_if_unchanged() {
     assert_eq!(load_at(&path).unwrap().token, Some(token()));
     forget_at(&path, &token()).unwrap();
     assert_eq!(load_at(&path).unwrap().token, None);
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn keychain_accounts_name_the_config_file_and_the_exact_endpoint() {
+    let own = account(std::path::Path::new("/a/chunk/config.json"), &custom("https://x.example/api")).unwrap();
+    assert_eq!(own.len(), "chunk-".len() + 32);
+    assert_eq!(own, account(std::path::Path::new("/a/chunk/config.json"), &custom("https://x.example/api/")).unwrap());
+    assert_ne!(own, account(std::path::Path::new("/b/chunk/config.json"), &custom("https://x.example/api")).unwrap());
+    assert_ne!(own, account(std::path::Path::new("/a/chunk/config.json"), &custom("https://x.example/API")).unwrap());
 }
 
 #[test]
