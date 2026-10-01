@@ -52,7 +52,7 @@ export function Environment() {
             </Fact>
             {environment.forkedFromEnvironmentId && (
               <Fact label="Forked from">
-                <span className="font-mono text-xs">{environment.forkedFromEnvironmentId}</span>
+                <span {...stylex.props(styles.mono)}>{environment.forkedFromEnvironmentId}</span>
               </Fact>
             )}
             <Fact label="Created">{timeAgo(environment.createTime)}</Fact>
