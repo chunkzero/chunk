@@ -34,6 +34,19 @@ Documents are records in `BackendTypes.Documents`. Generated constructors reject
 malformed Unicode, non-finite numbers and integers outside JavaScript's safe range, and deserialization rejects unknown
 fields and type coercions.
 
+### Variables
+
+`Vars` holds `chunk.toml`'s [variables](../../crates/chunk-build/sdk/README.md#variables-and-secrets) as constants,
+named as declared, with keyword clashes renamed as above. A variable `[vars]` sets is a `String`, and one only some
+`[env.<name>.vars]` set is an `Optional<String>`, which Kotlin unwraps with `getOrNull()`. The values are embedded and
+resolve once, when the class loads, for the environment `CHUNK_ENVIRONMENT_NAME` names, overriding `[vars]` key by key
+as the backend does; without it, only `[vars]` apply. Secrets are never generated.
+
+```java
+String motd = Vars.MOTD;
+Optional<String> store = Vars.STORE_URL; // set in [env.prod.vars] only
+```
+
 ## Testing
 
 `./gradlew :jvm:backend-api:test` generates its fixtures from `src/test/resources/contract.json` with

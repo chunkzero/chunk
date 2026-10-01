@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-/// Most variables one section may hold, and most secrets one environment may hold.
+/// Most variables one section may hold, most distinct variable names all sections may hold, and most secrets one
+/// environment may hold.
 pub const MAX_ENV_ENTRIES: usize = 256;
 /// Most bytes one variable or secret value may hold.
 pub const MAX_ENV_VALUE_BYTES: usize = 64 * 1024;
@@ -68,6 +69,10 @@ impl EnvManifest {
                     return Err(format!("{section}.{name} is also a required secret"));
                 }
             }
+        }
+        let names: BTreeSet<_> = self.vars.keys().chain(self.environments.values().flat_map(BTreeMap::keys)).collect();
+        if names.len() > MAX_ENV_ENTRIES {
+            return Err(format!("vars and env.<name>.vars name more than {MAX_ENV_ENTRIES} variables in all"));
         }
         if self.secrets.len() > MAX_ENV_ENTRIES {
             return Err(format!("secrets.required lists more than {MAX_ENV_ENTRIES} names"));

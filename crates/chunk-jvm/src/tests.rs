@@ -109,6 +109,7 @@ impl FakeCore {
             process_id: "process-1".into(),
             generation: 3,
             aot: self.script.aot.clone(),
+            environment_name: "prod".into(),
         }
     }
 }
@@ -314,6 +315,7 @@ async fn a_runner_retries_an_unavailable_core_then_starts_the_verified_release()
         ("CHUNK_APP_ID", "lobby"),
         ("CHUNK_ARTIFACT_DIGEST", &format!("{:x}", Sha256::digest(fs::read(jar).unwrap()))),
         ("CHUNK_PLAYER_ADDRESS", "127.0.0.1"),
+        ("CHUNK_ENVIRONMENT_NAME", "prod"),
     ] {
         assert_eq!(env.get(name), Some(&value), "{name}");
     }

@@ -258,6 +258,7 @@ impl Fixture {
                 archives.clone(),
                 aot.clone(),
                 "test".into(),
+                Some("prod".into()),
                 None,
                 Some(PRIVATE),
             )),

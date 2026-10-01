@@ -69,10 +69,11 @@ runs per project at a time. `--java PATH` overrides the Java executable Gradle s
 Java version. `--offline-logins` admits players without Mojang authentication, under offline-mode UUIDs; use it only for
 local testing.
 
-Backend functions read `chunk.toml`'s top-level `[vars]`, or with `--env NAME` its `[env.NAME.vars]` over them, key by
-key. Actions read their secrets from `.dev.vars` in the project root: `NAME=value` lines, with `#` comments and optional
-quotes. Keep it out of version control, as the project template's `.gitignore` does. `chunk dev` reads it on every
-rebuild, editing it triggers one, and it warns, by name only, about secrets `[secrets] required` lists that it lacks.
+Backend functions and the apps' generated `Vars` read `chunk.toml`'s top-level `[vars]`, or with `--env NAME` its
+`[env.NAME.vars]` over them, key by key. Actions read their secrets from `.dev.vars` in the project root: `NAME=value`
+lines, with `#` comments and optional quotes. Keep it out of version control, as the project template's `.gitignore`
+does. `chunk dev` reads it on every rebuild, editing it triggers one, and it warns, by name only, about secrets
+`[secrets] required` lists that it lacks.
 
 `chunk dev` watches the project's sources, except build output, `.chunk`, `dist`, `node_modules` and hidden files other
 than `.dev.vars`, and rebuilds 300 ms after the last change (`--no-watch` rebuilds only on request). A new release

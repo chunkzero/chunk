@@ -205,6 +205,11 @@ nested in other data, can still expose it, so don't log secrets.
 `codegen` types `ctx.env` from `chunk.toml` in `.chunk/generated/env.ts`: variables every environment has are strings,
 those only some environments set may be missing, and required secrets are strings in actions.
 
+Gameplay code reads the variables, never the secrets, through the generated
+[`Vars`](../../../jvm/backend-api/README.md#variables) class, such as `Vars.MOTD`. Each JVM resolves them once, for the
+environment its host names in `CHUNK_ENVIRONMENT_NAME`: the environment's own name under management, and `--env NAME`
+under `chunk dev`.
+
 ```ts
 export const checkout = action({
   args: { item: v.string() },

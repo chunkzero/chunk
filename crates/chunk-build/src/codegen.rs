@@ -61,19 +61,8 @@ fn validate_literals(schema: &Schema) -> io::Result<()> {
     match schema {
         Schema::Literal { value } => {
             chunk_contract::validate_wire_value(value).map_err(io::Error::other)?;
-            if let Some(value) = value.as_str() {
-                // Class-file string constants use modified UTF-8 with a u16 byte length.
-                let bytes: usize = value
-                    .encode_utf16()
-                    .map(|unit| match unit {
-                        1..=0x7f => 1,
-                        0..=0x7ff => 2,
-                        _ => 3,
-                    })
-                    .sum();
-                if bytes > usize::from(u16::MAX) {
-                    return Err(io::Error::other("literal exceeds Java string constant limit"));
-                }
+            if value.as_str().is_some_and(|value| !java_constant(value)) {
+                return Err(io::Error::other("literal exceeds Java string constant limit"));
             }
             Ok(())
         }
@@ -83,6 +72,19 @@ fn validate_literals(schema: &Schema) -> io::Result<()> {
         Schema::Union { variants } => variants.values().try_for_each(validate_literals),
         _ => Ok(()),
     }
+}
+
+/// Whether `value` fits a class-file string constant, which uses modified UTF-8 with a u16 byte length.
+fn java_constant(value: &str) -> bool {
+    let bytes: usize = value
+        .encode_utf16()
+        .map(|unit| match unit {
+            1..=0x7f => 1,
+            0..=0x7ff => 2,
+            _ => 3,
+        })
+        .sum();
+    u16::try_from(bytes).is_ok()
 }
 
 #[cfg(test)]

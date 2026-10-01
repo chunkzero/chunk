@@ -83,6 +83,7 @@ pub(super) async fn call(
                 process_id: launch.process_id,
                 generation: launch.generation,
                 aot,
+                environment_name: service.environment_name.clone(),
             }
             .encode_to_vec()
         }

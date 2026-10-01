@@ -96,6 +96,11 @@ pub(crate) fn prepare(
         .env("CHUNK_ARTIFACT_DIGEST", &app.sha256)
         .env("CHUNK_PLAYER_ADDRESS", player_address.to_string())
         .stdin(Stdio::null());
+    if launch.environment_name.is_empty() {
+        command.env_remove("CHUNK_ENVIRONMENT_NAME");
+    } else {
+        command.env("CHUNK_ENVIRONMENT_NAME", &launch.environment_name);
+    }
     tracing::info!(heap_mib = heap, cpus = config.cpus, java = image, aot = aot.name(), "starting the JVM");
     Ok(Jvm { command, aot, java, flags, jar, directory: working })
 }

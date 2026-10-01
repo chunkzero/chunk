@@ -114,6 +114,8 @@ pub struct ProcessHostConfig {
     pub java: std::path::PathBuf,
     /// The environment whose releases this host launches.
     pub environment: String,
+    /// The environment's name, which each JVM reads as `CHUNK_ENVIRONMENT_NAME` to select its `[env.<name>.vars]`.
+    pub environment_name: Option<String>,
     /// This machine's address on the environment's private network. When set, each JVM serves players there, so
     /// gateways on other machines reach it; otherwise it serves them on loopback.
     pub private_address: Option<std::net::IpAddr>,

@@ -278,6 +278,7 @@ impl Core {
                 self.archives.clone(),
                 aot,
                 config.environment.clone(),
+                config.environment_name.clone(),
                 config.environment_token.clone(),
                 config.private_address,
             )),
@@ -555,6 +556,7 @@ fn host_config(config: &CoreConfig) -> chunk_control::ProcessHostConfig {
         releases: config.state.join("releases"),
         java: config.java.clone(),
         environment: config.environment.clone(),
+        environment_name: config.environment_name.clone(),
         private_address: config.private_address,
     }
 }

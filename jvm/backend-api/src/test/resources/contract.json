@@ -563,5 +563,13 @@
         "empty_timeout_seconds": 60
       }
     }
+  },
+  "env": {
+    "vars": { "MOTD": "Welcome", "REGION": "eu" },
+    "environments": {
+      "prod": { "MOTD": "Welcome to the live server", "STORE_URL": "https://store.example.com" },
+      "staging": { "DEBUG_SEED": "42" }
+    },
+    "secrets": ["STORE_API_KEY"]
   }
 }
