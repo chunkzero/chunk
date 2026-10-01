@@ -564,6 +564,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "chunk-bots"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "chunk-protocol",
+ "clap",
+ "flate2",
+ "hdrhistogram",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "chunk-build"
 version = "0.1.0"
 dependencies = [

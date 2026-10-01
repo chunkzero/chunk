@@ -1,0 +1,9 @@
+[local]
+environment = "local"
+machine_profile = "lobby"
+capacity = 128
+max_processes = 8
+
+[local.profiles.lobby]
+memory_mib = 1024
+max_sessions = 1
