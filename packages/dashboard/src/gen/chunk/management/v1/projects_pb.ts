@@ -795,12 +795,15 @@ export const ProjectService: GenService<{
   };
   /**
    * Creates a preview environment from a snapshot of another environment in
-   * the same project. The fork deploys the source's active release and
-   * restores the snapshot on first start; the source is untouched, and its
-   * pending and running jobs are not carried over. Fails with
-   * FAILED_PRECONDITION when replication is off, the source is being deleted,
-   * has no active deployment or no snapshot, and with NOT_FOUND when
-   * snapshot_id names none of the source's snapshots. Idempotent by
+   * the same project. The fork starts without a deployment and restores the
+   * snapshot on first start; the source is untouched, and its pending and
+   * running jobs are not carried over. Once restored, the fork runs the
+   * release its restored data was serving (see
+   * AttachRequest.restored_deployment_id), or stays without a deployment
+   * until one is deployed to it. Fails with FAILED_PRECONDITION when
+   * replication is off, the source is being deleted or has no snapshot, with
+   * NOT_FOUND when snapshot_id names none of the source's snapshots, and with
+   * UNAVAILABLE when the source's log can't be listed. Idempotent by
    * request_id.
    *
    * @generated from rpc chunk.management.v1.ProjectService.ForkEnvironment

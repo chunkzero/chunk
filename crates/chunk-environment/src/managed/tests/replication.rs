@@ -79,8 +79,10 @@ async fn core_replicates_where_management_grants_and_a_fresh_core_restores_from_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_fork_s_first_desired_state_names_the_log_its_core_forks() {
+async fn a_fork_s_core_forks_the_named_log_and_reports_its_newest_deployment_without_serving_it() {
     let harness = Harness::new().await;
+    // What a restored database holds: deployments of its source that this environment's control never ran.
+    harness.abandon(2).await;
     let grant = |prefix: &str| ObjectStore {
         endpoint: "http://127.0.0.1:9".into(),
         bucket: "logs".into(),
@@ -97,11 +99,39 @@ async fn a_fork_s_first_desired_state_names_the_log_its_core_forks() {
     harness.management.grant(grant("env_test/"));
     let mut config = harness.core();
     let stop = CancellationToken::new();
-    let registration = Registration::attach(&harness.management_config(), &mut config, &stop).await.unwrap();
-    assert!(registration.is_some() && config.replication.is_some());
+    let registration =
+        Registration::attach(&harness.management_config(), &mut config, &stop).await.unwrap().expect("attached");
+    assert!(config.replication.is_some());
     let fork = config.fork.expect("a fork source");
     let snapshot = Some(chunk_store::SnapshotId { epoch: 3, sequence: 42 });
     assert_eq!((fork.environment.as_str(), fork.snapshot), ("env_source", snapshot));
+
+    // Started on the restored database, which replicates nowhere here.
+    let core = Core::start(harness.core(), || {}).await.unwrap();
+    let (gateway, lease) = (OnceLock::new(), watch::Sender::new(Lease::Waiting));
+    let managed = Managed::new(
+        &harness.management_config(),
+        lease,
+        registration,
+        &harness.state(),
+        &core,
+        &gateway,
+        Some(GatewayConfig::new("127.0.0.1:0".parse().unwrap())),
+    );
+    let reported = async {
+        while harness.management.restored.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        error = managed.run() => panic!("{error}"),
+        () = reported => {}
+    }
+    drop(managed);
+    assert_eq!(*harness.management.restored.lock().unwrap(), ["dep_abandoned_1"]);
+    assert!(gateway.get().is_none());
+    assert_eq!(core.control().unwrap().current_release().unwrap(), None);
+    core.stop(|| {}).await.unwrap();
 }
 
 /// Waits until `log_store` signs with `token`.

@@ -121,6 +121,7 @@ pub(super) fn request(instance_id: &str) -> v1::AttachRequest {
         version: env!("CARGO_PKG_VERSION").into(),
         core: false,
         epoch: 0,
+        restored_deployment_id: String::new(),
     }
 }
 

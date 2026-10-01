@@ -631,7 +631,7 @@ export enum DeploymentTrigger {
   ROLLBACK = 3,
 
   /**
-   * An environment fork, deploying its source's active release.
+   * An environment fork, deploying the release its restored data was serving.
    *
    * @generated from enum value: DEPLOYMENT_TRIGGER_FORK = 4;
    */

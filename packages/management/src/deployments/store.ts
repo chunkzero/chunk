@@ -8,7 +8,7 @@ import { DeploymentState } from "../gen/chunk/management/v1/common_pb.ts";
 import {
   type Deployment,
   DeploymentSchema,
-  type DeploymentTrigger,
+  DeploymentTrigger,
   type Release,
   ReleaseSchema,
   ReleaseState,
@@ -108,6 +108,36 @@ export async function createDeployment(
   if (!row) throw new Error("deployment insert returned no row");
   await advanceRevision(db, environment.id);
   return toDeployment(row);
+}
+
+/**
+ * Deploys to a fork the release of `deploymentId`, the newest deployment resident in the database it restored, unless
+ * the fork has a deployment already. That deployment belongs to an environment of the fork's project; when it is gone,
+ * or no JVM image runs its release, the fork stays without a deployment until one is deployed to it.
+ */
+export async function deployRestored(
+  db: Db,
+  forkId: string,
+  deploymentId: string,
+  jvmImageTemplate: string | undefined,
+): Promise<void> {
+  const [fork] = await db<EnvironmentRow[]>`
+    select * from environments where id = ${forkId} and forked_from_environment_id <> ''`;
+  if (!fork) return;
+  const [deployed] = await db`select 1 from deployments where environment_id = ${forkId} limit 1`;
+  if (deployed) return;
+  const [restored] = await db<{ release_id: string }[]>`
+    select d.release_id from deployments d join environments e on e.id = d.environment_id
+    where d.id = ${deploymentId} and e.project_id = ${fork.project_id}`;
+  const release = restored && (await findRelease(db, fork.project_id, restored.release_id));
+  const java = release?.manifest?.java_version;
+  if (release?.state !== ReleaseState.READY || !release.manifest || !jvmImage(jvmImageTemplate, java)) {
+    console.warn(
+      `fork ${forkId} stays without a deployment: its restored deployment ${deploymentId} can't be deployed`,
+    );
+    return;
+  }
+  await createDeployment(db, fork, release.id, DeploymentTrigger.FORK, jvmImageTemplate);
 }
 
 /**

@@ -2,14 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { Code } from "@connectrpc/connect";
 
-import { activateDeployment } from "../src/deployments/store.ts";
+import { issueEnvironmentToken } from "../src/auth/tokens.ts";
 import { desiredState } from "../src/environments/desired.ts";
 import { claimLease } from "../src/environments/store.ts";
 import { DeploymentService, DeploymentTrigger } from "../src/gen/chunk/management/v1/deployments_pb.ts";
+import { EnvironmentService } from "../src/gen/chunk/management/v1/environment_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { SecretService } from "../src/gen/chunk/management/v1/secrets_pb.ts";
 import { logStoreIssuer } from "../src/logstore/issuer.ts";
-import { codeOf, createEnvironment, databaseUrl, deployRelease, type Harness, startHarness } from "./harness.ts";
+import { codeOf, createEnvironment, databaseUrl, deployRelease, type Harness, next, startHarness } from "./harness.ts";
 
 /** Object keys and their modification times, listed by a fake S3 endpoint two keys per page. */
 const objects = new Map<string, Date>();
@@ -91,7 +92,7 @@ describe.skipIf(!databaseUrl)("environment forks", () => {
     expect(next.nextPageToken).toBe("");
   });
 
-  test("a fork deploys its source's active release, copies secrets on request, and restores until its core attaches", async () => {
+  test("a fork starts without a deployment, copies secrets on request, and restores until its core attaches", async () => {
     const { projectId, environmentId: sourceId } = await createEnvironment(h);
     const projects = h.client(ProjectService);
     const fork = (name: string, snapshotId = "") =>
@@ -104,8 +105,6 @@ describe.skipIf(!databaseUrl)("environment forks", () => {
       });
     expect(await codeOf(fork("preview"))).toBe(Code.FailedPrecondition);
     snapshot(sourceId, 1, 4);
-    expect(await codeOf(fork("preview"))).toBe(Code.FailedPrecondition);
-    await activateDeployment(h.sql, await deployRelease(h, projectId, sourceId, "rel_fork"));
     await h.client(SecretService).setSecret({
       requestId: crypto.randomUUID(),
       environmentId: sourceId,
@@ -117,11 +116,10 @@ describe.skipIf(!databaseUrl)("environment forks", () => {
     const forked = (await fork("preview", "1-4")).environment;
     const forkId = forked?.id ?? "";
     expect(forked).toMatchObject({ projectId, forkedFromEnvironmentId: sourceId, forkedFromSnapshotId: "1-4" });
-    const [deployment] = (await h.client(DeploymentService).listDeployments({ environmentId: forkId })).deployments;
-    expect(deployment).toMatchObject({ releaseId: "rel_fork", trigger: DeploymentTrigger.FORK });
+    expect((await h.client(DeploymentService).listDeployments({ environmentId: forkId })).deployments).toEqual([]);
 
     const { message } = await desiredState(h.deps, forkId);
-    expect(message.deploymentId).toBe(deployment?.id ?? "");
+    expect(message.deploymentId).toBe("");
     expect(message.secrets.map(({ name, value }) => [name, new TextDecoder().decode(value)])).toEqual([
       ["API_KEY", "hunter2"],
     ]);
@@ -131,5 +129,41 @@ describe.skipIf(!databaseUrl)("environment forks", () => {
 
     await claimLease(h.sql, forkId, crypto.randomUUID(), 1n);
     expect((await desiredState(h.deps, forkId)).message.restore).toBeUndefined();
+  });
+
+  test("a fork's first core attach deploys the release its restored data was serving, once", async () => {
+    const { projectId, environmentId: sourceId } = await createEnvironment(h);
+    const served = await deployRelease(h, projectId, sourceId, "rel_restored");
+    snapshot(sourceId, 1, 4);
+    const forked = await h.client(ProjectService).forkEnvironment({
+      requestId: crypto.randomUUID(),
+      sourceEnvironmentId: sourceId,
+      name: "preview",
+    });
+    const forkId = forked.environment?.id ?? "";
+    // The source moves on meanwhile; the fork still runs what its restored data was serving.
+    await deployRelease(h, projectId, sourceId, "rel_later");
+    const client = h.client(EnvironmentService, await issueEnvironmentToken(h.sql, forkId));
+    const attach = async (epoch: bigint) => {
+      const abort = new AbortController();
+      const request = { instanceId: crypto.randomUUID(), core: true, epoch, restoredDeploymentId: served };
+      const messages = client.attach(request, { signal: abort.signal })[Symbol.asyncIterator]();
+      const first = await next(messages);
+      abort.abort();
+      return first;
+    };
+
+    const first = await attach(1n);
+    expect(first.restore).toBeUndefined();
+    expect(first.release?.releaseId).toBe("rel_restored");
+    const deployments = h.client(DeploymentService);
+    const [deployment] = (await deployments.listDeployments({ environmentId: forkId })).deployments;
+    expect(deployment).toMatchObject({
+      id: first.deploymentId,
+      releaseId: "rel_restored",
+      trigger: DeploymentTrigger.FORK,
+    });
+    await attach(2n);
+    expect((await deployments.listDeployments({ environmentId: forkId })).deployments).toHaveLength(1);
   });
 });

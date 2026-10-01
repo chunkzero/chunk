@@ -56,6 +56,8 @@ struct Management {
     alarm: Mutex<suspend::Alarms>,
     /// The epoch of each core attach.
     epochs: Mutex<Vec<u64>>,
+    /// The restored deployment each core attach of a fork names.
+    restored: Mutex<Vec<String>>,
     /// The object storage each desired state grants.
     log_store: Mutex<Option<ObjectStore>>,
     /// The fork restore each desired state carries.
@@ -81,6 +83,9 @@ impl Management {
             return 0;
         }
         self.epochs.lock().unwrap().push(attach.epoch);
+        if !attach.restored_deployment_id.is_empty() {
+            self.restored.lock().unwrap().push(attach.restored_deployment_id.clone());
+        }
         self.lease.send_modify(|lease| *lease += 1);
         *self.lease.borrow()
     }
@@ -393,6 +398,7 @@ impl Harness {
             capacity: Mutex::default(),
             alarm: Mutex::default(),
             epochs: Mutex::default(),
+            restored: Mutex::default(),
             log_store: Mutex::default(),
             restore: Mutex::default(),
             telemetry: Mutex::default(),

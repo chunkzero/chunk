@@ -4,6 +4,7 @@ import { loadConfig } from "../src/config.ts";
 import type { LogStore } from "../src/config.ts";
 import { desiredState } from "../src/environments/desired.ts";
 import { logStoreIssuer } from "../src/logstore/issuer.ts";
+import { listSnapshots } from "../src/logstore/s3.ts";
 import { signV4 } from "../src/logstore/sigv4.ts";
 import { createEnvironment, databaseUrl, type Harness, startHarness } from "./harness.ts";
 
@@ -81,6 +82,69 @@ test("concurrent grants for an environment share one STS request, and a failed o
   );
   expect((await Promise.all(granted)).map((grant) => grant.accessKeyId)).toEqual(Array(10).fill("temp"));
   expect(requests).toBe(2);
+});
+
+test("a read grant may only get and list an environment's objects, and is cached apart from its write grant", async () => {
+  const policies: { Statement: Record<string, unknown>[] }[] = [];
+  const sts = (_url: URL, init: { body: string }) => {
+    policies.push(JSON.parse(new URLSearchParams(init.body).get("Policy") ?? "{}"));
+    const expiration = new Date(Date.now() + 3_600_000).toISOString();
+    return Promise.resolve(
+      new Response(
+        `<AccessKeyId>temp-${policies.length}</AccessKeyId><SecretAccessKey>s</SecretAccessKey>` +
+          `<SessionToken>t</SessionToken><Expiration>${expiration}</Expiration>`,
+      ),
+    );
+  };
+  const issuer = logStoreIssuer(
+    {
+      endpoint: "http://127.0.0.1:9000",
+      region: "us-east-1",
+      bucket: "logs",
+      prefix: "p/",
+      accessKeyId: "operator",
+      secretAccessKey: "secret",
+      sharedCredentials: false,
+      stsEndpoint: "http://sts.invalid",
+      roleArn: "arn:aws:iam::123456789012:role/chunk-logs",
+      credentialSeconds: 3600,
+    },
+    sts as unknown as typeof fetch,
+  );
+
+  expect((await issuer.readGrant("env_a")).accessKeyId).toBe("temp-1");
+  expect((await issuer.grant("env_a")).accessKeyId).toBe("temp-2");
+  expect((await issuer.readGrant("env_a")).accessKeyId).toBe("temp-1");
+  expect(policies).toHaveLength(2);
+  expect(policies[0]?.Statement).toEqual([
+    { Effect: "Allow", Action: ["s3:GetObject"], Resource: ["arn:aws:s3:::logs/p/env_a/*"] },
+    {
+      Effect: "Allow",
+      Action: ["s3:ListBucket"],
+      Resource: ["arn:aws:s3:::logs"],
+      Condition: { StringLike: { "s3:prefix": ["p/env_a/*"] } },
+    },
+  ]);
+  expect(policies[1]?.Statement[0]?.["Action"]).toContain("s3:PutObject");
+});
+
+test("listing snapshots fails once its signal aborts, even while the store stalls", async () => {
+  const stalled = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Promise<Response>(() => {}) });
+  const grant = {
+    endpoint: stalled.url.origin,
+    region: "us-east-1",
+    bucket: "logs",
+    prefix: "p/env_a/",
+    accessKeyId: "operator",
+    secretAccessKey: "secret",
+    sessionToken: "",
+    expireTime: undefined,
+  };
+  try {
+    await expect(listSnapshots(grant, AbortSignal.timeout(50))).rejects.toThrow();
+  } finally {
+    await stalled.stop(true);
+  }
 });
 
 describe.skipIf(!databaseUrl)("STS log store credentials", () => {

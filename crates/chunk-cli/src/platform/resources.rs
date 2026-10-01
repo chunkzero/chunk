@@ -53,7 +53,8 @@ enum EnvironmentAction {
         #[arg(long, short)]
         yes: bool,
     },
-    /// Create one from a snapshot of another, running the source's active release. The source is untouched.
+    /// Create one from a snapshot of another, running the release its restored data was serving. The source is
+    /// untouched.
     Fork {
         /// The fork's name, following the same rules as create.
         name: String,
@@ -162,7 +163,7 @@ pub(super) async fn environments(options: Environments) -> io::Result<()> {
             let environment =
                 client.fork_environment(&request).await.map_err(api_error)?.environment.unwrap_or_default();
             return cliclack::log::success(format!(
-                "Forked environment {} ({}) from {}; it starts with the source's active release",
+                "Forked environment {} ({}) from {}; it runs the release its restored data was serving",
                 environment.name, environment.id, source.name
             ));
         }

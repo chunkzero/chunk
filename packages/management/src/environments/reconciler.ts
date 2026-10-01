@@ -44,6 +44,7 @@ interface EnvironmentRow {
   alarm_due_seconds: bigint | null;
   alarm_due_nanos: number | null;
   alarm_fired: boolean;
+  forked_from_environment_id: string;
 }
 
 const intervalMs = 5000;
@@ -239,7 +240,8 @@ async function reconcileEnvironment(run: Run, id: string) {
   // Read when the run starts, not when it was scheduled, since it may have waited for the pool.
   const [environment] = await sql<EnvironmentRow[]>`
     select id, state, revision, lease, ready_to_suspend, report_desired_revision, machine_id, machine_addresses,
-      machine_token, alarm_epoch, alarm_generation, alarm_due_seconds, alarm_due_nanos, alarm_fired
+      machine_token, alarm_epoch, alarm_generation, alarm_due_seconds, alarm_due_nanos, alarm_fired,
+      forked_from_environment_id
     from environments
     where id = ${id}`;
   if (!environment) return;
@@ -272,7 +274,9 @@ async function reconcileEnvironment(run: Run, id: string) {
     retries.clear(coreKey(id));
     return;
   }
-  if (!(await desiredDeployment(sql, id))) return;
+  // A fork's core runs without a deployment: it restores the fork, and its first attach deploys the release the restored
+  // data was serving, if any. Without one it suspends once idle, like any core.
+  if (!environment.forked_from_environment_id && !(await desiredDeployment(sql, id))) return;
 
   // Core has no state to fail into, so it retries for as long as it takes, backing off while calls fail transiently.
   const key = coreKey(id);

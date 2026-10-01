@@ -1,6 +1,7 @@
 import type { LogStore } from "../config.ts";
 import { deletePrefix } from "./s3.ts";
 import { signV4 } from "./sigv4.ts";
+import { xmlElement } from "./xml.ts";
 
 /** Object-store access for one environment's log prefix. */
 export interface LogStoreGrant {
@@ -163,12 +164,7 @@ export function prefixPolicy(bucket: string, prefix: string, actions = writeActi
 }
 
 function element(xml: string, name: string): string {
-  const value = new RegExp(`<${name}>([^<]*)</${name}>`).exec(xml)?.[1];
+  const value = xmlElement(xml, name);
   if (value === undefined) throw new Error(`STS AssumeRole returned no ${name}`);
-  return value
-    .replaceAll("&lt;", "<")
-    .replaceAll("&gt;", ">")
-    .replaceAll("&quot;", '"')
-    .replaceAll("&apos;", "'")
-    .replaceAll("&amp;", "&");
+  return value;
 }
