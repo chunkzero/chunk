@@ -482,10 +482,31 @@ fn text_encoding_and_cloning_share_the_aggregate_buffer_budget() {
 }
 
 #[test]
-fn structured_clone_rejects_host_object_brands_without_aborting() {
+fn structured_clone_ignores_host_object_brands_without_aborting() {
     let execution =
-        run(r#"try { structuredClone({ [Symbol.for("Deno.core.hostObject")]() { return { type: "missing" }; } }); }
-        catch (error) { return error.name; }"#)
-        .unwrap();
-    assert_eq!(value(&execution), json!("DataCloneError"));
+        run(r#"return structuredClone({ [Symbol.for("Deno.core.hostObject")]() { return { type: "missing" }; } });"#)
+            .unwrap();
+    assert_eq!(value(&execution), json!({}));
+}
+
+#[test]
+fn structured_clone_reads_built_ins_by_brand_despite_modified_prototypes() {
+    let execution = run(r#"
+        Object.defineProperty(Array.prototype, "0", { get: () => "changed", set() {} });
+        const map = Object.setPrototypeOf(new Map([["k", 42]]), null);
+        const bytes = new Uint8Array([1, 2, 3, 4]);
+        const copy = structuredClone({ map, view: new DataView(bytes.buffer, 1, 2), [Symbol("meta")]: 1 });
+        const detached = new Uint8Array(4);
+        detached.buffer.transfer();
+        let error;
+        try { structuredClone(detached); } catch (e) { error = e.name; }
+        return {
+          map: Map.prototype.get.call(copy.map, "k"),
+          view: copy.view.getUint16(0),
+          symbols: Object.getOwnPropertySymbols(copy).length,
+          error,
+        };
+    "#)
+    .unwrap();
+    assert_eq!(value(&execution), json!({"map": 42, "view": 0x0203, "symbols": 0, "error": "DataCloneError"}));
 }
