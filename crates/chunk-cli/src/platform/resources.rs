@@ -2,16 +2,24 @@
 
 use std::{
     fmt::Write as _,
-    io::{self, Write as _},
+    io::{self, IsTerminal, Write as _},
+    time::Duration,
 };
 
-use chunk_management::v1::{
-    CreateEnvironmentRequest, CreateProjectRequest, ListAppsRequest, ListDeploymentsRequest, ListEnvironmentsRequest,
-    ListProjectsRequest, LogEntry, ReadLogsRequest,
+use chunk_management::{
+    Client, Code,
+    v1::{
+        CreateEnvironmentRequest, CreateProjectRequest, DeleteEnvironmentRequest, Environment, GetEnvironmentRequest,
+        ListAppsRequest, ListDeploymentsRequest, ListEnvironmentsRequest, ListProjectsRequest, LogEntry,
+        ReadLogsRequest,
+    },
 };
 use clap::{Args, Subcommand};
 
 use super::{EnvironmentArgs, ProjectArg, Session, all, api_error};
+
+const DELETE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const DELETE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Args)]
 pub(crate) struct Projects {
@@ -24,7 +32,27 @@ pub(crate) struct Environments {
     #[command(flatten)]
     project: ProjectArg,
     #[command(subcommand)]
-    action: Option<Create>,
+    action: Option<EnvironmentAction>,
+}
+
+#[derive(Subcommand)]
+enum EnvironmentAction {
+    /// Create one.
+    Create {
+        /// 1 to 63 lowercase letters, digits and hyphens, starting and ending with a letter or digit.
+        name: String,
+    },
+    /// Delete one, destroying its machines and data.
+    Delete {
+        /// The environment's name or ID.
+        environment: String,
+        /// Wait until the environment is gone; deleting otherwise finishes in the background.
+        #[arg(long)]
+        wait: bool,
+        /// Delete without asking, as a terminal-less run must.
+        #[arg(long, short)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -89,13 +117,21 @@ pub(super) async fn environments(options: Environments) -> io::Result<()> {
     let session = Session::open()?;
     let project = session.project(&options.project).await?;
     let client = &session.client;
-    if let Some(Create::Create { name }) = options.action {
-        let request = CreateEnvironmentRequest { request_id: request_id(), project_id: project.id, name };
-        let environment = client.create_environment(&request).await.map_err(api_error)?.environment.unwrap_or_default();
-        return cliclack::log::success(format!(
-            "Created environment {} ({}) in {}",
-            environment.name, environment.id, project.name
-        ));
+    match options.action {
+        Some(EnvironmentAction::Create { name }) => {
+            let request = CreateEnvironmentRequest { request_id: request_id(), project_id: project.id, name };
+            let environment =
+                client.create_environment(&request).await.map_err(api_error)?.environment.unwrap_or_default();
+            return cliclack::log::success(format!(
+                "Created environment {} ({}) in {}",
+                environment.name, environment.id, project.name
+            ));
+        }
+        Some(EnvironmentAction::Delete { environment, wait, yes }) => {
+            let environment = session.environment_in(&project, &environment).await?;
+            return delete_environment(client, &environment, wait, yes).await;
+        }
+        None => {}
     }
     let project_id = &project.id;
     let environments = all(|page_token| async move {
@@ -111,6 +147,59 @@ pub(super) async fn environments(options: Environments) -> io::Result<()> {
             [environment.name, environment.id, state, players, environment.hostname, environment.active_deployment_id]
         }),
     )
+}
+
+/// Deletes the environment after confirming, and with `wait` follows its removal until management reports it gone.
+async fn delete_environment(client: &Client, environment: &Environment, wait: bool, yes: bool) -> io::Result<()> {
+    let name = &environment.name;
+    if !yes {
+        if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+            return Err(io::Error::other("Use --yes to delete an environment without a terminal."));
+        }
+        let confirmed = cliclack::confirm(format!("Delete environment {name}? Its machines and data are destroyed."))
+            .initial_value(false)
+            .interact()?;
+        if !confirmed {
+            return cliclack::log::info("Kept the environment");
+        }
+    }
+    let request = DeleteEnvironmentRequest { environment_id: environment.id.clone() };
+    client.delete_environment(&request).await.map_err(api_error)?;
+    if !wait {
+        return cliclack::log::success(format!("Deleting environment {name}; it finishes in the background"));
+    }
+    cliclack::log::info(format!("Deleting environment {name}…"))?;
+    chunk_service::run(|stop| async move {
+        tokio::select! {
+            gone = until_gone(client, &environment.id) => gone?,
+            () = stop.cancelled() => {
+                cliclack::log::info(format!("Stopped waiting; environment {name} is still being deleted."))?;
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped waiting"));
+            }
+        }
+        cliclack::log::success(format!("Deleted environment {name}"))
+    })
+    .await
+}
+
+/// Polls until `GetEnvironment` reports the environment not found, or the wait times out.
+async fn until_gone(client: &Client, environment_id: &str) -> io::Result<()> {
+    let request = GetEnvironmentRequest { environment_id: environment_id.into() };
+    let poll = async {
+        loop {
+            match client.get_environment(&request).await {
+                Err(error) if error.code() == Code::NotFound => return Ok(()),
+                // A restarting or slow platform answers again shortly; the deletion goes on without it.
+                Ok(_) => {}
+                Err(error) if error.code() == Code::Unavailable => {}
+                Err(error) => return Err(api_error(error)),
+            }
+            tokio::time::sleep(DELETE_POLL_INTERVAL).await;
+        }
+    };
+    tokio::time::timeout(DELETE_TIMEOUT, poll)
+        .await
+        .map_err(|_| io::Error::other("Timed out waiting for the environment to go; the deletion continues."))?
 }
 
 pub(super) async fn deployments(options: Deployments) -> io::Result<()> {

@@ -28,6 +28,7 @@ covers the packaged SDK.
 | `chunk auth logout`                | Revokes the CLI's token and forgets it.                                                     |
 | `chunk projects [create NAME]`     | Lists the platform's projects, or creates one.                                              |
 | `chunk environments [create NAME]` | Lists a project's environments with their state and hostname, or creates one.               |
+| `chunk environments delete E`      | Deletes an environment, destroying its machines and data.                                   |
 | `chunk deploy [PROJECT] --env E`   | Builds the project, uploads and deploys its release, and waits until it is active.          |
 | `chunk deployments --env E`        | Lists an environment's recent deployments, newest first.                                    |
 | `chunk apps --env E`               | Lists the apps and session types the environment's active release runs.                     |
@@ -150,6 +151,10 @@ hyphens, starting and ending with a letter or digit.
 deploys it, and follows the deployment until it is active, then prints where players join. It fails if the deployment
 fails or a later one supersedes it first. Ctrl-C stops waiting but not the deployment; `chunk deployments` shows how it
 ends (`--limit`, default 20, lists up to 200).
+
+`chunk environments delete NAME_OR_ID` asks for confirmation on a terminal, and needs `--yes` without one, since it
+destroys the environment's machines and data. Deleting finishes in the background; `--wait` polls until the platform
+reports the environment gone, for up to five minutes, and Ctrl-C stops waiting but not the deletion.
 
 `chunk logs` prints the most recent entries (`--limit`, default 200), and with `--follow` keeps printing new ones;
 `--app ID` keeps only that app's JVM entries. A self-hosted install has none to show yet, since its environments don't
