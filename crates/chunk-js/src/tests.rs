@@ -498,15 +498,21 @@ fn structured_clone_reads_built_ins_by_brand_despite_modified_prototypes() {
         const copy = structuredClone({ map, view: new DataView(bytes.buffer, 1, 2), [Symbol("meta")]: 1 });
         const detached = new Uint8Array(4);
         detached.buffer.transfer();
-        let error;
-        try { structuredClone(detached); } catch (e) { error = e.name; }
+        const errors = [detached, [1].values(), new Error("x")].map((value) => {
+          try { structuredClone(value); } catch (e) { return e.name; }
+        });
+        const views = structuredClone([new Uint8Array(bytes.buffer, 0, 2), new Uint16Array(bytes.buffer, 2, 1)]);
         return {
           map: Map.prototype.get.call(copy.map, "k"),
           view: copy.view.getUint16(0),
           symbols: Object.getOwnPropertySymbols(copy).length,
-          error,
+          errors,
+          shared: views[0].buffer === views[1].buffer && views[0].buffer !== bytes.buffer,
         };
     "#)
     .unwrap();
-    assert_eq!(value(&execution), json!({"map": 42, "view": 0x0203, "symbols": 0, "error": "DataCloneError"}));
+    assert_eq!(
+        value(&execution),
+        json!({"map": 42, "view": 0x0203, "symbols": 0, "errors": ["DataCloneError", "DataCloneError", "DataCloneError"], "shared": true})
+    );
 }

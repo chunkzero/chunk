@@ -10,24 +10,19 @@
   const digest = core.ops.op_chunk_digest;
   const Uint8 = Uint8Array;
   // A JavaScript clone, since V8's serializer runs host-object hooks keyed by
-  // the global Symbol.for("Deno.core.hostObject") brand. Built-ins are found by
-  // internal slot and read through methods captured before application code
-  // runs, so modified prototypes cannot change or observe the copy.
+  // the global Symbol.for("Deno.core.hostObject") brand. It accepts an explicit
+  // list of types and throws DataCloneError for anything else. Built-ins are
+  // found by internal slot and read through methods captured before application
+  // code runs, so modified prototypes cannot change or observe the copy.
   const clone = (() => {
     const ops = core.ops;
     const uncurry = (fn) => Function.prototype.call.bind(fn);
     const getter = (prototype, name) => uncurry(Object.getOwnPropertyDescriptor(prototype, name).get);
     const { defineProperty, getOwnPropertyDescriptor, getPrototypeOf, ownKeys } = Reflect;
-    const { hasOwn } = Object;
     const { isArray } = Array;
-    const [NativeObject, NativeString, NativeMap, NativeSet, NativeDate, NativeRegExp] = [
-      Object,
-      String,
-      Map,
-      Set,
-      Date,
-      RegExp,
-    ];
+    const { isRawJSON } = JSON;
+    const [ObjectPrototype, ArrayPrototype] = [Object.prototype, Array.prototype];
+    const [NativeObject, NativeMap, NativeSet, NativeDate, NativeRegExp] = [Object, Map, Set, Date, RegExp];
     const [NativeArrayBuffer, NativeDataView] = [ArrayBuffer, DataView];
     const mapGet = uncurry(Map.prototype.get);
     const mapSet = uncurry(Map.prototype.set);
@@ -35,7 +30,6 @@
     const mapEach = uncurry(Map.prototype.forEach);
     const setAdd = uncurry(Set.prototype.add);
     const setEach = uncurry(Set.prototype.forEach);
-    const enumerable = uncurry(Object.prototype.propertyIsEnumerable);
     const time = uncurry(Date.prototype.getTime);
     const source = getter(RegExp.prototype, "source");
     const flags = [
@@ -65,25 +59,23 @@
       [ops.op_is_boolean_object, uncurry(Boolean.prototype.valueOf)],
       [ops.op_is_big_int_object, uncurry(BigInt.prototype.valueOf)],
     ];
-    const unsupported = [
-      ops.op_is_proxy,
-      ops.op_is_promise,
-      ops.op_is_weak_map,
-      ops.op_is_weak_set,
+    // Exotic objects that can still have an ordinary prototype after setPrototypeOf.
+    const exotic = [
+      ops.op_is_arguments_object,
       ops.op_is_generator_object,
       ops.op_is_map_iterator,
-      ops.op_is_set_iterator,
       ops.op_is_module_namespace_object,
-      ops.op_is_symbol_object,
+      ops.op_is_native_error,
+      ops.op_is_promise,
+      ops.op_is_set_iterator,
       ops.op_is_shared_array_buffer,
+      ops.op_is_symbol_object,
+      ops.op_is_weak_map,
+      ops.op_is_weak_set,
+      isRawJSON,
     ];
-    const table = (types) => {
-      const result = { __proto__: null };
-      for (const Type of types) result[Type.name] = Type;
-      return result;
-    };
-    const errors = table([Error, EvalError, RangeError, ReferenceError, SyntaxError, TypeError, URIError]);
-    const views = table([
+    const views = { __proto__: null };
+    for (const View of [
       Int8Array,
       Uint8Array,
       Uint8ClampedArray,
@@ -96,19 +88,10 @@
       Float64Array,
       BigInt64Array,
       BigUint64Array,
-    ]);
+    ])
+      views[View.name] = View;
     const fail = (kind) => {
       throw new DOMException(`${kind} could not be cloned`, "DataCloneError");
-    };
-    const own = (object, key) => {
-      const descriptor = getOwnPropertyDescriptor(object, key);
-      return descriptor !== undefined && hasOwn(descriptor, "value") ? descriptor : undefined;
-    };
-    // Like V8's serializer, reads an error's name without running accessors or proxy traps.
-    const inheritedValue = (object, key) => {
-      for (; object !== null && !ops.op_is_proxy(object); object = getPrototypeOf(object)) {
-        if (getOwnPropertyDescriptor(object, key) !== undefined) return own(object, key)?.value;
-      }
     };
     const copy = (value, memory) => {
       if (typeof value === "function") fail("Function");
@@ -119,7 +102,7 @@
         mapSet(memory, value, result);
         return result;
       };
-      for (let i = 0; i < unsupported.length; i++) if (unsupported[i](value)) fail("Object");
+      if (ops.op_is_proxy(value)) fail("Proxy");
       if (ops.op_is_date(value)) return remember(new NativeDate(time(value)));
       if (ops.op_is_reg_exp(value)) {
         let present = "";
@@ -157,31 +140,23 @@
         setEach(items, (item) => setAdd(result, copy(item, memory)));
         return result;
       }
-      if (ops.op_is_native_error(value)) {
-        const name = inheritedValue(value, "name");
-        const Type = errors[typeof name === "string" && hasOwn(errors, name) ? name : "Error"];
-        const message = own(value, "message");
-        const result = remember(message === undefined ? new Type() : new Type(NativeString(message.value)));
-        const stack = own(value, "stack");
-        if (stack !== undefined)
-          defineProperty(result, "stack", { __proto__: null, value: stack.value, writable: true, configurable: true });
-        return result;
-      }
+      const prototype = getPrototypeOf(value);
       const array = isArray(value);
+      if (array ? prototype !== ArrayPrototype : prototype !== ObjectPrototype && prototype !== null) fail("Object");
+      for (let i = 0; i < exotic.length; i++) if (exotic[i](value)) fail("Object");
       const result = remember(array ? [] : {});
       if (array) result.length = value.length;
       const keys = ownKeys(value);
       for (let i = 0; i < keys.length; i++) {
         const key = keys[i];
-        if (typeof key === "string" && enumerable(value, key)) {
-          defineProperty(result, key, {
-            __proto__: null,
-            value: copy(value[key], memory),
-            writable: true,
-            enumerable: true,
-            configurable: true,
-          });
-        }
+        if (typeof key !== "string" || !getOwnPropertyDescriptor(value, key)?.enumerable) continue;
+        defineProperty(result, key, {
+          __proto__: null,
+          value: copy(value[key], memory),
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
       }
       return result;
     };
