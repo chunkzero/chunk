@@ -58,6 +58,7 @@ fn core_config(directory: &Path) -> CoreConfig {
         java: "java".into(),
         environment_token: None,
         fresh: false,
+        defers_retirement: false,
         replication: None,
     }
 }

@@ -104,6 +104,7 @@ impl Config {
             java: "java".into(),
             environment_token: management.as_ref().map(|management| management.token.clone()),
             fresh: false,
+            defers_retirement: management.is_some(),
             replication: chunk_store::Replication::from_env().map_err(io::Error::other)?,
         };
         let gateway = services.contains(Service::Gateway).then_some(gateway);

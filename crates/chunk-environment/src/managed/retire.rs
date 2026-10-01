@@ -1,7 +1,11 @@
 //! Retiring what the environment no longer serves, derived each time from the backend's and control's durable state so
 //! that a restart at any point converges. Control starts a replaced deployment's drain at its activation.
 
-use super::{Managed, activation, activation::Stopping, lock};
+use super::{
+    Managed,
+    activation::{Records, Stopping},
+    lock,
+};
 use chunk_control::{Control, DrainPolicy};
 use chunk_management::v1;
 use std::{collections::BTreeSet, convert::Infallible, io, time::Duration};
@@ -11,6 +15,16 @@ pub(super) fn drain_policy(desired: &v1::AttachResponse) -> DrainPolicy {
     let settings = desired.drain.unwrap_or_default();
     let seconds = |seconds: u32| Some(Duration::from_secs(seconds.into()));
     DrainPolicy { max_age: seconds(settings.max_age_seconds), deadline: seconds(settings.deadline_seconds) }
+}
+
+impl Managed<'_> {
+    /// Applies `desired`'s drain settings to every draining deployment, so shortened limits take effect at once.
+    pub(super) fn apply_drain_policy(&self, desired: &v1::AttachResponse) {
+        let Ok(control) = self.core.control() else { return };
+        if let Err(error) = control.set_drain_policy(drain_policy(desired)) {
+            tracing::warn!(%error, "drain settings not applied");
+        }
+    }
 }
 
 /// The deployments that stop at once once `activated` is current: those that already did and, when `stop_previous`,
@@ -42,13 +56,8 @@ impl Managed<'_> {
 
     /// Records `stopping` as of control's `current` deployment, durably.
     pub(super) fn record_stopping(&self, current: Option<&str>, stopping: &BTreeSet<String>) -> io::Result<()> {
-        match current {
-            Some(current) => activation::write(
-                &self.stop_record,
-                &Stopping { current: current.to_owned(), deployments: stopping.clone() },
-            ),
-            None => activation::clear(&self.stop_record),
-        }
+        let stops = current.map(|current| Stopping { current: current.to_owned(), deployments: stopping.clone() });
+        Records { committed: stops.as_ref(), pending: None }.store(&self.stop_record)
     }
 
     /// Retires every deployment the backend holds that is neither control's current one nor kept for management and

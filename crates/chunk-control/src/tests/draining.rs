@@ -82,6 +82,19 @@ async fn a_draining_release_stops_at_its_deadline_with_players_remaining() {
 }
 
 #[tokio::test]
+async fn shortening_the_drain_settings_makes_a_draining_release_due() {
+    let fixture = Fixture::new();
+    let control = fixture.control().await;
+    arrived(&fixture, &control, "first", &uuid::Uuid::new_v4().to_string(), "").await;
+    let hours = |hours: u64| Some(Duration::from_secs(hours * 3600));
+    control.activate_release(next(&fixture, "next"), DrainPolicy { max_age: hours(1), deadline: hours(4) }).unwrap();
+    assert!(control.due_releases().unwrap().is_empty());
+    control.set_drain_policy(DrainPolicy { max_age: None, deadline: Some(Duration::ZERO) }).unwrap();
+    assert_eq!(control.due_releases().unwrap(), ["build"]);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn shortened_limits_count_from_when_the_release_started_draining() {
     let fixture = Fixture::new();
     let control = fixture.control().await;

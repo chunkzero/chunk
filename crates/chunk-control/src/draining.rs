@@ -41,6 +41,30 @@ impl ReleaseState {
 }
 
 impl Control {
+    /// Sets the limits of every draining release to `policy`'s, counted from when it started draining, whether they
+    /// are shorter or longer than before.
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn set_drain_policy(&self, policy: DrainPolicy) -> Result<()> {
+        let limits = |drain: &ReleaseDrain| {
+            let after = |limit: Option<Duration>| {
+                limit.map(|limit| drain.since.saturating_add(u64::try_from(limit.as_millis()).unwrap_or(u64::MAX)))
+            };
+            (after(policy.max_age), after(policy.deadline))
+        };
+        let changed = |drain: &ReleaseDrain| limits(drain) != (drain.reconnects_until, drain.stops_at);
+        let state = self.state()?;
+        if !state.releases.values().filter_map(|release| release.drain.as_ref()).any(changed) {
+            return Ok(());
+        }
+        self.update(|state| {
+            for drain in state.releases.values_mut().filter_map(|release| release.drain.as_mut()) {
+                (drain.reconnects_until, drain.stops_at) = limits(drain);
+            }
+            Ok(())
+        })
+    }
+
     /// Drains `deployment`'s release under `policy`, whose limits count from when it started draining, keeping the
     /// earlier of each limit when it already drains. Returns whether it has retired and every one of its hosts has
     /// stopped, as for an unknown release.
@@ -59,12 +83,6 @@ impl Control {
             Ok(())
         })?;
         self.release_stopped(deployment)
-    }
-
-    /// Makes the caller, instead of control, retire drained releases: control only moves arrived players away from
-    /// releases past their maximum age, and [`Self::due_releases`] names the releases to retire.
-    pub fn defer_retirement(&self) {
-        self.defers_retirement.store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// The draining releases that are due: those past their deadline, and those with no players, no player who may
@@ -86,7 +104,7 @@ impl Control {
                 tracing::debug!(%error, player = claim.player, "draining release keeps its player");
             }
         }
-        if self.defers_retirement.load(std::sync::atomic::Ordering::Acquire) {
+        if self.config.defers_retirement {
             return Ok(());
         }
         for name in due {

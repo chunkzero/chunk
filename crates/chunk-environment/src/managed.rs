@@ -16,7 +16,8 @@ mod telemetry;
 mod usage;
 
 use crate::{Core, CoreConfig, Gateway, GatewayConfig};
-use activation::{Activation, Stopping};
+use activation::{Activation, Records, Stopping};
+use chunk_control::DrainPolicy;
 use chunk_management::{Client, Code, v1};
 pub(crate) use launcher::{Lease, ManagementLauncher};
 pub(crate) use log_store::renewing;
@@ -121,6 +122,8 @@ struct Deployments {
     /// The deployments that stop at once instead of draining: every one resident when a deployment activated with
     /// `stop_previous`, until its backend version is released, as recorded at `Managed::stop_record`.
     stopping: BTreeSet<String>,
+    /// How replaced deployments drain, from the latest desired state this process received.
+    drain: DrainPolicy,
 }
 
 impl Deployments {
@@ -181,10 +184,6 @@ impl<'a> Managed<'a> {
         gateway_config: Option<GatewayConfig>,
     ) -> Self {
         let (client, stopping) = (management.client(), CancellationToken::new());
-        // Drained releases retire in `retire`, which never retires one management may still ask for.
-        if let Ok(control) = core.control() {
-            control.defer_retirement();
-        }
         let telemetry =
             Telemetry::new(client.clone(), registration.instance_id.clone(), &crate::logs::LINES, lease.subscribe());
         Self {
@@ -313,20 +312,18 @@ impl<'a> Managed<'a> {
     /// was to stop, if control made it current.
     fn recover(&self) -> io::Result<()> {
         let current = self.core.control()?.current_release().map_err(io::Error::other)?;
-        if let Some(recorded) = activation::read::<Activation>(&self.activation)? {
-            if current.as_ref() == Some(&recorded.activated) {
-                lock(&self.deployments).unacknowledged = Some(recorded);
-            } else {
-                activation::clear(&self.activation)?;
-            }
-        }
-        if let Some(recorded) = activation::read::<Stopping>(&self.stop_record)? {
-            if current.as_ref() == Some(&recorded.current) {
-                lock(&self.deployments).stopping = recorded.deployments;
-            } else {
-                activation::clear(&self.stop_record)?;
-            }
-        }
+        let activations = activation::recorded::<Activation>(&self.activation)?;
+        let unacknowledged = [activations.pending, activations.committed]
+            .into_iter()
+            .flatten()
+            .find(|recorded| current.as_ref() == Some(&recorded.activated));
+        Records { committed: unacknowledged.as_ref(), pending: None }.store(&self.activation)?;
+        lock(&self.deployments).unacknowledged = unacknowledged;
+        // An activation control never committed leaves the earlier stop set as it was.
+        let stops = activation::recorded::<Stopping>(&self.stop_record)?;
+        let stopping = stops.pending.filter(|recorded| current.as_ref() == Some(&recorded.current)).or(stops.committed);
+        Records { committed: stopping.as_ref(), pending: None }.store(&self.stop_record)?;
+        lock(&self.deployments).stopping = stopping.map(|recorded| recorded.deployments).unwrap_or_default();
         Ok(())
     }
 
@@ -381,7 +378,9 @@ impl<'a> Managed<'a> {
                         let mut deployments = lock(&self.deployments);
                         deployments.revision = desired.revision;
                         deployments.desired = Some(desired.deployment_id.clone());
+                        deployments.drain = retire::drain_policy(&desired);
                     }
+                    self.apply_drain_policy(&desired);
                     if let Some(work) = work.as_ref().filter(|work| work.deployment != desired.deployment_id) {
                         work.cancel.cancel();
                     }
@@ -510,23 +509,36 @@ impl<'a> Managed<'a> {
         let control = self.core.control()?;
         let current = control.current_release().map_err(io::Error::other)?;
         let mut deployments = lock(&self.deployments);
-        // Recorded first, so a crash once control has activated it still protects the predecessor and still stops what
-        // it asked to stop. Activating the unaccepted deployment again keeps its predecessor.
+        // Recorded beside the committed records first, so a crash once control has activated it still protects the
+        // predecessor and still stops what it asked to stop, and one before keeps what the records held. Activating the
+        // unaccepted deployment again keeps its predecessor.
         let predecessor = match &deployments.unacknowledged {
             Some(pending) if pending.activated == *deployment => pending.predecessor.clone(),
             _ => current.clone().filter(|current| current != deployment),
         };
         let pending = Activation { predecessor, activated: deployment.clone() };
         let stopping = retire::stopping_after(&deployments.stopping, &resident, deployment, desired.stop_previous);
-        activation::write(&self.activation, &pending)?;
-        activation::write(&self.stop_record, &Stopping { current: deployment.clone(), deployments: stopping.clone() })?;
+        let earlier = deployments.unacknowledged.clone();
+        let earlier_stops = current.map(|current| Stopping { current, deployments: deployments.stopping.clone() });
+        let next_stops = Stopping { current: deployment.clone(), deployments: stopping.clone() };
+        Records { committed: earlier.as_ref(), pending: Some(&pending) }.store(&self.activation)?;
+        Records { committed: earlier_stops.as_ref(), pending: Some(&next_stops) }.store(&self.stop_record)?;
         let release = loaded.control(&self.environment, deployment);
-        if let Err(error) = self.core.activate(release, retire::drain_policy(desired)) {
-            _ = activation::clear(&self.activation);
-            _ = self.record_stopping(current.as_deref(), &deployments.stopping);
+        if let Err(error) = self.core.activate(release, deployments.drain) {
+            _ = Records { committed: earlier.as_ref(), pending: None }.store(&self.activation);
+            _ = Records { committed: earlier_stops.as_ref(), pending: None }.store(&self.stop_record);
             return Err(error);
         }
         deployments.stopping = stopping;
+        // Should these writes fail, recovery promotes the pending records of an activation control committed.
+        let activation = Records { committed: Some(&pending), pending: None }.store(&self.activation);
+        if let Err(error) = activation {
+            tracing::warn!(%error, "activation not recorded as committed");
+        }
+        let stops = Records { committed: Some(&next_stops), pending: None }.store(&self.stop_record);
+        if let Err(error) = stops {
+            tracing::warn!(%error, "deployments to stop not recorded as committed");
+        }
         deployments.unacknowledged = Some(pending);
         Ok(true)
     }

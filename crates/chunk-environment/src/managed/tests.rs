@@ -59,6 +59,8 @@ struct Management {
     /// The object storage each desired state grants.
     log_store: Mutex<Option<ObjectStore>>,
     telemetry: Mutex<telemetry::Reports>,
+    /// The drain settings each desired state carries, which management applies unless the environment sets its own.
+    drain: Mutex<DrainSettings>,
 }
 
 /// Management's record of the environment's deployments, oldest first, kept by the rules of `packages/management`.
@@ -136,8 +138,7 @@ impl Management {
             release: served.map(|(_, release, _)| release.clone()),
             log_store: self.log_store.lock().unwrap().clone(),
             stop_previous: served.is_some_and(|(id, _, _)| records.stopping.contains(id)),
-            // The settings management applies unless the environment sets its own.
-            drain: Some(DrainSettings { max_age_seconds: 3 * 3600, deadline_seconds: 4 * 3600 }),
+            drain: Some(*self.drain.lock().unwrap()),
             ..Default::default()
         });
     }
@@ -283,8 +284,16 @@ fn publish(root: &Path, status: u8) -> std::path::PathBuf {
     .unwrap();
     fs::write(project.join("apps/lobby/app.toml"), "").unwrap();
     fs::write(project.join("apps/lobby/build.gradle.kts"), "").unwrap();
-    fs::write(backend.join("source.mjs"), format!("export function status() {{ return {status}; }}")).unwrap();
-    fs::write(backend.join("contract.json"), r#"{"contract_version":3,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}}}}"#).unwrap();
+    fs::write(
+        backend.join("source.mjs"),
+        format!(
+            "export function status() {{ return {status}; }}\n\
+             export function hold(ctx, args) {{ return ctx.scheduler.runAt(args.at, 'flow', null); }}\n\
+             export async function flow() {{ return null; }}"
+        ),
+    )
+    .unwrap();
+    fs::write(backend.join("contract.json"), r#"{"contract_version":3,"runtime_profile":"transactional_v1","tables":{},"functions":{"status":{"kind":"query","visibility":"public","export":"status","arguments":{"type":"null"},"result":{"type":"integer"}},"hold":{"kind":"mutation","visibility":"public","export":"hold","arguments":{"type":"object","fields":{"at":{"schema":{"type":"integer"}}}},"result":{"type":"string"}},"flow":{"kind":"action","visibility":"internal","export":"flow","arguments":{"type":"null"},"result":{"type":"null"}}}}"#).unwrap();
     let mut jar = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     let class = vec![0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 69, 1];
     for (name, bytes) in [
@@ -382,6 +391,7 @@ impl Harness {
             epochs: Mutex::default(),
             log_store: Mutex::default(),
             telemetry: Mutex::default(),
+            drain: Mutex::new(DrainSettings { max_age_seconds: 3 * 3600, deadline_seconds: 4 * 3600 }),
         });
         let url = serve(management.clone()).await;
         let release = (release_id, fs::read(&archive).unwrap());
@@ -440,6 +450,7 @@ impl Harness {
             java: "java".into(),
             environment_token: None,
             fresh: false,
+            defers_retirement: true,
             replication: None,
         }
     }
@@ -595,11 +606,22 @@ async fn a_stop_previous_activation_stops_every_resident_deployment_even_across_
     let record = harness.state().join("stopping.json");
     let stopping = || -> BTreeSet<String> {
         let record = fs::read(&record).unwrap();
-        serde_json::from_slice::<activation::Stopping>(&record).unwrap().deployments
+        let records = serde_json::from_slice::<activation::Records<activation::Stopping>>(&record).unwrap();
+        records.committed.map(|stopping| stopping.deployments).unwrap_or_default()
     };
     assert_eq!(stopping(), BTreeSet::from(["dep_b".to_owned()]));
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+
+    // A crash after dep_d's records were written, before control activated it, leaves dep_b's stop and dep_c's
+    // predecessor as they were.
+    let (activations, stops) = (harness.state().join("managed.json"), record.clone());
+    let mut recorded: serde_json::Value = serde_json::from_slice(&fs::read(&activations).unwrap()).unwrap();
+    recorded["pending"] = serde_json::json!({"predecessor": "dep_c", "activated": "dep_d"});
+    fs::write(&activations, recorded.to_string()).unwrap();
+    let mut recorded: serde_json::Value = serde_json::from_slice(&fs::read(&stops).unwrap()).unwrap();
+    recorded["pending"] = serde_json::json!({"current": "dep_d", "deployments": ["dep_b", "dep_c"]});
+    fs::write(&stops, recorded.to_string()).unwrap();
 
     // Restarted, the core still stops dep_b once management accepts dep_c.
     let (stop, running) = harness.start();
@@ -679,12 +701,15 @@ async fn restarts_retire_only_what_management_no_longer_needs() {
     assert_eq!(chunk_build::verify_release(&installed).unwrap().id, harness.release.0);
 
     // dep_d activates, but the core stops before management accepts it, and dep_e supersedes it meanwhile.
+    // The drain of dep_c, which dep_d replaced, expires while the core is down.
     *harness.management.refused.lock().unwrap() = Some("dep_d".into());
+    harness.management.drain.lock().unwrap().deadline_seconds = 1;
     harness.deploy("dep_d", harness.valid());
     harness.expect(4, "dep_d", DeploymentState::InProgress).await;
     harness.refused().await;
     stop.cancel();
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
     harness.deploy("dep_e", artifact(&harness.management, &harness.url, "rejected", invalid()));
 
     // Restarted, the core keeps dep_c until management accepts dep_d, which it falls back to once dep_e fails.
@@ -812,6 +837,7 @@ async fn a_restart_resumes_the_current_deployment_unchecked_unless_its_archive_i
 
 mod launcher;
 mod replication;
+mod retirement;
 mod runner_image;
 mod status;
 mod suspend;

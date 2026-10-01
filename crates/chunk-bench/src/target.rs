@@ -190,6 +190,7 @@ pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
         java: "java".into(),
         environment_token: None,
         fresh: false,
+        defers_retirement: false,
         replication: None,
     };
     if init.config.scenario.is_backend() {

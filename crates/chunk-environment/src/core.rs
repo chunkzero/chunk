@@ -57,6 +57,8 @@ pub struct CoreConfig {
     /// that outlived it. Only a core with a launcher can stop remote machines, so one without refuses to start while
     /// any are recorded, and so does a core whose stops aren't confirmed.
     pub fresh: bool,
+    /// Whether the caller retires drained releases, as under management, rather than control itself.
+    pub defers_retirement: bool,
     /// Where the log replicates; unset keeps it local only.
     pub replication: Option<chunk_store::Replication>,
 }
@@ -272,7 +274,10 @@ impl Core {
             system: self.system()?,
             listener,
             network,
-            control: chunk_control::Config { environment: config.environment.clone() },
+            control: chunk_control::Config {
+                environment: config.environment.clone(),
+                defers_retirement: config.defers_retirement,
+            },
             host,
             fresh: config.fresh,
             services: Some(sync::services(

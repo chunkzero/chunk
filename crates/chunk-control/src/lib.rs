@@ -95,6 +95,10 @@ pub const NOT_HOSTED: &str = "the player's claim is not on this host";
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub environment: String,
+    /// Whether the caller, instead of control, retires drained releases through [`Control::due_releases`]. Control then
+    /// only moves arrived players away from releases past their maximum age. Not part of the durable configuration.
+    #[serde(skip)]
+    pub defers_retirement: bool,
 }
 
 /// One deployment version's apps, profiles and limits. Control runs every release that still has hosts, and new
@@ -216,8 +220,6 @@ pub struct Control {
     authority: Authority,
     operations: Mutex<BTreeMap<String, Arc<AsyncMutex<()>>>>,
     draining: std::sync::atomic::AtomicBool,
-    /// Whether the caller retires drained releases through [`Control::due_releases`], rather than control itself.
-    defers_retirement: std::sync::atomic::AtomicBool,
     observations: Mutex<BTreeMap<String, nodes::Observation>>,
     /// Counts health passes, so `nodes` streams see health that isn't in the log.
     observed: tokio::sync::watch::Sender<u64>,
@@ -258,7 +260,6 @@ impl Control {
             authority,
             operations: Mutex::default(),
             draining: std::sync::atomic::AtomicBool::new(false),
-            defers_retirement: std::sync::atomic::AtomicBool::new(false),
             capacity: tokio::sync::Notify::new(),
             logins: std::sync::atomic::AtomicU64::new(0),
         }))

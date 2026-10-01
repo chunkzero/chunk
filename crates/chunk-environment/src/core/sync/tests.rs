@@ -253,7 +253,7 @@ impl Fixture {
             connection: directory.path().join("control.json"),
             listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
             network: Some(tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap()),
-            control: chunk_control::Config { environment: "test".into() },
+            control: chunk_control::Config { environment: "test".into(), defers_retirement: false },
             host,
             fresh: false,
             services: Some(services(

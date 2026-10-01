@@ -1,5 +1,7 @@
 //! The records core keeps in its state directory across a restart, written atomically: the activation management has
-//! not yet accepted, which keeps the deployment it replaced protected, and the deployments to stop.
+//! not yet accepted, which keeps the deployment it replaced protected, and the deployments to stop. Each holds the
+//! committed value beside the one an activation in progress would replace it with, so a crash before control commits
+//! that activation loses nothing.
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
@@ -21,6 +23,25 @@ pub(super) struct Activation {
 pub(super) struct Stopping {
     pub current: String,
     pub deployments: BTreeSet<String>,
+}
+
+/// A record's committed value, and the one an activation that control may not have committed yet would make.
+#[derive(Serialize, Deserialize)]
+pub(super) struct Records<T> {
+    pub committed: Option<T>,
+    pub pending: Option<T>,
+}
+
+impl<T: Serialize> Records<&T> {
+    /// Durably records `self`, or removes the record when it holds neither.
+    pub fn store(&self, path: &Path) -> io::Result<()> {
+        if self.committed.is_none() && self.pending.is_none() { clear(path) } else { write(path, self) }
+    }
+}
+
+/// The records at `path`, if any.
+pub(super) fn recorded<T: DeserializeOwned>(path: &Path) -> io::Result<Records<T>> {
+    Ok(read(path)?.unwrap_or(Records { committed: None, pending: None }))
 }
 
 /// The record at `path`, if any.

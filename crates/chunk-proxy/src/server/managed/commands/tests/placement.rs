@@ -160,3 +160,29 @@ async fn a_move_approved_before_an_activation_is_approved_again_by_the_new_deplo
     running.abort();
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn a_move_reserved_in_an_earlier_deployment_is_approved_there_before_it_is_accepted() {
+    let fixture = Fixture::new().await;
+    deployments(&fixture, "c");
+    {
+        let mut placement = fixture.service.placement.lock().unwrap();
+        placement.returns = Some(("b".into(), demand("hub")));
+        placement.denying.insert("b".into());
+    }
+    let (_source, running) = moving(&fixture, &retarget(&fixture, "c"));
+    let movement = fixture.service.movement.clone();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while movement.lock().unwrap().failure.is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // `c` approved the move, but `b`, which holds its reservation, denied it, so the reservation was withdrawn.
+    let deployments: Vec<_> = hooks(&fixture).into_iter().map(|(deployment, _)| deployment).collect();
+    assert_eq!(deployments.first().map(String::as_str), Some("c"));
+    assert_eq!(deployments.last().map(String::as_str), Some("b"));
+    running.abort();
+    fixture.close().await;
+}

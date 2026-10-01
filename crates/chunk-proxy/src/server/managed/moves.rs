@@ -49,7 +49,7 @@ pub(super) async fn next_move(
             ..source.claim.clone()
         };
         let mut guard = ClaimGuard { platform, claim, armed: true, failure: None };
-        match prepare(source, &guard, protocol).await {
+        match prepare(source, &mut guard, protocol).await {
             Ok(Some(assignment)) => return Ok((guard, assignment)),
             // The deployment that approved the move is no longer current, so a newer one approves it again.
             Ok(None) => {
@@ -68,11 +68,12 @@ pub(super) async fn next_move(
 }
 
 /// Prepares `destination` under its deployment's approval, or returns `None` when core no longer places moves there.
-async fn prepare(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Option<Assignment>> {
+/// A move core already reserved in another deployment is approved there too, and `destination` is bound to it.
+async fn prepare(source: &ClaimGuard, destination: &mut ClaimGuard, protocol: i32) -> io::Result<Option<Assignment>> {
     let deadline = Instant::now() + WAIT_TIMEOUT;
     let mut last_error = None;
     loop {
-        let error = match timeout_at(deadline, attempt(source, destination, protocol)).await {
+        let error = match timeout_at(deadline, attempt(source, &mut *destination, protocol)).await {
             Ok(Ok(assignment)) => return Ok(assignment),
             Ok(Err(error)) => error,
             Err(_) => {
@@ -106,16 +107,26 @@ fn preparation_timeout(last_error: Option<&io::Error>) -> io::Error {
     io::Error::new(io::ErrorKind::TimedOut, reason)
 }
 
-async fn attempt(source: &ClaimGuard, destination: &ClaimGuard, protocol: i32) -> io::Result<Option<Assignment>> {
-    let platform = &destination.platform;
-    check_move(platform, &destination.claim).await?;
+async fn attempt(source: &ClaimGuard, destination: &mut ClaimGuard, protocol: i32) -> io::Result<Option<Assignment>> {
+    let platform = destination.platform.clone();
+    check_move(&platform, &destination.claim).await?;
     platform.approve_move(&source.platform, &source.claim, &destination.claim).await?;
-    check_move(platform, &destination.claim).await?;
+    check_move(&platform, &destination.claim).await?;
     let Some(assignment) = claim(destination).await? else { return Ok(None) };
+    if !assignment.deployment.is_empty() && assignment.deployment != destination.claim.deployment {
+        let placed = platform.bind(&assignment.deployment);
+        let claim = Claim {
+            deployment: assignment.deployment.clone(),
+            demand: assignment.destination.clone(),
+            ..destination.claim.clone()
+        };
+        placed.approve_move(&source.platform, &source.claim, &claim).await?;
+        (destination.platform, destination.claim) = (placed, claim);
+    }
     if assignment.protocol != protocol {
         return Err(invalid_data("destination protocol differs from client"));
     }
-    check_move(platform, &destination.claim).await?;
+    check_move(&destination.platform, &destination.claim).await?;
     Ok(Some(assignment))
 }
 

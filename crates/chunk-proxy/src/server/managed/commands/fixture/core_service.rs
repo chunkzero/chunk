@@ -162,7 +162,14 @@ impl Service {
         if let Some(error) = error {
             return Err(error);
         }
-        let outcome = if self.placement.lock().unwrap().refuses(approved) {
+        let placement = self.placement.lock().unwrap();
+        let outcome = if let Some((deployment, destination)) = placement.returns.clone() {
+            claim_result::Outcome::Assignment(ClaimAssignment {
+                deployment,
+                destination: Some(destination),
+                ..reservation()
+            })
+        } else if placement.refuses(approved) {
             claim_result::Outcome::Refusal(ClaimRefusal::RouteAgain.into())
         } else {
             claim_result::Outcome::Assignment(placed(approved))

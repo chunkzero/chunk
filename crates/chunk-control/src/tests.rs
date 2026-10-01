@@ -64,7 +64,7 @@ impl Executor {
 
 /// The environment `release` belongs to.
 fn environment(release: &Release) -> Config {
-    Config { environment: release.deployment.environment.clone() }
+    Config { environment: release.deployment.environment.clone(), defers_retirement: false }
 }
 
 /// Opens control on an environment store of its own at `path`, through that store's backend, with `release` current.
