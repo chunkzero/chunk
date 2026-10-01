@@ -1,10 +1,12 @@
 use std::{
+    collections::BTreeSet,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
-    DatabaseSchema, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, ReadBudget, Result, Revision,
+    DatabaseSchema, Document, DocumentKey, IndexDefinition, IndexRange, KeyRange, Operation, Outcome, ReadBudget,
+    Result, Revision,
 };
 
 /// Adapter-owned reads pinned to one database revision, including schema and indexes.
@@ -18,6 +20,9 @@ pub trait SnapshotReader: Send + Sync {
     /// Schema declarations pinned to the same revision as document reads.
     fn schema(&self) -> &DatabaseSchema;
 
+    /// Indexes built when this snapshot was taken.
+    fn indexes(&self) -> &BTreeSet<IndexDefinition>;
+
     /// # Errors
     /// Rejects undeclared tables or invalid keys and reports storage failures.
     fn get(&self, key: &DocumentKey, budget: &mut ReadBudget) -> Result<Option<Document>>;
@@ -27,7 +32,7 @@ pub trait SnapshotReader: Send + Sync {
     fn scan(&self, range: &KeyRange, budget: &mut ReadBudget) -> Result<Vec<(String, Document)>>;
 
     /// # Errors
-    /// Rejects undeclared indexes or invalid bounds and reports storage failures.
+    /// Rejects unbuilt indexes or invalid bounds and reports storage failures.
     fn scan_index(&self, range: &IndexRange, budget: &mut ReadBudget) -> Result<Vec<(String, Document)>>;
 }
 
@@ -51,6 +56,11 @@ impl Snapshot {
     #[must_use]
     pub fn schema(&self) -> &DatabaseSchema {
         self.reader.schema()
+    }
+
+    #[must_use]
+    pub fn indexes(&self) -> &BTreeSet<IndexDefinition> {
+        self.reader.indexes()
     }
 
     /// Wraps an adapter's reader already pinned to the supplied revision.
@@ -79,7 +89,7 @@ impl Snapshot {
 
     /// Reads an index interval, including empty intervals, at this snapshot's revision.
     /// # Errors
-    /// Rejects invalid bounds or undeclared indexes and reports storage failures.
+    /// Rejects invalid bounds or unbuilt indexes and reports storage failures.
     pub fn scan_index(&self, range: &IndexRange) -> Result<Vec<(String, Document)>> {
         self.scan_index_bounded(range, &mut ReadBudget::default())
     }

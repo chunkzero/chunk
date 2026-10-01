@@ -465,8 +465,8 @@ impl<'a> Managed<'a> {
         backend.check_deployment(id).await.is_ok()
     }
 
-    /// Loads the deployment's release, makes it resident in the backend, and, unless `cancel` superseded it by then,
-    /// makes it control's current release. Returns whether it did.
+    /// Loads the deployment's release, makes it resident in the backend and waits until it is ready, and, unless
+    /// `cancel` superseded it by then, makes it control's current release. Returns whether it did.
     async fn deploy(&self, desired: &v1::AttachResponse, cancel: &CancellationToken) -> io::Result<bool> {
         let artifact = desired.release.as_ref().ok_or_else(|| io::Error::other("the deployment names no release"))?;
         let Some(loaded) = release::load(&self.client, &self.releases, artifact, cancel).await? else {

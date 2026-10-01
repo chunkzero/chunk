@@ -65,8 +65,7 @@ fn compound_indexes_use_sql_ranges_ordering_and_limits() {
     store.commit(commit("scores", 2, writes)).unwrap();
     let snapshot = store.snapshot().unwrap();
     let mut range = IndexRange {
-        table: "matches".into(),
-        index: "by_player_score".into(),
+        index: crate::tests::index("matches", "by_player_score", &["player", "score"]),
         prefix: vec![json!("alex")],
         start: Some(json!(2)),
         end: Some(json!(9)),
@@ -82,11 +81,7 @@ fn compound_indexes_use_sql_ranges_ordering_and_limits() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    assert!(
-        plan.iter()
-            .any(|step| step.contains("SEARCH") && step.contains(&schema::index_name("matches", "by_player_score"))),
-        "{plan:?}"
-    );
+    assert!(plan.iter().any(|step| step.contains("SEARCH") && step.contains(&indexes::name(&range.index))), "{plan:?}");
     assert!(!plan.iter().any(|step| step.contains("TEMP B-TREE")), "{plan:?}");
     range.limit = 10;
     let ids: Vec<_> = snapshot.scan_index(&range).unwrap().into_iter().map(|(id, _)| id).collect();
@@ -155,8 +150,7 @@ fn numeric_ranges_preserve_large_integer_and_fractional_bound_ordering() {
         (json!(i64::MIN), json!(-9_223_372_036_854_775_808.0), vec![]),
     ] {
         let range = IndexRange {
-            table: "numbers".into(),
-            index: "by_value".into(),
+            index: crate::tests::index("numbers", "by_value", &["value"]),
             prefix: vec![],
             start: Some(start),
             end: Some(end),
@@ -190,7 +184,7 @@ fn optional_index_bounds_and_replacements_track_absence_without_stale_entries() 
         ))
         .unwrap();
     let old = store.snapshot().unwrap();
-    let range = IndexRange { table: "scores".into(), index: "by_score".into(), ..by_coins() };
+    let range = IndexRange { index: crate::tests::index("scores", "by_score", &["score"]), ..by_coins() };
     for (start, end, expected) in [
         (None, Some(json!(null)), vec![]),
         (Some(json!(null)), Some(json!(null)), vec![]),
@@ -231,8 +225,8 @@ fn invalid_index_queries_are_rejected_even_for_empty_tables() {
     for range in [
         IndexRange { limit: 0, ..by_coins() },
         IndexRange { limit: 100_001, ..by_coins() },
-        IndexRange { table: "bad table".into(), ..by_coins() },
-        IndexRange { index: "absent".into(), ..by_coins() },
+        IndexRange { index: crate::tests::index("bad table", "by_coins", &["coins"]), ..by_coins() },
+        IndexRange { index: crate::tests::index("profiles", "by_coins", &[]), ..by_coins() },
         IndexRange { prefix: vec![json!(1), json!(2)], ..by_coins() },
         IndexRange { prefix: vec![json!(1)], start: Some(json!(2)), ..by_coins() },
         IndexRange { prefix: vec![json!(null)], ..by_coins() },
@@ -242,6 +236,12 @@ fn invalid_index_queries_are_rejected_even_for_empty_tables() {
     ] {
         assert!(matches!(range.validate(&crate::tests::schema()["profiles"]), Err(Error::Invalid(_))), "{range:?}");
         assert!(matches!(snapshot.scan_index(&range), Err(Error::Invalid(_))), "{range:?}");
+    }
+    for index in [
+        crate::tests::index("profiles", "absent", &["coins"]),
+        crate::tests::index("profiles", "by_coins", &["coins", "coins"]),
+    ] {
+        assert!(matches!(snapshot.scan_index(&IndexRange { index, ..by_coins() }), Err(Error::Invalid(_))));
     }
 }
 
@@ -295,8 +295,7 @@ fn boolean_and_string_index_bounds_follow_declared_scalar_order() {
         .unwrap();
     let snapshot = store.snapshot().unwrap();
     let range = IndexRange {
-        table: "flags".into(),
-        index: "by_active_name".into(),
+        index: crate::tests::index("flags", "by_active_name", &["active", "name"]),
         start: Some(json!(false)),
         end: Some(json!(true)),
         ..by_coins()

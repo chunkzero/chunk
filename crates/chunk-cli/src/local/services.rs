@@ -27,11 +27,11 @@ impl Shared {
         self.core.control()
     }
 
-    /// Makes `bundle` resident beside earlier versions, retrying while the backend is busy.
     pub fn set_secrets(&self, secrets: chunk_backend::Secrets) {
         self.core.set_secrets(secrets);
     }
 
+    /// Makes `bundle` resident beside earlier versions and waits until it is ready, retrying while the backend is busy.
     pub async fn deploy(&self, bundle: chunk_contract::Deployment) -> io::Result<()> {
         self.core.deploy(bundle).await
     }

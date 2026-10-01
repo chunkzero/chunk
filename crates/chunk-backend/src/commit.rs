@@ -3,7 +3,9 @@ use std::{
     thread::JoinHandle,
 };
 
-use chunk_store::{Commit, DatabaseSchema, Epoch, Operation, Reply, Request, Revision, Snapshot, Storage, Write};
+use chunk_store::{
+    Commit, DatabaseSchema, Epoch, Operation, PendingWork, Reply, Request, Revision, Snapshot, Storage, Write,
+};
 use tokio::sync::mpsc::Sender;
 
 use crate::{
@@ -21,8 +23,12 @@ pub(crate) enum Job {
     Release {
         id: String,
     },
-    Activate {
+    Install {
         deployment: Arc<chunk_contract::Deployment>,
+    },
+    /// Runs one item of pending work.
+    Work {
+        id: u64,
     },
     Commit {
         expected: Revision,
@@ -47,6 +53,14 @@ const MAX_BATCH: usize = 64;
 /// Every system commit records an operation with a unique ID, so they share one request fingerprint.
 const FINGERPRINT: [u8; 32] = *b"chunk-environment-system-commit!";
 
+/// What the commit thread found on opening the store.
+pub(crate) struct Initial {
+    pub snapshot: Snapshot,
+    pub deployments: Vec<chunk_contract::Deployment>,
+    pub jobs: chunk_store::Jobs,
+    pub work: Vec<PendingWork>,
+}
+
 /// How far the log has advanced.
 struct Sequence {
     revision: Revision,
@@ -62,10 +76,7 @@ pub(crate) struct Committer {
 }
 
 impl Committer {
-    pub fn new(
-        mut store: Box<dyn Storage>,
-        events: Sender<Event>,
-    ) -> Result<(Self, Snapshot, Vec<chunk_contract::Deployment>, chunk_store::Jobs)> {
+    pub fn new(mut store: Box<dyn Storage>, events: Sender<Event>) -> Result<(Self, Initial)> {
         let (jobs, incoming) = mpsc::sync_channel::<Job>(64);
         let (ready, initialized) = mpsc::sync_channel(1);
         let lane = Arc::new(Lane::default());
@@ -73,9 +84,14 @@ impl Committer {
         let thread = std::thread::Builder::new().name("chunk-commit".into()).spawn(move || {
             let lane = Closing(thread_lane);
             let initial = (|| -> Result<_> {
-                Ok((store.snapshot()?, store.deployments()?, store.job_command(chunk_store::JobCommand::Recover)?))
+                Ok(Initial {
+                    snapshot: store.snapshot()?,
+                    deployments: store.deployments()?,
+                    jobs: store.job_command(chunk_store::JobCommand::Recover)?,
+                    work: store.pending_work()?,
+                })
             })();
-            let Ok((snapshot, ..)) = &initial else {
+            let Ok(Initial { snapshot, .. }) = &initial else {
                 let _ = ready.send(initial);
                 return;
             };
@@ -126,8 +142,8 @@ impl Committer {
             }
         })?;
         let committer = Self { jobs: Some(jobs), lane, thread: Some(thread) };
-        let (snapshot, deployments, scheduled) = initialized.recv().map_err(|_| Error::Closed)??;
-        Ok((committer, snapshot, deployments, scheduled))
+        let initial = initialized.recv().map_err(|_| Error::Closed)??;
+        Ok((committer, initial))
     }
 
     pub fn lane(&self) -> Arc<Lane> {
@@ -154,26 +170,41 @@ impl Drop for Closing {
 fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut bool) -> Event {
     match job {
         Job::Release { id } => {
-            let result =
-                if *failed { Err(Error::CommitFailed) } else { store.release_deployment(&id).map_err(Error::from) };
-            *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
-            Event::Released { result }
-        }
-        Job::Activate { deployment } => {
             let result = if *failed {
                 Err(Error::CommitFailed)
             } else {
-                store.activate_deployment(&deployment).map_err(Error::from).and_then(|revision| {
-                    sequence.revision = revision;
-                    let snapshot = store.snapshot().map_err(|_| Error::CommitFailed)?;
-                    if snapshot.revision != revision {
-                        return Err(Error::CommitFailed);
-                    }
-                    Ok(snapshot)
+                store.release_deployment(&id).map_err(Error::from).and_then(|released| {
+                    let work = store.pending_work().map_err(|_| Error::CommitFailed)?;
+                    Ok((released, work))
                 })
             };
             *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
-            Event::Activated { result }
+            Event::Released { result }
+        }
+        Job::Install { deployment } => {
+            let result = if *failed {
+                Err(Error::CommitFailed)
+            } else {
+                store.install_deployment(&deployment).map_err(Error::from).and_then(|revision| {
+                    sequence.revision = revision;
+                    let (snapshot, work) = current(store)?;
+                    if snapshot.revision != revision {
+                        return Err(Error::CommitFailed);
+                    }
+                    Ok((snapshot, work))
+                })
+            };
+            *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+            Event::Installed { result }
+        }
+        Job::Work { id } => {
+            let result = if *failed {
+                Err(Error::CommitFailed)
+            } else {
+                store.run_work(id).map_err(Error::from).and_then(|()| current(store))
+            };
+            *failed |= result.as_ref().is_err_and(|error| !error.is_rejected_commit());
+            Event::Worked { id, result }
         }
         Job::Scheduling { command } => {
             let result = if *failed {
@@ -186,6 +217,12 @@ fn run(store: &mut dyn Storage, sequence: &mut Sequence, job: Job, failed: &mut 
         }
         Job::Prepare { .. } | Job::Commit { .. } | Job::Wake => unreachable!("durable writes run in batches"),
     }
+}
+
+/// A snapshot after a durable write, with the work still pending. Failing to read them is fatal.
+fn current(store: &mut dyn Storage) -> Result<(Snapshot, Vec<PendingWork>)> {
+    let snapshot = store.snapshot().map_err(|_| Error::CommitFailed)?;
+    Ok((snapshot, store.pending_work().map_err(|_| Error::CommitFailed)?))
 }
 
 /// Installs system tables, reporting whether that advanced the revision, and reads the store.

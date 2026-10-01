@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use chunk_js::{Cancellation, DeploymentId};
 use chunk_store::{
-    DatabaseSchema, Document, DocumentKey, IndexRange, KeyRange, Operation, Outcome, ReadBudget, Revision, Snapshot,
-    SnapshotReader,
+    DatabaseSchema, Document, DocumentKey, IndexDefinition, IndexRange, KeyRange, Operation, Outcome, ReadBudget,
+    Revision, Snapshot, SnapshotReader,
 };
 use serde_json::json;
 use tokio::sync::{Semaphore, oneshot};
@@ -16,7 +16,7 @@ use crate::{
     service::{Call, GroupSubscription, Request},
 };
 
-struct Empty(DatabaseSchema);
+struct Empty(DatabaseSchema, BTreeSet<IndexDefinition>);
 
 impl SnapshotReader for Empty {
     fn outcome(&self, _: &Operation) -> chunk_store::Result<Option<Outcome>> {
@@ -24,6 +24,9 @@ impl SnapshotReader for Empty {
     }
     fn schema(&self) -> &DatabaseSchema {
         &self.0
+    }
+    fn indexes(&self) -> &BTreeSet<IndexDefinition> {
+        &self.1
     }
     fn get(&self, _: &DocumentKey, _: &mut ReadBudget) -> chunk_store::Result<Option<Document>> {
         Ok(None)
@@ -37,7 +40,7 @@ impl SnapshotReader for Empty {
 }
 
 fn view(revision: u64) -> Arc<View> {
-    Arc::new(View::new(Snapshot::new(Revision(revision), Empty(DatabaseSchema::default()))))
+    Arc::new(View::new(Snapshot::new(Revision(revision), Empty(DatabaseSchema::default(), BTreeSet::new()))))
 }
 
 fn key() -> DocumentKey {

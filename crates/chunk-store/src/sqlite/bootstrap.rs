@@ -34,7 +34,7 @@ pub(super) fn acquire_writer_lock(path: &Path) -> Result<(PathBuf, WriterLock)> 
 }
 
 /// The current store format, recorded as SQLite's `user_version`.
-pub(super) const FORMAT: i64 = 8;
+pub(super) const FORMAT: i64 = 9;
 
 pub(crate) fn open(path: &Path, environment: &str) -> Result<Connection> {
     let mut connection = Connection::open(path)?;
@@ -81,6 +81,12 @@ pub(crate) fn open(path: &Path, environment: &str) -> Result<Connection> {
         // point either repeats the migration or already left this marker.
         super::log::mark_unlogged(&connection)?;
     }
+    upgrade(&connection, version)?;
+    Ok(connection)
+}
+
+/// Migrates a store of an older `version` to [`FORMAT`], one transaction per format.
+fn upgrade(connection: &Connection, version: i64) -> Result<()> {
     if version < 3 {
         connection.execute_batch(
             "BEGIN IMMEDIATE;
@@ -137,7 +143,21 @@ pub(crate) fn open(path: &Path, environment: &str) -> Result<Connection> {
              COMMIT;"
         ))?;
     }
-    Ok(connection)
+    if version < 9 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE _chunk_indexes (definition TEXT PRIMARY KEY) STRICT;
+             CREATE TABLE _chunk_work (
+                 id INTEGER PRIMARY KEY,
+                 work TEXT NOT NULL UNIQUE,
+                 done INTEGER NOT NULL CHECK (done >= 0),
+                 total INTEGER NOT NULL CHECK (total >= 0)
+             ) STRICT;
+             PRAGMA user_version = 9;
+             COMMIT;",
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn version(connection: &Connection) -> Result<i64> {
