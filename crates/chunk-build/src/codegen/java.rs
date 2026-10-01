@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, io};
 
 use chunk_contract::{Field, FunctionKind, Schema, Visibility};
 
-use super::{BackendMetadata, java_constant, quote, validate_literals};
+use super::{BackendMetadata, quote, validate_literals};
 
 mod client;
 mod configurations;

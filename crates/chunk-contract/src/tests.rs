@@ -199,4 +199,10 @@ fn vars_resolve_by_environment_name() {
     assert_eq!(resolved(Some("prod")), [("MOTD".to_owned(), "welcome".to_owned()), top[1].clone()]);
     let shadowed = crate::EnvManifest { secrets: ["REGION".into()].into(), ..manifest };
     assert!(shadowed.validate().is_err());
+    let section = |names: std::ops::Range<usize>| names.map(|name| (format!("V{name}"), "value".to_owned())).collect();
+    let spread = crate::EnvManifest {
+        environments: [("a".into(), section(0..200)), ("b".into(), section(200..257))].into(),
+        ..crate::EnvManifest::default()
+    };
+    assert!(spread.validate().unwrap_err().contains("more than 256 variables in all"));
 }
