@@ -81,12 +81,12 @@ export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<t
             returning *`,
         );
         await notify(tx, { kind: "environment", environmentId: id });
-        return create(CreateEnvironmentResponseSchema, { environment: row && toEnvironment(row) });
+        return create(CreateEnvironmentResponseSchema, { environment: row && toEnvironment(row, edge) });
       });
     },
 
     async getEnvironment(request, context) {
-      return { environment: toEnvironment(await loadEnvironment(sql, callerOf(context), request.environmentId)) };
+      return { environment: toEnvironment(await loadEnvironment(sql, callerOf(context), request.environmentId), edge) };
     },
 
     async listEnvironments(request, context) {
@@ -99,7 +99,7 @@ export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<t
         order by seq
         limit ${p.size + 1}`;
       const { items, nextPageToken } = pageOf(rows, p, (row) => row.seq.toString());
-      return { environments: items.map(toEnvironment), nextPageToken };
+      return { environments: items.map((row) => toEnvironment(row, edge)), nextPageToken };
     },
 
     async updateEnvironment(request, context) {
@@ -114,7 +114,7 @@ export function projectService({ sql, keys, edge }: Deps): Partial<ServiceImpl<t
         returning *`;
       if (!row) throw invalid("environment was deleted");
       await notify(sql, { kind: "environment", environmentId: row.id });
-      return { environment: toEnvironment(row) };
+      return { environment: toEnvironment(row, edge) };
     },
 
     async deleteEnvironment(request, context) {

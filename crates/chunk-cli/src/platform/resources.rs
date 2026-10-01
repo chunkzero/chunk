@@ -140,11 +140,18 @@ pub(super) async fn environments(options: Environments) -> io::Result<()> {
     })
     .await?;
     table(
-        ["NAME", "ID", "STATE", "PLAYERS", "HOSTNAME", "ACTIVE DEPLOYMENT"],
+        ["NAME", "ID", "STATE", "PLAYERS", "JOIN ADDRESS", "ACTIVE DEPLOYMENT"],
         environments.into_iter().map(|environment| {
             let state = label(environment.state().as_str_name(), "ENVIRONMENT_STATE_");
             let players = environment.online_players.to_string();
-            [environment.name, environment.id, state, players, environment.hostname, environment.active_deployment_id]
+            [
+                environment.name,
+                environment.id,
+                state,
+                players,
+                environment.join_address,
+                environment.active_deployment_id,
+            ]
         }),
     )
 }

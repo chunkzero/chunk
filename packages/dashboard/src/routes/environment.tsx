@@ -24,8 +24,8 @@ export function Environment() {
         </div>
         {environment && (
           <dl className="flex flex-wrap gap-x-8 gap-y-2 text-sm">
-            <Fact label="Hostname">
-              <span className="font-mono text-xs">{environment.hostname || "None"}</span>
+            <Fact label="Join address">
+              <span className="font-mono text-xs">{environment.joinAddress || "None"}</span>
             </Fact>
             <Fact label="Players">{environment.onlinePlayers}</Fact>
             <Fact label="Release">

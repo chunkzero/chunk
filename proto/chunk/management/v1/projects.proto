@@ -58,6 +58,9 @@ message Environment {
   string forked_from_environment_id = 9;
   string forked_from_snapshot_id = 10;
   google.protobuf.Timestamp create_time = 11;
+  // What players enter in Minecraft to join: the hostname, plus `:port` unless the edge's player port is 25565. Empty
+  // when there is no hostname.
+  string join_address = 12;
 }
 
 enum EnvironmentState {
