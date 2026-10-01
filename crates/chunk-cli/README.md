@@ -69,10 +69,10 @@ runs per project at a time. `--java PATH` overrides the Java executable Gradle s
 Java version. `--offline-logins` admits players without Mojang authentication, under offline-mode UUIDs; use it only for
 local testing.
 
-Backend functions read `chunk.toml`'s top-level `[vars]`, or with `--env NAME` its `[env.NAME.vars]` over them. Actions
-read their secrets from `.dev.vars` in the project root: `NAME=value` lines, with `#` comments and optional quotes. Keep
-it out of version control, as the project template's `.gitignore` does. `chunk dev` reads it on every rebuild, editing
-it triggers one, and it warns, by name only, about secrets `[secrets] required` lists that it lacks.
+Backend functions read `chunk.toml`'s top-level `[vars]`, or with `--env NAME` its `[env.NAME.vars]` over them, key by
+key. Actions read their secrets from `.dev.vars` in the project root: `NAME=value` lines, with `#` comments and optional
+quotes. Keep it out of version control, as the project template's `.gitignore` does. `chunk dev` reads it on every
+rebuild, editing it triggers one, and it warns, by name only, about secrets `[secrets] required` lists that it lacks.
 
 `chunk dev` watches the project's sources, except build output, `.chunk`, `dist`, `node_modules` and hidden files other
 than `.dev.vars`, and rebuilds 300 ms after the last change (`--no-watch` rebuilds only on request). A new release
@@ -169,12 +169,12 @@ reports the environment gone, for up to five minutes, and Ctrl-C stops waiting b
 `--app ID` keeps only that app's JVM entries. A self-hosted install has none to show yet, since its environments don't
 send their logs to management.
 
-`chunk secrets put NAME --env E` sets a secret's value, which backend actions read through `ctx.env.NAME`. It reads the
-value from a hidden prompt on a terminal, or else from stdin without its final line break, as in
-`printf %s "$TOKEN" | chunk secrets put API_TOKEN --env prod`. Each change is a new version, and running deployments
-receive it without a redeploy. Values are non-empty UTF-8 up to 64 KiB, and an environment holds up to 256 secrets.
-`chunk secrets list` shows names and versions only; no command prints a value. `chunk secrets delete NAME` asks for
-confirmation on a terminal and needs `--yes` without one.
+`chunk secrets put NAME --env E` sets a secret's value for a name `chunk.toml`'s `[secrets] required` lists, which
+backend actions read through `ctx.env.NAME`. It reads the value from a hidden prompt on a terminal, or else from stdin
+without its final line break, as in `printf %s "$TOKEN" | chunk secrets put API_TOKEN --env prod`. Each change is a new
+version, and running deployments receive it without a redeploy. Values are non-empty UTF-8 up to 64 KiB, and an
+environment holds up to 256 secrets. `chunk secrets list` shows names and versions only; no command prints a value.
+`chunk secrets delete NAME` asks for confirmation on a terminal and needs `--yes` without one.
 
 ## Testing
 

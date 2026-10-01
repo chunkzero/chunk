@@ -37,9 +37,10 @@ required = ["STORE_API_KEY"] # names only; values are set per environment
 ```
 
 Names are 1 to 128 letters, digits or underscores, not starting with a digit, and a name is either a variable or a
-secret. Values are non-empty strings of up to 64 KiB, and a section holds at most 256. The release carries every section,
-and the environment serving it picks its own, so one release moves between environments unchanged. Variable values are
-plain configuration in the release; secret values never are.
+secret. Values are non-empty strings of up to 64 KiB, and a section holds at most 256. The release carries every
+section, and the environment serving it picks its own, so one release moves between environments unchanged. An
+`[env.<name>.vars]` table overrides `[vars]` key by key, unlike Wrangler's, which replaces the whole table: keys it
+leaves out keep their top-level values. Variable values are plain configuration in the release; secret values never are.
 
 Each app is a directory under `apps/` with an `app.ts` and its own `build.gradle.kts`. The app's `id` is stable and
 independent of its path: `apps/games/arena/app.ts` may declare `id: "arena"` while Gradle knows it as

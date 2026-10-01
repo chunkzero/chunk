@@ -79,8 +79,8 @@ limit.
 ## Actions
 
 Actions (`action` / `internalAction`) run outside transactions, each on a fresh isolate in a bounded worker. Their
-context has `caller`, `invocationId`, `env`, `fetch`, `runQuery`, `runMutation` and `sleep`; it has no `db`. Each
-nested query or mutation runs through the engine against a fresh snapshot, as the original caller and deployment, and a
+context has `caller`, `invocationId`, `env`, `fetch`, `runQuery`, `runMutation` and `sleep`; it has no `db`. Each nested
+query or mutation runs through the engine against a fresh snapshot, as the original caller and deployment, and a
 mutation gets the operation ID `action/<invocationId>/<effect sequence>`.
 
 Call `allocate_action_id` and then `start_action(id, call)`, keeping the ID when acceptance is uncertain: one ID starts
@@ -91,16 +91,17 @@ mutation; earlier effects are never rolled back, and actions are never retried a
 **Variables and secrets.** `ctx.env` holds the deployment's `chunk.toml` variables: its `[vars]`, with the
 `[env.<name>.vars]` that `ActionEffects::with_vars` selects applied over them. Queries, mutations and hooks see those
 alone. Actions and commands also see the environment's secrets, which `Backend::set_secrets` replaces at runtime: each
-invocation keeps the secrets it started with, and later ones read the new set. Secrets live in memory only, are supplied
-again after a restart, and are redacted from action logs and error messages that contain their values.
+invocation keeps the secrets it started with, and later ones read the new set. A secret's value enters the action's
+isolate only when the action reads that name. Secrets live in memory only, are supplied again after a restart, and are
+redacted from action logs and error messages that contain their values.
 
 **HTTP.** `ctx.fetch({url, method, headers, body})` reaches any public HTTP(S) URL through one client shared by the
 environment. It refuses loopback, private, CGNAT, link-local (cloud metadata included), unique-local, multicast and
 reserved addresses after DNS resolution, and follows up to ten redirects itself, checking each; a redirect to another
 origin drops `Authorization` and `Cookie`. Proxies, retries, decompression and cookies are off; bodies are UTF-8 text up
-to 64 KiB out and 128 KiB back, with 32 headers of up to 8 KiB in total each way, and a fetch has ten seconds. Each
-action has one fetch in flight. An outcome is `completed`, `rejected` (never sent) or `unknown` (sent, result lost), with
-a stable `effectId`. Error messages never include URLs or bodies.
+to 64 KiB out and 128 KiB back, with 32 request headers of up to 8 KiB in total and 64 response headers of up to 32 KiB,
+and a fetch has ten seconds. Each action has one fetch in flight. An outcome is `completed`, `rejected` (never sent) or
+`unknown` (sent, result lost), with a stable `effectId`. Error messages never include URLs or bodies.
 
 ## Scheduled jobs
 
