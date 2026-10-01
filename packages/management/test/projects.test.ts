@@ -45,6 +45,7 @@ describe.skipIf(!databaseUrl)("ProjectService", () => {
     expect(production?.state).toBe(EnvironmentState.PENDING);
     expect(production?.sleepingPing).toBe(SleepingPingMode.CACHE);
     expect(production?.hostname).toBe(`${production?.id.replace("_", "-")}.play.example.net`);
+    expect(production?.joinAddress).toBe(production?.hostname);
     const updated = await projects.updateEnvironment({
       environmentId: production?.id ?? "",
       sleepingPing: SleepingPingMode.WAKE,

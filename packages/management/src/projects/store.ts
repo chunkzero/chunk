@@ -1,5 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 
+import type { Edge } from "../config.ts";
 import type { Db } from "../db.ts";
 import type { SleepingPingMode } from "../gen/chunk/management/v1/common_pb.ts";
 import {
@@ -44,7 +45,7 @@ export function toProject(row: ProjectRow): Project {
   });
 }
 
-export function toEnvironment(row: EnvironmentRow): Environment {
+export function toEnvironment(row: EnvironmentRow, edge: Edge | undefined): Environment {
   return create(EnvironmentSchema, {
     id: row.id,
     projectId: row.project_id,
@@ -57,7 +58,13 @@ export function toEnvironment(row: EnvironmentRow): Environment {
     forkedFromEnvironmentId: row.forked_from_environment_id,
     forkedFromSnapshotId: row.forked_from_snapshot_id,
     createTime: timestamp(row.create_time),
+    joinAddress: joinAddress(row.hostname, edge),
   });
+}
+
+function joinAddress(hostname: string, edge: Edge | undefined): string {
+  if (!hostname) return "";
+  return edge && edge.port !== 25_565 ? `${hostname}:${edge.port}` : hostname;
 }
 
 export async function findProject(db: Db, id: string): Promise<ProjectRow | undefined> {

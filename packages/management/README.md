@@ -30,7 +30,7 @@ bun src/main.ts
 | `CHUNK_MAX_RELEASE_EXPANDED_BYTES`     | `8589934592`                  | How far a release archive may expand while it is verified.                                                  |
 | `CHUNK_MAX_RELEASE_ENTRIES`            | `100000`                      | How many entries a release archive may hold.                                                                |
 | `CHUNK_EDGE_DOMAIN`                    | unset                         | New environments get the hostname `env-<24 hex digits>.<domain>`; point `*.<domain>` at the edge.           |
-| `CHUNK_EDGE_PORT`                      | `25565`                       | The edge's player port, used in custom domains' SRV records.                                                |
+| `CHUNK_EDGE_PORT`                      | `25565`                       | The edge's player port, used in custom domains' SRV records and environments' join addresses.               |
 | `CHUNK_EDGE_TOKEN`                     | unset                         | The token edges call `EdgeService` with, at least 32 characters, recorded on start.                         |
 | `CHUNK_ENVIRONMENT_IMAGE`              | unset                         | The image core and gateway machines run. Unset, no machines run and nothing can be deployed.                |
 | `CHUNK_JVM_IMAGE`                      | unset                         | The JVM runner image, containing `{java}`, which is replaced by the release's Java version.                 |

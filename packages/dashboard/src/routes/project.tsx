@@ -30,7 +30,7 @@ export function Project() {
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium">{environment.name}</p>
                     <p className="truncate font-mono text-xs text-muted-foreground">
-                      {environment.hostname || "No hostname"}
+                      {environment.joinAddress || "No hostname"}
                     </p>
                   </div>
                   <div className="hidden text-right text-xs sm:block">

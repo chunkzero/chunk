@@ -127,10 +127,10 @@ async fn follow(client: &Client, environment: &Environment, mut deployment: Depl
         }
         match state {
             DeploymentState::Active => {
-                let place = if environment.hostname.is_empty() {
+                let place = if environment.join_address.is_empty() {
                     String::new()
                 } else {
-                    format!("; players join at {}", environment.hostname)
+                    format!("; players join at {}", environment.join_address)
                 };
                 return cliclack::log::success(format!("Deployed to {}{place}", environment.name));
             }

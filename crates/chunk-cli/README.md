@@ -27,7 +27,7 @@ covers the packaged SDK.
 | `chunk auth status`                | Shows the platform and who you are logged in as.                                            |
 | `chunk auth logout`                | Revokes the CLI's token and forgets it.                                                     |
 | `chunk projects [create NAME]`     | Lists the platform's projects, or creates one.                                              |
-| `chunk environments [create NAME]` | Lists a project's environments with their state and hostname, or creates one.               |
+| `chunk environments [create NAME]` | Lists a project's environments with their state and join address, or creates one.           |
 | `chunk environments delete E`      | Deletes an environment, destroying its machines and data.                                   |
 | `chunk deploy [PROJECT] --env E`   | Builds the project, uploads and deploys its release, and waits until it is active.          |
 | `chunk deployments --env E`        | Lists an environment's recent deployments, newest first.                                    |

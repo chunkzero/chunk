@@ -77,16 +77,17 @@ chunk deploy examples/local --env prod
 
 `chunk auth login` prints a link to the dashboard; open it, signed in with the operator token, and approve the login.
 `chunk deploy` builds a release, uploads it unless management already holds it, deploys it and waits until it is active,
-then prints the environment's hostname. Run it again to deploy a new release; the dashboard can roll back to an earlier
+then prints the address players join at. Run it again to deploy a new release; the dashboard can roll back to an earlier
 one.
 
-Players join at that hostname and the player port, for example `env-<id>.localhost:25565` from this host with the
-default domain. The edge routes by hostname, so a bare IP address or `localhost` reaches no environment.
+Players join at that address: the environment's hostname, followed by `:port` when `CHUNK_PLAYER_PORT` is not 25565, for
+example `env-<id>.localhost` from this host with the defaults. The edge routes by hostname, so a bare IP address or
+`localhost` reaches no environment.
 
 To see what is running:
 
 ```sh
-chunk environments            # state, players and hostname
+chunk environments            # state, players and join address
 chunk deployments --env prod  # recent deployments
 chunk apps --env prod         # the active release's apps and session types
 ```
