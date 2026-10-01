@@ -423,7 +423,7 @@ impl<'a> Managed<'a> {
                 }
                 Err(error) => {
                     tracing::warn!(%error, deployment, "deployment rejected; the previous one keeps serving");
-                    let message = bounded(&error.to_string());
+                    let message = crate::logs::escaped(MAX_MESSAGE_BYTES, &error);
                     lock(&self.deployments).rejected = Some((deployment.into(), message.clone()));
                     (v1::DeploymentState::Failed, message)
                 }
@@ -753,13 +753,6 @@ fn lock(deployments: &Mutex<Deployments>) -> MutexGuard<'_, Deployments> {
 
 fn progress(deployment: &str, state: v1::DeploymentState, message: String) -> v1::DeploymentProgress {
     v1::DeploymentProgress { deployment_id: deployment.into(), state: state.into(), message }
-}
-
-/// `message` with each NUL escaped, since management stores none, and cut to [`MAX_MESSAGE_BYTES`].
-fn bounded(message: &str) -> String {
-    let mut message = crate::logs::escape_nul(message).into_owned();
-    message.truncate(message.floor_char_boundary(MAX_MESSAGE_BYTES));
-    message
 }
 
 #[cfg(test)]

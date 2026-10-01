@@ -3,6 +3,7 @@ import type { Db, Sql } from "../db.ts";
 import { CapacityState } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { failedPrecondition, notFound } from "../rpc/validate.ts";
+import { endUsage } from "./reports.ts";
 
 /** Advances the environment's desired-state revision, so attached processes receive a new message. */
 export async function advanceRevision(db: Db, environmentId: string): Promise<void> {
@@ -13,13 +14,13 @@ export async function advanceRevision(db: Db, environmentId: string): Promise<vo
 /**
  * Makes a core instance the environment's owner under a new, higher lease. Refuses instances another core's attach
  * superseded and epochs lower than the environment's. The previous owner, if another instance, is superseded for
- * good, and its capacity requests are released as `ReleaseCapacity` would, and its gateways and reported login count
- * are dropped. A new lease starts with no accepted status report.
+ * good: its capacity requests are released as `ReleaseCapacity` would, its stored usage ends at the takeover, and its
+ * gateways and reported login count are dropped. A new lease starts with no accepted status report.
  */
 export async function claimLease(sql: Sql, environmentId: string, instanceId: string, epoch: bigint) {
   const { lease } = await sql.begin(async (tx) => {
-    const [environment] = await tx<{ epoch: bigint; owner_instance_id: string }[]>`
-      select epoch, owner_instance_id from environments where id = ${environmentId} for update`;
+    const [environment] = await tx<{ epoch: bigint; owner_instance_id: string; owner_since: Date | null }[]>`
+      select epoch, owner_instance_id, owner_since from environments where id = ${environmentId} for update`;
     if (!environment) throw notFound("environment");
     const [superseded] = await tx`
       select 1 from superseded_instances where environment_id = ${environmentId} and instance_id = ${instanceId}`;
@@ -29,9 +30,10 @@ export async function claimLease(sql: Sql, environmentId: string, instanceId: st
     }
     if (environment.owner_instance_id && environment.owner_instance_id !== instanceId) {
       await tx`
-        insert into superseded_instances (environment_id, instance_id)
-        values (${environmentId}, ${environment.owner_instance_id})
+        insert into superseded_instances (environment_id, instance_id, owned_since, superseded_time)
+        values (${environmentId}, ${environment.owner_instance_id}, ${environment.owner_since}, now())
         on conflict do nothing`;
+      await endUsage(tx, environmentId, environment.owner_instance_id);
       await tx`
         update capacity_requests
         set state = case when torn_down then ${CapacityState.RELEASED}::smallint else ${CapacityState.RELEASING}::smallint end
@@ -41,6 +43,7 @@ export async function claimLease(sql: Sql, environmentId: string, instanceId: st
     const [claimed] = await tx<{ lease: bigint }[]>`
       update environments
       set lease = lease + 1, epoch = ${epoch}, owner_instance_id = ${instanceId},
+        owner_since = case when owner_instance_id = ${instanceId} then owner_since else now() end,
         report_sequence = 0, report_desired_revision = 0, ready_to_suspend = false,
         report_logins = case when owner_instance_id = ${instanceId} then report_logins else 0 end,
         gateway_addresses = case when owner_instance_id = ${instanceId} then gateway_addresses else '{}' end

@@ -2,6 +2,7 @@ import { type Timestamp, timestampDate } from "@bufbuild/protobuf/wkt";
 import type { ServiceImpl } from "@connectrpc/connect";
 
 import { notify } from "../changes.ts";
+import type { Db } from "../db.ts";
 import type { Deps } from "../deps.ts";
 import type { EnvironmentService } from "../gen/chunk/management/v1/environment_pb.ts";
 import { environmentOf } from "../rpc/caller.ts";
@@ -42,20 +43,33 @@ export function reportServices({ sql }: Deps): Reports {
           player_seconds: record.playerSeconds.toString(),
         };
       });
-      // A superseded instance may not have heard of it yet, so its spans end where its successor's ownership began.
-      await sql`
-        insert into usage_records (environment_id, id, start_time, end_time, player_seconds)
-        select ${environmentId}, r.id, r.start_time, least(r.end_time, s.superseded_time),
-          case when s.superseded_time < r.end_time
-            then floor(r.player_seconds * extract(epoch from s.superseded_time - r.start_time)
-              / extract(epoch from r.end_time - r.start_time))::bigint
-            else r.player_seconds
-          end
-        from jsonb_to_recordset(${JSON.stringify(records)}::text::jsonb)
-          as r(id text, instance_id text, start_time timestamptz, end_time timestamptz, player_seconds bigint)
-        left join superseded_instances s on s.environment_id = ${environmentId} and s.instance_id = r.instance_id
-        where s.superseded_time is null or r.start_time < s.superseded_time
-        on conflict do nothing`;
+      // Each span is cut to the time its instance owned the environment, on management's clock, so neither a core that
+      // hasn't heard of its successor yet nor clocks that disagree make spans overlap. A span its instance never owned
+      // any of is dropped. Holding the environment's row orders this with takeovers, which cut stored spans.
+      await sql.begin(async (tx) => {
+        await tx`select 1 from environments where id = ${environmentId} for share`;
+        await tx`
+          insert into usage_records (environment_id, id, instance_id, start_time, end_time, player_seconds)
+          select ${environmentId}, id, instance_id, cut_start, cut_end,
+            case when cut_end - cut_start = end_time - start_time then player_seconds
+              else floor(player_seconds * extract(epoch from cut_end - cut_start)
+                / extract(epoch from end_time - start_time))::bigint
+            end
+          from (
+            select r.*, greatest(r.start_time, o.owned_since) as cut_start, least(r.end_time, o.superseded_time) as cut_end
+            from jsonb_to_recordset(${JSON.stringify(records)}::text::jsonb)
+              as r(id text, instance_id text, start_time timestamptz, end_time timestamptz, player_seconds bigint)
+            join (
+              select owner_instance_id as instance_id, owner_since as owned_since, null::timestamptz as superseded_time
+              from environments where id = ${environmentId}
+              union all
+              select instance_id, owned_since, superseded_time from superseded_instances
+              where environment_id = ${environmentId}
+            ) o using (instance_id)
+          ) r
+          where cut_end > cut_start
+          on conflict do nothing`;
+      });
       return {};
     },
 
@@ -152,6 +166,22 @@ export function reportServices({ sql }: Deps): Reports {
       return {};
     },
   };
+}
+
+/**
+ * Ends the instance's stored spans at the takeover that superseded it, now, and drops those that start later, as
+ * `reportUsage` cuts its later reports.
+ */
+export async function endUsage(db: Db, environmentId: string, instanceId: string): Promise<void> {
+  await db`
+    delete from usage_records
+    where environment_id = ${environmentId} and instance_id = ${instanceId} and start_time >= now()`;
+  await db`
+    update usage_records
+    set end_time = now(),
+      player_seconds = floor(player_seconds * extract(epoch from now() - start_time)
+        / extract(epoch from end_time - start_time))::bigint
+    where environment_id = ${environmentId} and instance_id = ${instanceId} and end_time > now()`;
 }
 
 function batch<T>(items: T[], field: string): T[] {

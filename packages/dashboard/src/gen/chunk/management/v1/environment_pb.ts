@@ -748,10 +748,12 @@ export type UsageRecord = Message<"chunk.management.v1.UsageRecord"> & {
   playerSeconds: bigint;
 
   /**
-   * The core process that counted the span. Once another core's attach
-   * supersedes that process, the server ends its spans where that happened,
-   * scaling player_seconds to match, so its spans never overlap the next
-   * owner's.
+   * The core process that counted the span. The server cuts each span to
+   * the time that process owned the environment on the server's clock, from
+   * its attach's takeover until another core's attach superseded it, and
+   * scales player_seconds to match, so successive owners' spans never
+   * overlap even when their clocks disagree. Spans it stored already are cut
+   * at the takeover too. A span outside that time is dropped.
    *
    * @generated from field: string instance_id = 5;
    */

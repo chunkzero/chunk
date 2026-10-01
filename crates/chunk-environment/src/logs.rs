@@ -2,7 +2,6 @@
 
 use chunk_management::v1::{LogSeverity, LogSource};
 use std::{
-    borrow::Cow,
     collections::VecDeque,
     fmt::{self, Write as _},
     sync::{
@@ -33,59 +32,99 @@ pub fn logging() {
 
 struct Capture(&'static Lines);
 
+/// The target of the backend's events for lines its JavaScript logged, which carry the console method in `level`.
+const CONSOLE: &str = "chunk_backend::console";
+/// The deployment an event names is cut to this many bytes.
+const MAX_DEPLOYMENT_BYTES: usize = 128;
+
 impl<S: Subscriber> Layer<S> for Capture {
     fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
         let metadata = event.metadata();
-        let severity = match *metadata.level() {
+        let console = metadata.target() == CONSOLE;
+        if !self.0.capturing.load(Ordering::Relaxed) || (!console && *metadata.level() > Level::INFO) {
+            return;
+        }
+        let mut text = Text::default();
+        event.record(&mut text);
+        let level = if console { text.console.unwrap_or(Level::INFO) } else { *metadata.level() };
+        let severity = match level {
             Level::ERROR => LogSeverity::Error,
             Level::WARN => LogSeverity::Warn,
             Level::INFO => LogSeverity::Info,
             _ => return,
         };
-        if !self.0.capturing.load(Ordering::Relaxed) {
-            return;
-        }
         let source = if metadata.target().starts_with("chunk_proxy") { LogSource::Gateway } else { LogSource::Core };
-        let mut text = Text::default();
-        event.record(&mut text);
-        self.0.push(source, severity, text.text, text.deployment);
+        self.0.push(source, severity, text.line.text, text.deployment);
     }
 }
 
-/// `text` with each NUL escaped as `\0`, since management stores none.
-pub(crate) fn escape_nul(text: &str) -> Cow<'_, str> {
-    if text.contains('\0') { text.replace('\0', "\\0").into() } else { text.into() }
+/// What `value` displays, cut to `limit` bytes, with each NUL escaped as `\0` since management stores none. Formatting
+/// stops once the text is full, so it never holds more.
+pub(crate) fn escaped(limit: usize, value: impl fmt::Display) -> String {
+    let mut text = Escaped { text: String::new(), limit };
+    _ = write!(text, "{value}");
+    text.text
 }
 
-/// An event's message, then its other fields as `name=value`, up to [`MAX_LINE_BYTES`], and the deployment the event
-/// names in its `deployment` field.
-#[derive(Default)]
-struct Text {
+struct Escaped {
     text: String,
-    deployment: Option<String>,
+    limit: usize,
 }
 
-impl fmt::Write for Text {
+impl fmt::Write for Escaped {
     /// Fails once the text is full, which stops formatting the rest.
     fn write_str(&mut self, text: &str) -> fmt::Result {
-        let text = escape_nul(text);
-        let fits = text.floor_char_boundary(MAX_LINE_BYTES - self.text.len());
-        self.text.push_str(&text[..fits]);
-        if fits < text.len() { Err(fmt::Error) } else { Ok(()) }
+        for (index, piece) in text.split('\0').enumerate() {
+            if index > 0 {
+                if self.limit - self.text.len() < 2 {
+                    return Err(fmt::Error);
+                }
+                self.text.push_str("\\0");
+            }
+            let fits = piece.floor_char_boundary(self.limit - self.text.len());
+            self.text.push_str(&piece[..fits]);
+            if fits < piece.len() {
+                return Err(fmt::Error);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// An event's message, then its other fields as `name=value`, up to [`MAX_LINE_BYTES`], the deployment the event names
+/// in its `deployment` field, and the console method a [`CONSOLE`] event names in its `level` field.
+struct Text {
+    line: Escaped,
+    deployment: Option<String>,
+    console: Option<Level>,
+}
+
+impl Default for Text {
+    fn default() -> Self {
+        Self { line: Escaped { text: String::new(), limit: MAX_LINE_BYTES }, deployment: None, console: None }
     }
 }
 
 impl tracing::field::Visit for Text {
     fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "deployment" {
-            self.deployment = Some(value.into());
+        match field.name() {
+            "deployment" => self.deployment = Some(escaped(MAX_DEPLOYMENT_BYTES, value)),
+            "level" => {
+                self.console = Some(match value {
+                    "error" => Level::ERROR,
+                    "warn" => Level::WARN,
+                    "debug" => Level::DEBUG,
+                    _ => Level::INFO,
+                });
+            }
+            _ => {}
         }
         self.write_field(field, &value);
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         if field.name() == "deployment" {
-            self.deployment = Some(format!("{value:?}"));
+            self.deployment = Some(escaped(MAX_DEPLOYMENT_BYTES, format_args!("{value:?}")));
         }
         self.write_field(field, value);
     }
@@ -97,11 +136,11 @@ impl tracing::field::Visit for Text {
 
 impl Text {
     fn write_field(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        let separator = if self.text.is_empty() { "" } else { " " };
+        let separator = if self.line.text.is_empty() { "" } else { " " };
         _ = if field.name() == "message" {
-            write!(self, "{separator}{value:?}")
+            write!(self.line, "{separator}{value:?}")
         } else {
-            write!(self, "{separator}{}={value:?}", field.name())
+            write!(self.line, "{separator}{}={value:?}", field.name())
         };
     }
 }
@@ -249,6 +288,18 @@ mod tests {
         });
         assert_eq!(lines[0].message, "hook \\0 failed error=bad\\0hook");
         assert_eq!(lines[1].message, "\\0".repeat(MAX_LINE_BYTES / 2));
+    }
+
+    #[test]
+    fn console_lines_take_the_severity_of_their_console_method() {
+        use LogSeverity::{Error, Info, Warn};
+        let lines = captured("", || {
+            for level in ["error", "warn", "log", "info", "debug"] {
+                tracing::info!(target: CONSOLE, level, message = level);
+            }
+        });
+        let severities: Vec<_> = lines.iter().map(|line| line.severity).collect();
+        assert_eq!(severities, [Error, Warn, Info, Info]);
     }
 
     #[test]

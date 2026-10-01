@@ -145,15 +145,19 @@ describe.skipIf(!databaseUrl)("EnvironmentService", () => {
     }));
     await client.reportLogs({ entries });
     await client.reportLogs({ entries });
-    const usage = {
+    // Only an owner's usage counts, and only from its takeover on.
+    const core = attach(client, { core: true, epoch: 1n, instanceId: "core-a" });
+    await core.messages.next();
+    const record = {
       id: "u1",
       instanceId: "core-a",
       startTime: time,
-      endTime: { seconds: 1_700_000_060n, nanos: 0 },
+      endTime: { seconds: 4_000_000_000n, nanos: 0 },
       playerSeconds: 60n,
     };
-    await client.reportUsage({ records: [usage] });
-    await client.reportUsage({ records: [usage] });
+    await client.reportUsage({ records: [record] });
+    await client.reportUsage({ records: [record] });
+    core.close();
     await client.reportFailedAuth({
       failures: [{ clientAddress: "2001:db8:1:2:3:4:5:6" }, { clientAddress: "::ffff:192.0.2.1" }],
     });
@@ -168,7 +172,7 @@ describe.skipIf(!databaseUrl)("EnvironmentService", () => {
     expect(blocked.map((row) => row.address)).toEqual(["192.0.2.1", "2001:db8:1:2::/64"]);
   });
 
-  test("a superseded core's usage ends where its successor took over", async () => {
+  test("usage is cut at the takeover on management's clock, whatever the cores' clocks say", async () => {
     const { environmentId, client } = await environment();
     const a = attach(client, { core: true, epoch: 1n, instanceId: "core-a" });
     await a.messages.next();
@@ -176,32 +180,62 @@ describe.skipIf(!databaseUrl)("EnvironmentService", () => {
     await b.messages.next();
     // Pinned, so the expected spans are whole seconds.
     const takeover = 1_800_000_000n;
-    await h.sql`
-      update superseded_instances set superseded_time = to_timestamp(${takeover})
-      where environment_id = ${environmentId} and instance_id = 'core-a'`;
-    const at = (offset: bigint) => ({ seconds: takeover + offset, nanos: 0 });
+    await h.sql`update superseded_instances set superseded_time = to_timestamp(${takeover}) where instance_id = 'core-a'`;
+    await h.sql`update environments set owner_since = to_timestamp(${takeover}) where id = ${environmentId}`;
     const span = (id: string, instanceId: string, from: bigint, to: bigint) => ({
       id,
       instanceId,
-      startTime: at(from),
-      endTime: at(to),
+      startTime: { seconds: takeover + from, nanos: 0 },
+      endTime: { seconds: takeover + to, nanos: 0 },
       playerSeconds: 2n * (to - from),
     });
-    // Core A counted on after B took over, as when it had not heard of B yet.
+    // A counted on after B took over, as it had not heard of B yet, and B's clock runs 4 seconds behind.
     await client.reportUsage({
-      records: [span("a/1", "core-a", -30n, 30n), span("a/2", "core-a", 30n, 40n), span("b/1", "core-b", 1n, 30n)],
+      records: [span("a/1", "core-a", -30n, 30n), span("a/2", "core-a", 30n, 40n), span("b/1", "core-b", -4n, 26n)],
     });
-    const stored = await h.sql<{ id: string; start: bigint; end: bigint; player_seconds: bigint }[]>`
-      select id, extract(epoch from start_time)::bigint - ${takeover} as start,
-        extract(epoch from end_time)::bigint - ${takeover} as end, player_seconds
-      from usage_records where environment_id = ${environmentId} order by id`;
-    expect([...stored]).toEqual([
+    expect(await usage(environmentId, takeover)).toEqual([
       { id: "a/1", start: -30n, end: 0n, player_seconds: 60n },
-      { id: "b/1", start: 1n, end: 30n, player_seconds: 58n },
+      { id: "b/1", start: 0n, end: 26n, player_seconds: 52n },
     ]);
     a.close();
     b.close();
   });
+
+  test("a takeover cuts the spans its predecessor stored already", async () => {
+    const { environmentId, client } = await environment();
+    const a = attach(client, { core: true, epoch: 1n, instanceId: "core-a" });
+    await a.messages.next();
+    // A's clock runs ahead, so a span it reported before the takeover ends after it. A has owned it for a while.
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    await h.sql`update environments set owner_since = to_timestamp(${now - 120n}) where id = ${environmentId}`;
+    const span = (id: string, from: bigint, to: bigint) => ({
+      id,
+      instanceId: "core-a",
+      startTime: { seconds: now + from, nanos: 0 },
+      endTime: { seconds: now + to, nanos: 0 },
+      playerSeconds: to - from,
+    });
+    await client.reportUsage({ records: [span("a/1", -60n, 3_600n), span("a/2", 3_600n, 3_660n)] });
+    const b = attach(client, { core: true, epoch: 1n, instanceId: "core-b" });
+    await b.messages.next();
+    const [row] = await h.sql<{ superseded: bigint }[]>`
+      select floor(extract(epoch from superseded_time))::bigint as superseded from superseded_instances
+      where environment_id = ${environmentId} and instance_id = 'core-a'`;
+    const end = row!.superseded - now;
+    // One player throughout, so the cut span keeps one player second per whole second.
+    expect(await usage(environmentId, now)).toEqual([{ id: "a/1", start: -60n, end, player_seconds: end + 60n }]);
+    a.close();
+    b.close();
+  });
+
+  /** The environment's stored spans, in whole seconds from `origin`. */
+  async function usage(environmentId: string, origin: bigint) {
+    const rows = await h.sql<{ id: string; start: bigint; end: bigint; player_seconds: bigint }[]>`
+      select id, floor(extract(epoch from start_time))::bigint - ${origin} as start,
+        floor(extract(epoch from end_time))::bigint - ${origin} as end, player_seconds
+      from usage_records where environment_id = ${environmentId} order by id`;
+    return [...rows];
+  }
 
   test("a string holding NUL is refused before it reaches Postgres", async () => {
     const { client } = await environment();
