@@ -276,5 +276,6 @@ fn claim() -> Claim {
         source: None,
         deployment: String::new(),
         decline_reconnect: false,
+        reconnect: String::new(),
     }
 }

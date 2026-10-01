@@ -162,6 +162,7 @@ fn reconnect(service: &SyncService, arguments: &ReconnectArguments) -> Result<Re
 fn reservation_result(reserved: Option<chunk_control::Reservation>) -> ReservationResult {
     reserved.map_or_else(ReservationResult::default, |reserved| ReservationResult {
         deployment: reserved.deployment,
+        session: reserved.session,
         destination: Some(SessionDemand {
             key: reserved.destination.key,
             session_type: reserved.destination.session_type,
@@ -206,7 +207,7 @@ fn login_request(gateway: &str, operation: &str, login: GatewayLogin) -> control
         demand,
         source: None,
         deployment: login.deployment,
-        decline_reconnect: login.decline_reconnect,
+        reconnect_session: login.reconnect_session,
     }
 }
 

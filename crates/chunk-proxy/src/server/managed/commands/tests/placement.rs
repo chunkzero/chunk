@@ -89,7 +89,7 @@ async fn a_login_returned_to_an_earlier_deployments_session_is_admitted_only_the
         let logins = fixture.service.logins.lock().unwrap();
         let denied: Vec<_> = logins.claims.iter().filter(|(operation, _)| operation != "login").collect();
         assert_eq!(denied.len(), 1);
-        assert!(denied[0].1.decline_reconnect && denied[0].0 == "denied");
+        assert!(denied[0].1.reconnect_session.is_empty() && denied[0].0 == "denied");
         assert!(logins.cancels.is_empty());
     }
     guard.armed = false;

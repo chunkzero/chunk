@@ -57,7 +57,7 @@ pub fn login() -> ClaimRequest {
         demand: Some(demand("lobby")),
         source: None,
         deployment: String::new(),
-        decline_reconnect: false,
+        reconnect_session: String::new(),
     }
 }
 

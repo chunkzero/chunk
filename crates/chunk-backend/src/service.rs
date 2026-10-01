@@ -710,17 +710,17 @@ impl Backend {
         });
     }
 
-    /// One attempt to commit the retirement of `id`, then to release it; `None` while either is busy.
+    /// One attempt to commit the retirement of `id`, then to release it; `None` while either is busy or overloaded.
     async fn retire_step(&self, id: &DeploymentId, cancelled: &mut bool) -> Result<Option<bool>> {
         if !*cancelled {
             match self.cancel_deployment_jobs(id.clone()).await {
                 Ok(()) => *cancelled = true,
-                Err(Error::Busy) => return Ok(None),
+                Err(Error::Busy | Error::Overloaded(_)) => return Ok(None),
                 Err(error) => return Err(error),
             }
         }
         match self.release(id.clone()).await {
-            Err(Error::Busy) => Ok(None),
+            Err(Error::Busy | Error::Overloaded(_)) => Ok(None),
             result => result.map(Some),
         }
     }

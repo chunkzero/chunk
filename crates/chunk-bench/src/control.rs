@@ -47,7 +47,7 @@ fn login(index: u64) -> (String, ClaimArguments) {
             machine_profile: "bench".into(),
         }),
         deployment: String::new(),
-        decline_reconnect: false,
+        reconnect_session: String::new(),
     };
     (format!("bench-{index:08}"), ClaimArguments { login: Some(login), ..Default::default() })
 }

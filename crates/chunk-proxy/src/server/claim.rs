@@ -15,8 +15,10 @@ pub(super) struct Claim {
     pub source: Option<ClaimIdentity>,
     /// The deployment whose hooks admitted the claim. Empty places it with the current one.
     pub deployment: String,
-    /// Places a login in a new session even when its player may return to the one they left.
+    /// Stops a login from asking to return to the session its player left.
     pub decline_reconnect: bool,
+    /// The session of an earlier deployment the claim's deployment admitted the login to as a reconnect.
+    pub reconnect: String,
 }
 
 /// A claim as this gateway's claim view names it: its operation at the generation that delivered it.

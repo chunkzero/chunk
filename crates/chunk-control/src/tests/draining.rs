@@ -169,7 +169,11 @@ async fn a_player_reconnects_to_the_session_they_left_on_a_draining_release() {
     // A failed reconnect attempt, which never activated, is not the claim the player left.
     let attempt = ClaimRequest { deployment: "next".into(), ..request("attempt", &player) };
     control.claim(attempt.clone()).await.unwrap();
+    // Admitted to the lobby, the login stays there though the player could return to the session they left.
+    assert_ne!(control.state().unwrap().claims["attempt"].session, left);
     disconnect(&control, attempt).await;
+    let wrong = ClaimRequest { reconnect_session: "elsewhere".into(), ..request("wrong", &player) };
+    assert!(matches!(control.claim(wrong).await, Err(Error::Unresolved(crate::ROUTE_AGAIN))));
     // The release waits for the player within the reconnect grace, past the session's empty timeout.
     control
         .update(|state| {
@@ -180,8 +184,12 @@ async fn a_player_reconnects_to_the_session_they_left_on_a_draining_release() {
     control.reconcile_all().await.unwrap();
     assert!(!control.state().unwrap().sessions[&left].retired);
     assert!(!control.state().unwrap().releases["build"].retired);
-    // Routed through the current release, the login returns to the session it left, under a new claim.
-    arrived(&fixture, &control, "again", &player, "next").await;
+    // A login the gateway admitted to that session returns to it, under a new claim.
+    let again =
+        ClaimRequest { reconnect_session: left.clone(), deployment: "build".into(), ..request("again", &player) };
+    let assignment = control.claim(again).await.unwrap();
+    fixture.arrive(&control, "again").await;
+    control.activate(assignment.claim.unwrap()).await.unwrap();
     let state = control.state().unwrap();
     assert_eq!(state.claims["again"].session, left);
     assert!(state.claims["again"].generation > state.claims["first"].generation);

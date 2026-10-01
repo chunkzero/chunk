@@ -54,7 +54,7 @@ impl Service {
                 let mut logins = self.logins.lock().unwrap();
                 logins.claims.push((operation, login.clone()));
                 let placement = self.placement.lock().unwrap();
-                let returned = placement.returns.clone().filter(|_| !login.decline_reconnect);
+                let returned = placement.returns.clone().filter(|_| !login.reconnect_session.is_empty());
                 let outcome = if let Some((deployment, destination)) = returned {
                     claim_result::Outcome::Assignment(ClaimAssignment {
                         deployment,
@@ -71,12 +71,13 @@ impl Service {
             "chunk:reconnect" => {
                 let returned = self.placement.lock().unwrap().returns.clone();
                 let (deployment, destination) = returned.map_or((String::new(), None), |(d, demand)| (d, Some(demand)));
-                sync::ReservationResult { deployment, destination }.encode_to_vec()
+                let session = destination.as_ref().map_or_else(String::new, |_| "returned".into());
+                sync::ReservationResult { deployment, destination, session }.encode_to_vec()
             }
             "chunk:reservation" => {
                 let reserved = self.placement.lock().unwrap().reserved.clone();
                 let (deployment, destination) = reserved.map_or((String::new(), None), |(d, demand)| (d, Some(demand)));
-                sync::ReservationResult { deployment, destination }.encode_to_vec()
+                sync::ReservationResult { deployment, destination, ..Default::default() }.encode_to_vec()
             }
             "chunk:activate" => {
                 self.activations.fetch_add(1, Ordering::SeqCst);

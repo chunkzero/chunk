@@ -198,8 +198,8 @@ fn validate(request: &ClaimRequest) -> Result<()> {
     Ok(())
 }
 
-/// Reserves `request`'s claim unless it already has one, and returns whether it did. A login returns to the session of
-/// a draining release it left within the reconnect grace.
+/// Reserves `request`'s claim unless it already has one, and returns whether it did. A login that names a reconnect
+/// session takes it only while it still takes the player back, and otherwise is rejected as unavailable.
 fn reserve(
     state: &mut State,
     request: &ClaimRequest,
@@ -210,10 +210,9 @@ fn reserve(
         return Ok(false);
     }
     let owner = owner(state, request)?;
-    let rejoined = (request.source.is_none() && !request.decline_reconnect)
-        .then(|| crate::draining::rejoin(state, &owner.player, unavailable));
-    let session = if let Some(session) = rejoined.flatten() {
-        session
+    let session = if request.source.is_none() && !request.reconnect_session.is_empty() {
+        let rejoined = crate::draining::rejoin(state, &owner.player, unavailable);
+        rejoined.filter(|session| *session == request.reconnect_session).ok_or(Error::Unresolved(crate::ROUTE_AGAIN))?
     } else {
         let (name, release) = state.placing(request, approved)?;
         let demand = request.demand.as_ref().ok_or(Error::Invalid("demand"))?;

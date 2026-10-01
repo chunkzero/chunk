@@ -33,10 +33,11 @@ pub struct StoredClaim {
     pub identity: Option<ClaimIdentity>,
 }
 
-/// The deployment and destination a live claim reserved.
+/// The deployment, session and destination a live claim reserved.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reservation {
     pub deployment: String,
+    pub session: String,
     pub destination: SessionDemand,
 }
 
@@ -121,11 +122,10 @@ impl Control {
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
         let deployment = state.host_release(&session.host)?.deployment.deployment.clone();
         let destination = crate::placement::destination(&state, &claim.session, &session.host);
-        Ok(Some(Reservation { deployment, destination }))
+        Ok(Some(Reservation { deployment, session: claim.session.clone(), destination }))
     }
 
-    /// The deployment and destination of the session a login of `player` returns to, as a login's claim would, unless
-    /// it declines.
+    /// The deployment, session and destination a login of `player` may return to.
     /// # Errors
     /// Reports unreadable state.
     pub fn reconnect(&self, player: &str) -> Result<Option<Reservation>> {
@@ -134,7 +134,8 @@ impl Control {
         let Some(session) = crate::draining::rejoin(&state, player, &unavailable) else { return Ok(None) };
         let host = &state.sessions[&session].host;
         let deployment = state.host_release(host)?.deployment.deployment.clone();
-        Ok(Some(Reservation { deployment, destination: crate::placement::destination(&state, &session, host) }))
+        let destination = crate::placement::destination(&state, &session, host);
+        Ok(Some(Reservation { deployment, session, destination }))
     }
 
     /// The claim or queued move stored under `operation`, if any.

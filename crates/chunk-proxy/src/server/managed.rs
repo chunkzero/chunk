@@ -143,7 +143,7 @@ fn login(claim: &Claim) -> GatewayLogin {
         player: Some(claim.player.clone()),
         demand: Some(claim.demand.clone()),
         deployment: claim.deployment.clone(),
-        decline_reconnect: claim.decline_reconnect,
+        reconnect_session: claim.reconnect.clone(),
     }
 }
 
@@ -226,9 +226,10 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// Routes and claims `login` through the current release. A login whose player may return to the session they left on
 /// an earlier release is admitted there, as that session's destination, without consulting the current release's hooks,
-/// and otherwise routed and placed with the current release. A failed routing through a release that is no longer
-/// current, which a reload may have released meanwhile, is routed again, as is a claim core refuses because its
-/// release no longer accepts logins. The caller bounds the retries.
+/// and claimed for exactly that session; otherwise it is routed and placed with the current release. A failed routing
+/// through a release that is no longer current, which a reload may have released meanwhile, is routed again, as is a
+/// claim core refuses because its release no longer accepts logins or the session no longer takes the player back. The
+/// caller bounds the retries.
 async fn claim_destination(login: &Claim, current: &Retarget) -> io::Result<(ClaimGuard, Assignment)> {
     let mut login = login.clone();
     loop {
@@ -256,24 +257,7 @@ async fn claim_destination(login: &Claim, current: &Retarget) -> io::Result<(Cla
             sleep(Duration::from_millis(100)).await;
             continue;
         };
-        if assignment.deployment.is_empty() || assignment.deployment == guard.claim.deployment {
-            return Ok((guard, assignment));
-        }
-        // Core returned the player to a session of another deployment than the one that admitted the login.
-        let placed = guard.platform.bind(&assignment.deployment);
-        let claim = Claim { demand: assignment.destination.clone(), ..guard.claim.clone() };
-        match placed.admit_login(&claim).await {
-            Ok(()) => {
-                (guard.platform, guard.claim) = (placed, claim);
-                return Ok((guard, assignment));
-            }
-            Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
-                guard.cancel().await?;
-                guard.armed = false;
-                login = Claim { operation_id: uuid::Uuid::new_v4().to_string(), decline_reconnect: true, ..login };
-            }
-            Err(error) => return Err(error),
-        }
+        return Ok((guard, assignment));
     }
 }
 
@@ -298,7 +282,8 @@ async fn reconnect(platform: &Platform, login: &Claim) -> io::Result<Reconnect> 
         return Ok(Reconnect::None);
     };
     let placed = platform.bind(&target.deployment);
-    let claim = Claim { deployment: target.deployment, demand: destination, ..login.clone() };
+    let claim =
+        Claim { deployment: target.deployment, demand: destination, reconnect: target.session, ..login.clone() };
     match placed.admit_login(&claim).await {
         Ok(()) => Ok(Reconnect::Admitted(Box::new(ClaimGuard { platform: placed, claim, armed: true, failure: None }))),
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => Ok(Reconnect::Declined),

@@ -132,9 +132,10 @@ message GatewayLogin {
   SessionDemand demand = 3;
   // The deployment whose routing chose `demand`. Empty places the login with the current one.
   string deployment = 4;
-  // Places the login in a new session of the current deployment, even when its player may return to the session they
-  // left on an earlier one.
-  bool decline_reconnect = 5;
+  // The session of an earlier deployment the gateway admitted the login to as a reconnect, whose deployment is
+  // `deployment`. Control places the login only there, and asks the gateway to route again when that session no longer
+  // takes it. Empty places the login by `demand`, never in a reconnect.
+  string reconnect_session = 5;
 }
 
 // A player as their login authenticated them.
@@ -228,6 +229,8 @@ message ReservationResult {
   string deployment = 1;
   // The reserved session's destination.
   SessionDemand destination = 2;
+  // The reserved session, or for a reconnect the session the player may return to.
+  string session = 3;
 }
 
 // The result of `chunk:depart`.

@@ -163,7 +163,7 @@ fn request(operation: &str, player: &str) -> ClaimRequest {
         }),
         source: None,
         deployment: String::new(),
-        decline_reconnect: false,
+        reconnect_session: String::new(),
     }
 }
 
