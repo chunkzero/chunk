@@ -84,7 +84,8 @@ fn stopped_node_header_shows_its_phase_instead_of_its_last_health() {
     model.apply(deployments(NodePhase::Stopped));
     let stopped = draw(&model, 120, 30);
     assert!(stopped.contains("stopped"));
-    assert!(!stopped.contains("heap"), "{stopped}");
+    assert!(stopped.contains("d87ec655 · current"), "{stopped}");
+    assert!(!stopped.contains("heap") && !stopped.contains("3 players ·"), "{stopped}");
 }
 
 #[test]
