@@ -561,6 +561,7 @@ pub(crate) fn release() -> Release {
         )]),
         max_processes: 1,
         idle_node_timeout_seconds: 0,
+        assets: crate::DeploymentAssets::default(),
     }
 }
 

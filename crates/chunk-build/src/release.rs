@@ -33,7 +33,7 @@ struct Metadata {
     java_version: u32,
     apps: Vec<chunk_contract::AppArtifact>,
     profiles: BTreeMap<String, MachineProfile>,
-    assets: BTreeMap<String, String>,
+    assets: chunk_contract::AssetContract,
 }
 
 #[derive(Serialize)]

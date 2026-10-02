@@ -19,6 +19,7 @@ compiler = [
   "dep:oxc_span",
   "dep:rolldown",
   "dep:rolldown_common",
+  "dep:sha1",
   "dep:tokio",
   "dep:chunk-js",
   "dep:toml",
@@ -42,6 +43,7 @@ chunk-contract = { path = "../chunk-contract" }
 chunk-js = { path = "../chunk-js", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha1 = { version = "0.10", optional = true }
 sha2 = "0.10"
 tempfile = "3"
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"], optional = true }

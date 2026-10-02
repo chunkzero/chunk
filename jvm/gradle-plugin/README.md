@@ -101,7 +101,12 @@ never builds Rust tools or installs Node packages.
    Java app has no Kotlin dependency.
 4. Each app applies `application` and Shadow, compiles, and is indexed from its bytecode (below). Its `shadowJar` is an
    executable JAR with every dependency.
-5. `chunkArtifacts`, on the root, builds every app and writes `.chunk/build/jvm/artifacts.json`: each app's JAR, session
+5. Each app's Anvil worlds (`format: "anvil"` in `chunk inspect`) are converted to
+   `.chunk/build/worlds/<app>/<name>.polar` by `convertChunkWorld_<name>`, cropped to the world's `chunks` if given. The
+   converter runs in the app's Java toolchain with the Minestom and Polar of its runtime classpath, leaving out the
+   build's own projects so code changes don't reconvert. It rejects a save whose data version isn't the runtime's
+   Minecraft version. The conversion is cacheable and its output is the same bytes for the same save.
+6. `chunkArtifacts`, on the root, builds every app and writes `.chunk/build/jvm/artifacts.json`: each app's JAR, session
    types and Java version, and the Java executable of the newest toolchain. `chunk build` runs this task and packages
    the result into a release. `chunk dev` passes `-Pchunk.dev=true`, which skips the shadow JAR and lists each app's
    thin JAR and runtime classpath instead.

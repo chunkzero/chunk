@@ -3,6 +3,7 @@
 
 mod address;
 mod aot;
+mod assets;
 mod cache;
 mod config;
 mod fetch;
@@ -146,9 +147,10 @@ async fn install(
         );
         release
     };
+    let assets = assets::prepare(core, boot, launch, cache).await?;
     let visible = memory::visible_mib(&config.proc);
     let aot = aot::Plan::prepare(core, boot, launch, cache, &config.work_root, visible, config.cpus).await?;
-    launch::prepare(config, launch, &release, &directory, player_address, aot)
+    launch::prepare(config, launch, &release, &directory, &assets, player_address, aot)
 }
 
 /// Rejects a launch that disagrees with what the machine's environment expects.

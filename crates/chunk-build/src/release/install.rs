@@ -82,6 +82,7 @@ pub fn install_trusted_release(archive: &Path, id: &str, directory: &Path) -> io
         java_version: metadata.java_version,
         apps: metadata.apps,
         profiles: metadata.profiles,
+        assets: metadata.assets,
         backend,
     })
 }

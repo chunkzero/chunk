@@ -68,6 +68,18 @@ unary! {
     list_deployments: "DeploymentService" / "ListDeployments" (ListDeploymentsRequest) -> ListDeploymentsResponse;
     list_apps: "DeploymentService" / "ListApps" (ListAppsRequest) -> ListAppsResponse;
 
+    /// Declares an asset revision and returns where to upload the blobs the project doesn't hold yet.
+    upload_assets: "AssetService" / "UploadAssets" (UploadAssetsRequest) -> UploadAssetsResponse;
+    /// Verifies every blob of an asset revision and makes it deployable.
+    complete_asset_upload:
+        "AssetService" / "CompleteAssetUpload" (CompleteAssetUploadRequest) -> CompleteAssetUploadResponse;
+    /// Returns a READY asset revision, the project's head when `revision_id` is empty, with optional blob downloads.
+    get_asset_revision: "AssetService" / "GetAssetRevision" (GetAssetRevisionRequest) -> GetAssetRevisionResponse;
+    list_asset_revisions:
+        "AssetService" / "ListAssetRevisions" (ListAssetRevisionsRequest) -> ListAssetRevisionsResponse;
+    /// Moves the project's asset head if it is still `expected_head_id`; fails with `Aborted` otherwise.
+    set_asset_head: "AssetService" / "SetAssetHead" (SetAssetHeadRequest) -> SetAssetHeadResponse;
+
     /// Claims a hostname for an environment and returns the DNS records to create; adding it again returns it.
     add_domain: "DomainService" / "AddDomain" (AddDomainRequest) -> AddDomainResponse;
     /// Checks the domain's DNS records now and marks it verified when they match.

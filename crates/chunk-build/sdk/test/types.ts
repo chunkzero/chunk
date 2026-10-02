@@ -436,6 +436,14 @@ defineApp({
   },
 });
 defineApp({ id: "lobby", destinations: { main: { implementation: "default", key: "lobby" } } });
+defineApp({
+  id: "koth",
+  worlds: { hill: { source: "worlds/hill", chunks: { from: [-8, -8], to: [7, 7] } } },
+  packs: { hud: { source: "packs/hud", required: true, prompt: "Needed for the HUD" } },
+});
+defineScope({ packs: { base: { source: "packs/base" } } });
+// @ts-expect-error scopes declare no worlds
+defineScope({ worlds: { hill: { source: "worlds/hill" } } });
 
 import { defineMigration } from "../src/index.ts";
 

@@ -101,6 +101,7 @@ impl Config {
             environment_name: None,
             secrets: chunk_backend::Secrets::default(),
             control_record: state.join("control.json"),
+            assets: state.join("assets"),
             state,
             control_bind: optional("CHUNK_CONTROL_BIND")?.unwrap_or(([127, 0, 0, 1], 25567).into()),
             core_bind: optional("CHUNK_CORE_BIND")?,

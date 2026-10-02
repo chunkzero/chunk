@@ -266,6 +266,7 @@ impl Fixture {
                     gateways.clone(),
                     archives.clone(),
                     aot.clone(),
+                    chunk_build::assets::Store::new(directory.path().join("assets")),
                     "test".into(),
                     Some("prod".into()),
                     None,

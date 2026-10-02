@@ -85,6 +85,7 @@ export async function start(config: Config, extensions: Extensions = {}) {
     if (config.operatorToken) await ensureOperatorToken(db, config.operatorToken);
     if (config.edgeToken) await ensureEdgeToken(db, config.edgeToken);
     const keys = deriveKeys(config.secretKey);
+    const machineUrl = config.machines?.managementUrl ?? config.publicUrl;
     const deps: Deps = {
       db,
       keys,
@@ -94,11 +95,12 @@ export async function start(config: Config, extensions: Extensions = {}) {
             directory: join(config.dataDir, "releases"),
             keys,
             publicUrl: config.publicUrl,
-            machineUrl: config.machines?.managementUrl ?? config.publicUrl,
+            machineUrl,
           }),
       archiveLimits: config.archiveLimits,
       resolveTxt,
       publicUrl: config.publicUrl,
+      machineUrl,
       edge: config.edge,
       logStore: extensions.logStore ?? (config.logStore && logStoreIssuer(config.logStore)),
       jvmImage: config.machines?.jvmImage,

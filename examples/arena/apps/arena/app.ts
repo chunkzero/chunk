@@ -6,6 +6,7 @@ import { matchStatus } from "../../server/sessions.ts";
 export default defineApp({
   id: "arena",
   runtime: { maxPlayers: 8 },
+  worlds: { arena: { source: "worlds/arena.polar" } },
   implementations: {
     koth: { config: v.object({ targetScore: v.integer(), timeLimitSeconds: v.integer() }) },
   },

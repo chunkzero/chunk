@@ -191,12 +191,13 @@ impl<'a> Session<'a> {
         let (root, releases) = (self.options.project.clone(), self.settings.state.join("releases"));
         // Core launches every release's JVMs with the Java it started with.
         let (java, stop) = (self.settings.java.clone(), stop.clone());
+        let pack_url_prefix = self.settings.pack_url_prefix.clone();
         let progress = self.reporter.build_progress();
         let task = tokio::spawn(async move {
             let started = Instant::now();
             let project = building::inspect(root.canonicalize()?, releases)?;
             let built = building::execute(&project, building::BuildMode::Dev, stop.clone(), progress).await?;
-            let staged = super::stage(&project, built, Some(&java), &stop).await?;
+            let staged = super::stage(&project, built, Some(&java), pack_url_prefix.as_deref(), &stop).await?;
             Ok((staged, started.elapsed()))
         });
         (task, forced)
@@ -208,6 +209,7 @@ impl<'a> Session<'a> {
             Ok((staged, elapsed)) => {
                 // Unchanged releases still pick up an edited `.dev.vars`.
                 self.shared.set_secrets(staged.secrets.clone());
+                self.settings.packs.serve(&staged.control.assets);
                 let release = short(&staged.release.id).to_owned();
                 let deployed = if forced { self.restart(staged).await } else { self.deploy(staged).await };
                 deployed.map(|summary| {
@@ -229,8 +231,11 @@ impl<'a> Session<'a> {
     async fn deploy(&mut self, staged: Staged) -> io::Result<String> {
         self.check_environment(&staged)?;
         let current = self.live.iter().position(|live| live.drain.is_none());
-        let change =
-            current.map_or(Change::Jvm, |index| reload::classify(&self.live[index].version.release, &staged.release));
+        let assets = staged.control.assets.revision_id.clone();
+        let change = current.map_or(Change::Jvm, |index| {
+            let version = &self.live[index].version;
+            reload::classify((&version.release, version.assets()), (&staged.release, &assets))
+        });
         let drain = Duration::from_secs(self.options.drain_seconds);
         let (deadline, summary) = match change {
             Change::Unchanged => return Ok("no changes".into()),
@@ -238,7 +243,8 @@ impl<'a> Session<'a> {
             Change::Jvm => (Some(drain), format!("JVM change; earlier releases drain within {}s", drain.as_secs())),
         };
         let id = staged.release.id.clone();
-        let resumed = self.live.iter().position(|live| live.version.release.id == id);
+        let resumed =
+            self.live.iter().position(|live| live.version.release.id == id && live.version.assets() == assets);
         let next = if let Some(index) = resumed {
             self.shared.activate(&self.live[index].version)?;
             self.shared.route(&self.live[index].version)?;

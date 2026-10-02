@@ -85,7 +85,10 @@ async fn project_build_packages_only_after_the_requested_gradle_task_finishes() 
             &format!("-Pchunk.executable={}", std::env::current_exe().unwrap().display()),
         ]
     );
-    execute(&project, BuildMode::Dev, CancellationToken::new(), Progress::default()).await.unwrap();
+    assert_eq!(built.asset_store, fixture.root.join("dist/assets"));
+    assert!(built.asset_store.join(format!("revisions/{}.json", built.assets.id())).is_file());
+    let dev = execute(&project, BuildMode::Dev, CancellationToken::new(), Progress::default()).await.unwrap();
+    assert_eq!(dev.asset_store, fixture.root.join(".chunk/local/assets"));
     let arguments = fs::read_to_string(fixture.root.join("wrapper-arguments.txt")).unwrap();
     assert_eq!(
         arguments.lines().skip(2).take(2).collect::<Vec<_>>(),

@@ -51,7 +51,7 @@ def verify_release(project, package, app_ids, kotlin):
     archive = archives[0]
     release = archive.with_name(archive.name.removesuffix(".tar.gz"))
     manifest = read_json(release / "release.json")
-    require(manifest["version"] == 3 and manifest["id"] == release.name, "Invalid release identity")
+    require(manifest["version"] == 4 and manifest["id"] == release.name, "Invalid release identity")
     require(read_json(release / "backend.json")["id"] == release.name, "Backend identity differs from release")
     require(manifest["java_version"] == descriptor["java"]["version"], "Java requirement differs from descriptor")
     require({app["id"] for app in manifest["apps"]} == app_ids, "Unexpected release apps")

@@ -8,6 +8,7 @@ import {
   check,
   customType,
   doublePrecision,
+  foreignKey,
   index,
   integer,
   pgTable,
@@ -19,6 +20,7 @@ import {
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
+import type { AssetRevisionState } from "./gen/chunk/management/v1/assets_pb.ts";
 import type { DeploymentState, LogSeverity, LogSource, SleepingPingMode } from "./gen/chunk/management/v1/common_pb.ts";
 import type { DeploymentTrigger, ReleaseState } from "./gen/chunk/management/v1/deployments_pb.ts";
 import type { DomainState } from "./gen/chunk/management/v1/domains_pb.ts";
@@ -62,6 +64,8 @@ export const projects = pgTable(
     owner_id: text().notNull(),
     name: text().notNull(),
     create_time: createTime(),
+    /** The asset revision `chunk platform assets push` last published; empty before the first. */
+    asset_head_id: text().notNull().default(""),
   },
   (t) => [unique().on(t.owner_id, t.name)],
 );
@@ -174,6 +178,11 @@ export const environments = pgTable(
     // reconnects and its players move to the current deployment, and at the deadline its JVMs stop.
     drain_max_age_seconds: integer().notNull().default(10800),
     drain_deadline_seconds: integer().notNull().default(14400),
+    /** Names the environment in its resource pack URLs, which players' clients fetch without other credentials. */
+    pack_token: text()
+      .notNull()
+      .unique()
+      .default(sql`replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '')`),
   },
   (t) => [
     unique().on(t.project_id, t.name),
@@ -199,6 +208,57 @@ export const releases = pgTable(
   (t) => [primaryKey({ columns: [t.project_id, t.id] })],
 );
 
+/** Asset revisions by the SHA-256 of their canonical manifest. */
+export const assetRevisions = pgTable(
+  "asset_revisions",
+  {
+    seq: seq(),
+    project_id: text()
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    id: text().notNull(),
+    state: smallint().$type<AssetRevisionState>().notNull(),
+    manifest: bytea().notNull(),
+    /** The distinct bytes of its blobs. */
+    size_bytes: int8().notNull(),
+    create_time: createTime(),
+  },
+  (t) => [primaryKey({ columns: [t.project_id, t.id] }), index("asset_revisions_project").on(t.project_id, t.seq)],
+);
+
+/** Each distinct blob of an asset revision, and whether the revision holds it as a resource pack. */
+export const assetRevisionBlobs = pgTable(
+  "asset_revision_blobs",
+  {
+    project_id: text().notNull(),
+    revision_id: text().notNull(),
+    sha256: text().notNull(),
+    pack: boolean().notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.project_id, t.revision_id, t.sha256] }),
+    foreignKey({
+      columns: [t.project_id, t.revision_id],
+      foreignColumns: [assetRevisions.project_id, assetRevisions.id],
+    }).onDelete("cascade"),
+  ],
+);
+
+/** The blobs the release store holds verified for a project: their size and SHA-1, which packs are checked against. */
+export const assetBlobs = pgTable(
+  "asset_blobs",
+  {
+    project_id: text()
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    sha256: text().notNull(),
+    size_bytes: int8().notNull(),
+    sha1: text().notNull(),
+    create_time: createTime(),
+  },
+  (t) => [primaryKey({ columns: [t.project_id, t.sha256] })],
+);
+
 export const deployments = pgTable(
   "deployments",
   {
@@ -214,6 +274,7 @@ export const deployments = pgTable(
     activate_time: time(),
     /** Stop the deployments this one replaces at once instead of draining them. */
     stop_previous: boolean().notNull().default(false),
+    asset_revision_id: text().notNull(),
   },
   (t) => [index("deployments_environment").on(t.environment_id, t.seq)],
 );

@@ -1,6 +1,7 @@
 use std::{io, path::PathBuf, time::Instant};
 
-use chunk_build::{JavaRuntime, Release, ReleaseInputs, project::ProjectMetadata};
+use chunk_build::{JavaRuntime, Release, ReleaseInputs, assets::Store, project::ProjectMetadata};
+use chunk_contract::AssetRevision;
 use tokio_util::sync::CancellationToken;
 
 mod gradle;
@@ -41,6 +42,9 @@ pub(crate) enum BuildMode {
 pub(crate) struct Built {
     pub release: Release,
     pub java: JavaRuntime,
+    /// The asset revision built from the project's sources, written to `asset_store`.
+    pub assets: AssetRevision,
+    pub asset_store: PathBuf,
 }
 
 pub(crate) fn prepare(options: &Options) -> io::Result<Project> {
@@ -68,7 +72,12 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
         let built = execute(&project, BuildMode::Release, stop, Progress::default()).await?;
         warn_irreversible(&project.root.join(".chunk/build/backend/contract.json"))?;
         let release = built.release.archive.as_ref().unwrap_or(&built.release.directory);
-        cliclack::log::success(format!("Built → {}", release.display()))
+        cliclack::log::success(format!(
+            "Built → {}\nAssets → revision {} in {}",
+            release.display(),
+            built.assets.id(),
+            built.asset_store.display()
+        ))
     })
     .await
 }
@@ -94,12 +103,17 @@ pub(crate) async fn execute(
         archive: mode == BuildMode::Release,
     };
     let output = project.output.clone();
+    let asset_store = match mode {
+        BuildMode::Release => output.join("assets"),
+        BuildMode::Dev => project.root.join(".chunk/local/assets"),
+    };
     let built = tokio::task::spawn_blocking(move || {
         let descriptor = chunk_build::read_jvm_descriptor(&inputs.jvm_descriptor).map_err(|error| {
             io::Error::new(error.kind(), format!("Gradle JVM descriptor {}: {error}", inputs.jvm_descriptor.display()))
         })?;
         let release = chunk_build::publish_release(&inputs, &output)?;
-        Ok::<_, io::Error>(Built { release, java: descriptor.java })
+        let assets = chunk_build::assets::build_revision(&inputs.project, &Store::new(&asset_store))?;
+        Ok::<_, io::Error>(Built { release, java: descriptor.java, assets, asset_store })
     })
     .await
     .map_err(io::Error::other)??;

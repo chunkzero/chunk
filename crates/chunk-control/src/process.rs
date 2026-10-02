@@ -131,6 +131,7 @@ impl ProcessHost {
             return Err(Error::Invalid("app artifact digest mismatch"));
         }
         classpath::verify(&root, &jar, &bytes)?;
+        let assets = release.assets.materialize(&self.config.assets, app)?;
         std::fs::create_dir_all(&self.config.directory)?;
         let log_path = self.path(id, "jvm.log")?;
         let exit = self.path(id, "exit")?;
@@ -165,6 +166,8 @@ impl ProcessHost {
                 .args(["-c", GATE, "sh"])
                 .arg(&self.config.java)
                 .arg(format!("-Xmx{}m", size.memory_mib))
+                // Polar worlds load zstd through JNI.
+                .arg("--enable-native-access=ALL-UNNAMED")
                 .arg("-jar")
                 .arg(&jar)
                 .env("CHUNK_PROCESS_TOKEN", &process.token)
@@ -179,6 +182,7 @@ impl ProcessHost {
                 .env("CHUNK_MACHINE_PROFILE", profile)
                 .env("CHUNK_ARTIFACT_DIGEST", &artifact.sha256)
                 .env("CHUNK_APP_ID", app)
+                .env("CHUNK_ASSETS", &assets)
                 .stdin(Stdio::from(gate))
                 .stdout(Stdio::from(log.try_clone()?))
                 .stderr(Stdio::from(log))

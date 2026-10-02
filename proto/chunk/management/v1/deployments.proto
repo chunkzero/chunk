@@ -6,8 +6,8 @@ import "chunk/management/v1/common.proto";
 import "google/protobuf/timestamp.proto";
 
 // Releases and deployments, for the CLI and dashboards. A release is an
-// immutable archive from `chunk build`; a deployment makes one release an
-// environment's desired state. Environments receive deployments through
+// immutable archive from `chunk build`; a deployment makes one release and one
+// asset revision (see AssetService) an environment's desired state. Environments receive deployments through
 // EnvironmentService.Attach and report progress through ReportStatus.
 service DeploymentService {
   // Starts or resumes uploading a release archive. Idempotent by release ID:
@@ -20,16 +20,19 @@ service DeploymentService {
   // Verifies an uploaded archive against its digest and manifest and makes
   // the release deployable. Idempotent.
   rpc CompleteReleaseUpload(CompleteReleaseUploadRequest) returns (CompleteReleaseUploadResponse);
-  // Deploys a release of the environment's project. Returns once recorded; the
+  // Deploys a release and an asset revision of the environment's project. The
+  // revision must hold every world and pack the release declares, or the call
+  // fails with FAILED_PRECONDITION. Returns once recorded; the
   // deployment becomes ACTIVE when the environment reports serving it, and a
   // later deployment supersedes an unfinished one. Idempotent by request_id.
   rpc Deploy(DeployRequest) returns (DeployResponse);
-  // Deploys the release active in one environment to another environment of
-  // the same project. Only the release moves, never data or secrets.
+  // Deploys the release and asset revision active in one environment to
+  // another environment of the same project. Only they move, never data or
+  // secrets.
   // Idempotent by request_id.
   rpc Promote(PromoteRequest) returns (PromoteResponse);
-  // Deploys the release of an earlier deployment again. Idempotent by
-  // request_id.
+  // Deploys the release and asset revision of an earlier deployment again.
+  // Idempotent by request_id.
   rpc Rollback(RollbackRequest) returns (RollbackResponse);
   rpc GetDeployment(GetDeploymentRequest) returns (GetDeploymentResponse);
   // Lists an environment's deployments, newest first.
@@ -65,6 +68,8 @@ message Deployment {
   string message = 6;
   google.protobuf.Timestamp create_time = 7;
   google.protobuf.Timestamp update_time = 8;
+  // The asset revision the deployment pins.
+  string asset_revision_id = 9;
 }
 
 enum DeploymentTrigger {
@@ -122,6 +127,8 @@ message DeployRequest {
   string release_id = 3;
   // Stop the deployments this one replaces at once, disconnecting their players, rather than draining them.
   bool stop_previous = 4;
+  // A READY asset revision of the environment's project.
+  string asset_revision_id = 5;
 }
 
 message DeployResponse {
@@ -141,7 +148,7 @@ message PromoteResponse {
 message RollbackRequest {
   string request_id = 1;
   string environment_id = 2;
-  // The deployment whose release to restore; empty for the one active before the current one.
+  // The deployment whose release and asset revision to restore; empty for the one active before the current one.
   string deployment_id = 3;
 }
 

@@ -1,10 +1,12 @@
 import { create } from "@bufbuild/protobuf";
 import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 
+import { blobPath } from "../assets/routes.ts";
 import type { Db } from "../db.ts";
 import type { Deps } from "../deps.ts";
 import { DeploymentState } from "../gen/chunk/management/v1/common_pb.ts";
 import {
+  AssetArtifactSchema,
   type AttachResponse,
   AttachResponseSchema,
   ObjectStoreSchema,
@@ -14,7 +16,7 @@ import {
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { releaseKey } from "../releases/store.ts";
 import { notFound, timestamp } from "../rpc/validate.ts";
-import { deployments, environments, releases, secrets } from "../schema.ts";
+import { assetRevisions, deployments, environments, releases, secrets } from "../schema.ts";
 import { secretContext } from "../secrets/service.ts";
 
 const artifactUrlLifetimeMs = 60 * 60 * 1000;
@@ -26,6 +28,7 @@ export async function desiredDeployment(db: Db, environmentId: string) {
     .select({
       id: deployments.id,
       release_id: deployments.release_id,
+      asset_revision_id: deployments.asset_revision_id,
       project_id: releases.project_id,
       archive_sha256: releases.archive_sha256,
       archive_size_bytes: releases.archive_size_bytes,
@@ -42,7 +45,7 @@ export async function desiredDeployment(db: Db, environmentId: string) {
 
 /** The environment's complete desired state, read from one snapshot, and the lease of its current owner. */
 export async function desiredState(
-  { db, keys, releases: releaseStore, logStore }: Deps,
+  { db, keys, releases: releaseStore, logStore, publicUrl, machineUrl }: Deps,
   environmentId: string,
 ): Promise<{ message: AttachResponse; lease: bigint }> {
   const snapshot = await db.transaction(
@@ -59,17 +62,29 @@ export async function desiredState(
           forked_from_environment_id: environments.forked_from_environment_id,
           forked_from_snapshot_id: environments.forked_from_snapshot_id,
           epoch: environments.epoch,
+          pack_token: environments.pack_token,
         })
         .from(environments)
         .where(eq(environments.id, environmentId));
       if (!environment || environment.state === EnvironmentState.DELETING) throw notFound("environment");
       const deployment = await desiredDeployment(tx, environmentId);
+      const [assets] = deployment
+        ? await tx
+            .select({ manifest: assetRevisions.manifest })
+            .from(assetRevisions)
+            .where(
+              and(
+                eq(assetRevisions.project_id, deployment.project_id),
+                eq(assetRevisions.id, deployment.asset_revision_id),
+              ),
+            )
+        : [];
       const stored = await tx
         .select({ name: secrets.name, version: secrets.version, ciphertext: sql<Uint8Array>`${secrets.ciphertext}` })
         .from(secrets)
         .where(and(eq(secrets.environment_id, environmentId), isNotNull(secrets.ciphertext)))
         .orderBy(secrets.name);
-      return { environment, deployment, secrets: stored };
+      return { environment, deployment, assets, secrets: stored };
     },
     { isolationLevel: "repeatable read", accessMode: "read only" },
   );
@@ -80,6 +95,7 @@ export async function desiredState(
     environmentId,
     environmentName: environment.name,
     projectId: environment.project_id,
+    packUrlPrefix: `${publicUrl}/packs/${environment.pack_token}/`,
     drain: { maxAgeSeconds: environment.drain_max_age_seconds, deadlineSeconds: environment.drain_deadline_seconds },
     secrets: await Promise.all(
       snapshot.secrets.map(async ({ name, version, ciphertext }) => ({
@@ -99,6 +115,13 @@ export async function desiredState(
       sha256: deployment.archive_sha256,
       sizeBytes: deployment.archive_size_bytes,
     });
+    if (snapshot.assets) {
+      message.assets = create(AssetArtifactSchema, {
+        revisionId: deployment.asset_revision_id,
+        manifest: snapshot.assets.manifest,
+        blobUrlPrefix: `${machineUrl}${blobPath}`,
+      });
+    }
   }
   if (logStore) {
     const { expireTime, ...grant } = await logStore.grant(environmentId);

@@ -7,12 +7,14 @@ JVMs and the CLI reach it through core's `chunk.sync.v1` `Core` service.
 
 ## Model
 
-- A **release** is a deployment version's apps, session types, machine profiles and limits. `Control::activate_release`
-  records one and makes it current; `Control::retire_release` stops placing on an earlier one and stops its hosts.
+- A **release** is a deployment version's apps, session types, machine profiles and limits, and the asset revision it
+  pins with the resource packs its players get. `Control::activate_release` records one and makes it current;
+  `Control::retire_release` stops placing on an earlier one and stops its hosts.
 - A **host** is one capacity request and one JVM lifetime, never relaunched. A JVM belongs to one environment, release,
   app and machine profile, and can run several sessions. Control creates hosts through the `Host` trait: `ProcessHost`
-  runs each JVM as a local child process (`chunk dev`), and the environment's runner host asks management for a machine
-  running [`chunk-jvm`](../chunk-jvm/README.md). Each host follows its own `jvm/<host>` topic.
+  runs each JVM as a local child process (`chunk dev`), with `CHUNK_ASSETS` naming its app's directory materialized from
+  the configured asset store, and the environment's runner host asks management for a machine running
+  [`chunk-jvm`](../chunk-jvm/README.md). Each host follows its own `jvm/<host>` topic.
 - A **session** runs one of an app's session types on a host. Compatible demand shares a session up to its declared
   capacity. An app ends a session through its session scope; control then retires it.
 - A **claim** is a player's reservation of a slot in a session, and later the player's ownership of it.

@@ -23,6 +23,7 @@ grpc-api = { module = "io.grpc:grpc-api", version.ref = "grpc" }
 grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
 grpc-netty = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
 minestom = { module = "net.minestom:minestom", version.ref = "minestom" }
+polar = { module = "dev.hollowcube:polar", version = "1.16.0" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
 junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }

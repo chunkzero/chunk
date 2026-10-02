@@ -100,6 +100,8 @@ packets![
         "ConfigurationPluginResponse",
         [bounded("channel", 32767), bounded("data", 32767)]
     ),
+    ("configuration", "toClient", "remove_resource_pack", "RemoveResourcePack", []),
+    ("configuration", "toServer", "resource_pack_receive", "ResourcePackResponse", []),
     ("configuration", "toClient", "finish_configuration", "FinishConfiguration", []),
     ("configuration", "toServer", "finish_configuration", "AcknowledgeConfiguration", []),
     (

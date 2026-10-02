@@ -33,10 +33,13 @@ export default defineApp({
   standard:{implementation:'default',key:'public-arena',config:{label:'Standard'}},
   large:{implementation:'default',key:'large-arena',machineProfile:'large',maxPlayers:32,config:{label:'Large'}},
  },
+ worlds:{koth:{source:'koth.polar'}},
  hooks:{entered:createHook('domain.enter',()=>{})},commands:{leave}
 });",
     )
     .unwrap();
+    fs::create_dir_all(root.join("apps/games/arena/assets")).unwrap();
+    fs::write(root.join("apps/games/arena/assets/koth.polar"), "Polr").unwrap();
     project
 }
 
@@ -47,6 +50,7 @@ fn authored_scopes_compile_with_fresh_refs_and_distinct_creation_configs() {
     compile(project.path(), output.path()).unwrap();
     let contract: BackendMetadata =
         serde_json::from_slice(&fs::read(output.path().join("contract.json")).unwrap()).unwrap();
+    assert!(contract.assets.worlds["arena"].contains("koth"));
     let domains = contract.contracts.domains.unwrap();
     assert_eq!(domains.apps["arena"], "games/arena");
     assert_eq!(domains.scopes["games/arena"].parent.as_deref(), Some("games"));

@@ -77,6 +77,7 @@ pub(crate) fn compile_journal(
         }
     }
     contract.contracts.env = inventory.env.clone();
+    contract.assets = crate::project::assets::contract(&inventory);
     let apps = &inventory.apps;
     if let Some(methods) = &contract.contracts.session_methods {
         for method in &methods.methods {

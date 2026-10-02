@@ -69,10 +69,17 @@ can override. `destinations` name the sessions other code can send players to, w
 composes down the directory tree. An app's own backend functions live in its `server/` directory. Apps with a legacy
 `apps/<name>/app.toml` are still read and belong to the root scope; an app can't have both.
 
+An app's `worlds` and the `packs` of apps and scopes name assets by `source`: a path inside the app's `assets/`, or for
+a scope the project's `assets/`, with no symlinks. A world is a `.polar` file or an Anvil save directory, optionally
+cropped with `chunks: { from: [x, z], to: [x, z] }`; a pack is a directory with `pack.mcmeta` or a `.zip`, optionally
+`required` and with a `prompt`. Pack names are unique in the project, and an app's players hold the packs of its scopes,
+outermost first, then its own. Gameplay code names worlds through the generated `Worlds`, such as `Worlds.Arena.KOTH`.
+
 Manifests are read without running any code: the default export must be a direct `defineApp({...})` or
 `defineScope({...})` call, and IDs, runtime settings, implementation keys and destination identities must be literals.
-`chunk inspect` prints what the tools read, as JSON with `version: 1`, `apps` and `local`. `inspect`, `gen`, `build` and
-`dev` need `chunk.toml`; `codegen` doesn't.
+`chunk inspect` prints what the tools read, as JSON with `version: 1`, `apps` and `local`; each app lists its `worlds`
+with their project-relative `source`, `format` (`anvil` or `polar`) and `chunks`. `inspect`, `gen`, `build` and `dev`
+need `chunk.toml`; `codegen` doesn't.
 
 ## Backend compilation
 
@@ -106,18 +113,24 @@ into `target/debug`); `CHUNK_TYPESCRIPT` points at another installation of the s
 `chunk build` runs Gradle's `chunkArtifacts`, which compiles the backend and apps and writes a JVM descriptor
 (`.chunk/build/jvm/artifacts.json`, version 4) naming each app's executable JAR, dependencies, session types and Java
 version. `publish_release(&ReleaseInputs { project, backend, jvm_descriptor, archive }, dist)` then combines the backend
-output, app JARs and assets into `dist/<id>/` and, with `archive`, `dist/<id>.tar.gz`. Publication never runs Java or
-Gradle. It checks that every discovered app has exactly one descriptor entry whose session types match its
-implementations, that each JAR has a valid `Main-Class`, that no two classes on an app's classpath conflict, and that
-the bytecode fits the declared Java version.
+output and app JARs into `dist/<id>/` and, with `archive`, `dist/<id>.tar.gz`. Publication never runs Java or Gradle. It
+checks that every discovered app has exactly one descriptor entry whose session types match its implementations, that
+each JAR has a valid `Main-Class`, that no two classes on an app's classpath conflict, and that the bytecode fits the
+declared Java version.
 
 A release holds:
 
 - `source.mjs`, its source map, `contract.json` and `backend.json`, the backend deployment;
 - `apps/<id>/<sha256>.jar`, each app's executable JAR with its own dependencies;
-- the project's `assets/` and each app's `assets/`, at their project paths;
-- `release.json` (version 3), the manifest control and management read: app identities, JAR hashes, Java version,
-  session types with their profile and capacity, profiles and asset hashes.
+- `release.json` (version 4), the manifest control and management read: app identities, JAR hashes, Java version,
+  session types with their profile and capacity, profiles, and `assets`, the worlds and packs its apps declare and each
+  app's packs in order.
+
+A release holds no assets. `chunk build` then builds the project's asset revision into `dist/assets/`
+(`.chunk/local/assets/` for `chunk dev`): the files of `assets/` and each app's `assets/`, each app's worlds and every
+pack, stored once by SHA-256 under `blobs/`, and the revision's manifest under `revisions/<id>.json`. Anvil worlds are
+read as Gradle converted them to `.chunk/build/worlds/<app>/<name>.polar`, and pack directories are zipped reproducibly.
+A deployment pairs a release with a revision holding every world and pack the release declares.
 
 The release ID is one SHA-256 over the sorted payload names and bytes plus the normalized manifest, so identical inputs
 give the same ID and archive bytes on any machine; archives use fixed ordering, permissions and timestamps. Local paths,

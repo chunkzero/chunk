@@ -4,13 +4,12 @@ import dev.chunkzero.backend.client.OperationId;
 import dev.chunkzero.generated.BackendClient;
 import dev.chunkzero.generated.Destinations;
 import dev.chunkzero.generated.SessionMethods;
+import dev.chunkzero.generated.Worlds;
 import dev.chunkzero.runtime.MoveResult;
 import dev.chunkzero.runtime.Session;
 import dev.chunkzero.runtime.SessionScope;
+import dev.chunkzero.runtime.assets.Assets;
 
-import example.world.PolarWorlds;
-
-import net.hollowcube.polar.PolarWorld;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.minestom.server.coordinate.Point;
@@ -54,7 +53,8 @@ public final class ArenaSession extends Session implements SessionMethods.Arena.
     @Override
     public CompletionStage<Void> onCreate(SessionScope scope) {
         this.scope = scope;
-        return PolarWorlds.load(scope, scope.component(PolarWorld.class))
+        return Assets.world(Worlds.Arena.ARENA)
+                .copy(scope)
                 .thenCompose(instance -> scope.onTick(this::open));
     }
 

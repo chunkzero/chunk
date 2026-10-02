@@ -1,9 +1,9 @@
-//! Verified release installs under `<cache>/releases/<release_id>`, and AOT caches under
-//! `<cache>/aot/<release_id>/<app>.aot`, which may outlive the machine. An AOT cache is kept outside its release, whose
-//! verification hashes every file there.
+//! Verified release installs under `<cache>/releases/<release_id>`, AOT caches under
+//! `<cache>/aot/<release_id>/<app>.aot`, and asset blobs in the store at `<cache>/assets`, which may outlive the
+//! machine. An AOT cache is kept outside its release, whose verification hashes every file there.
 
 use crate::Failure;
-use chunk_build::{Installed, VerifiedRelease, install_trusted_release, installed_release};
+use chunk_build::{Installed, VerifiedRelease, assets::Store, install_trusted_release, installed_release};
 use chunk_proto::sync::v1::JvmLaunch;
 use std::{
     fs, io,
@@ -15,15 +15,16 @@ use tempfile::NamedTempFile;
 pub(crate) struct Cache {
     releases: PathBuf,
     aot: PathBuf,
+    assets: Store,
 }
 
 impl Cache {
     /// Opens the cache at `root`, removing the hidden staging files and directories earlier runs left behind.
     pub fn open(root: &Path) -> Result<Self, Failure> {
-        let (releases, aot) = (root.join("releases"), root.join("aot"));
+        let (releases, aot, assets) = (root.join("releases"), root.join("aot"), root.join("assets"));
         let io =
             |error: io::Error| Failure::io(format!("cannot open the release cache at {}: {error}", root.display()));
-        for directory in [&releases, &aot] {
+        for directory in [&releases, &aot, &assets, &assets.join("blobs")] {
             fs::create_dir_all(directory).map_err(io)?;
             for entry in fs::read_dir(directory).map_err(io)? {
                 let path = entry.map_err(io)?.path();
@@ -32,7 +33,7 @@ impl Cache {
                 }
             }
         }
-        Ok(Self { releases, aot })
+        Ok(Self { releases, aot, assets: Store::new(assets) })
     }
 
     /// Where release `id` is installed.
@@ -59,6 +60,16 @@ impl Cache {
     /// A hidden file to download an AOT cache into, removed once dropped.
     pub fn aot_staging(&self) -> Result<NamedTempFile, Failure> {
         staging(&self.aot, ".aot-")
+    }
+
+    /// The store of the asset blobs this machine fetched.
+    pub fn assets(&self) -> &Store {
+        &self.assets
+    }
+
+    /// A hidden file to download an asset blob into, removed once dropped.
+    pub fn blob_staging(&self) -> Result<NamedTempFile, Failure> {
+        staging(self.assets.root(), ".blob-")
     }
 }
 

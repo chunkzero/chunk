@@ -85,7 +85,7 @@ impl Claims {
 }
 
 /// A file only one load attempt uses, removed once dropped.
-struct Staged(PathBuf);
+pub(super) struct Staged(pub(super) PathBuf);
 
 impl Drop for Staged {
     fn drop(&mut self) {
@@ -306,8 +306,19 @@ impl Loaded {
         bundle
     }
 
-    /// The release as control runs it for `deployment`.
-    pub(super) fn control(&self, environment: &str, deployment: &str) -> chunk_control::Release {
+    /// The worlds and packs the release declares.
+    pub(super) fn assets(&self) -> &chunk_contract::AssetContract {
+        &self.release.assets
+    }
+
+    /// The release as control runs it for `deployment`, which pins `assets` and serves packs from `pack_url_prefix`.
+    pub(super) fn control(
+        &self,
+        environment: &str,
+        deployment: &str,
+        assets: &chunk_contract::AssetRevision,
+        pack_url_prefix: Option<String>,
+    ) -> chunk_control::Release {
         let release = &self.release;
         let session_types = release
             .apps
@@ -340,6 +351,7 @@ impl Loaded {
             session_types,
             max_processes: MAX_PROCESSES,
             idle_node_timeout_seconds: chunk_control::DEFAULT_IDLE_NODE_TIMEOUT_SECONDS,
+            assets: chunk_control::DeploymentAssets::new(assets, release.assets.clone(), pack_url_prefix),
             contracts: chunk_control::Contracts {
                 session_methods: contracts.session_methods.clone(),
                 session_configurations: contracts.session_configurations.clone(),
@@ -352,22 +364,29 @@ impl Loaded {
 /// Downloads the archive to `path`, retrying failed or overdue transfers, and stops early once it outgrows its declared
 /// size.
 async fn download(client: &Client, artifact: &v1::ReleaseArtifact, path: &Path) -> io::Result<()> {
-    let budget = DOWNLOAD_BUDGET + Duration::from_secs(artifact.size_bytes / MIN_BYTES_PER_SECOND);
+    fetch(|| client.download_archive(&artifact.url), artifact.size_bytes, "release archive", path).await
+}
+
+/// Downloads the `size` bytes of the `what` that `start` fetches to `path`, retrying failed or overdue transfers, and
+/// stops early once it outgrows `size`.
+pub(super) async fn fetch<F>(start: impl Fn() -> F, size: u64, what: &str, path: &Path) -> io::Result<()>
+where
+    F: Future<Output = Result<chunk_management::Download, chunk_management::Error>>,
+{
+    let budget = DOWNLOAD_BUDGET + Duration::from_secs(size / MIN_BYTES_PER_SECOND);
     let mut attempt = 1;
     loop {
-        let result = tokio::time::timeout(budget, download_once(client, artifact, path)).await.unwrap_or_else(|_| {
+        let result = tokio::time::timeout(budget, fetch_once(start(), size, what, path)).await.unwrap_or_else(|_| {
             let error = format!("it took longer than {}s", budget.as_secs());
             Err(Failure::Transfer(io::Error::new(io::ErrorKind::TimedOut, error)))
         });
         match result {
             Err(Failure::Transfer(error)) if attempt < DOWNLOAD_ATTEMPTS => {
-                tracing::warn!(%error, release = artifact.release_id, "release download failed; retrying");
+                tracing::warn!(%error, what, "download failed; retrying");
                 tokio::time::sleep(Duration::from_secs(u64::from(attempt))).await;
                 attempt += 1;
             }
-            Err(Failure::Transfer(error)) => {
-                return Err(io::Error::other(format!("release download failed: {error}")));
-            }
+            Err(Failure::Transfer(error)) => return Err(io::Error::other(format!("{what} download failed: {error}"))),
             Err(Failure::Local(error)) => return Err(error),
             Ok(()) => return Ok(()),
         }
@@ -379,14 +398,19 @@ enum Failure {
     Local(io::Error),
 }
 
-async fn download_once(client: &Client, artifact: &v1::ReleaseArtifact, path: &Path) -> Result<(), Failure> {
-    let mut download = stalled(client.download_archive(&artifact.url)).await?;
+async fn fetch_once(
+    started: impl Future<Output = Result<chunk_management::Download, chunk_management::Error>>,
+    declared: u64,
+    what: &str,
+    path: &Path,
+) -> Result<(), Failure> {
+    let mut download = stalled(started).await?;
     let mut file = tokio::fs::File::create(path).await.map_err(Failure::Local)?;
     let mut size = 0;
     while let Some(chunk) = stalled(download.chunk()).await? {
         size += chunk.len() as u64;
-        if size > artifact.size_bytes {
-            return Err(Failure::Local(io::Error::other("the release archive is larger than its declared size")));
+        if size > declared {
+            return Err(Failure::Local(io::Error::other(format!("the {what} is larger than its declared size"))));
         }
         file.write_all(&chunk).await.map_err(Failure::Local)?;
     }

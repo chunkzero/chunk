@@ -156,6 +156,13 @@ impl Control {
         Ok(self.state()?.releases.values().map(|release| release.release.release_id.clone()).collect())
     }
 
+    /// The release `deployment` runs, while control knows it, retired or not.
+    /// # Errors
+    /// Reports a stopped store.
+    pub fn release(&self, deployment: &str) -> Result<Option<Arc<Release>>> {
+        Ok(self.state()?.releases.get(deployment).map(|release| release.release.clone()))
+    }
+
     /// The deployment of the current release, where new players are placed.
     /// # Errors
     /// Reports a stopped store.

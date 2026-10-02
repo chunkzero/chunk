@@ -52,6 +52,8 @@ pub mod commands;
 mod codec;
 mod collections;
 mod frame;
+#[cfg(feature = "mc-26-2")]
+pub mod resource_packs;
 pub mod versions;
 
 pub use chunk_protocol_derive::{Decode, Encode, Packet};

@@ -30,10 +30,10 @@ fn unpacked_releases_verify_and_reject_tampering() {
         }
     }
 
-    let asset = directory.join("apps/lobby/assets/map.txt");
-    fs::write(&asset, b"tampered").unwrap();
+    let map = directory.join("source.mjs.map");
+    fs::write(&map, b"tampered").unwrap();
     assert!(verify_release(&directory).unwrap_err().to_string().contains("differ from its ID"));
-    fs::write(&asset, b"lobby").unwrap();
+    fs::write(&map, b"{}").unwrap();
     let backend = directory.join("backend.json");
     let mut bundle: Value = serde_json::from_slice(&fs::read(&backend).unwrap()).unwrap();
     bundle["source"] = json!("export function status() { return 2; }");
@@ -55,14 +55,14 @@ fn installs_keep_what_verifies_and_replace_tampered_installs() {
 
     install_release(&archive, &digest(&archive), &release.id, &directory).unwrap();
     assert!(matches!(installed_release(&directory, &release.id).unwrap(), Installed::Verified(_)));
-    let asset = directory.join("apps/lobby/assets/map.txt");
-    fs::write(&asset, b"tampered").unwrap();
+    let map = directory.join("source.mjs.map");
+    fs::write(&map, b"tampered").unwrap();
     let Installed::Invalid(error) = installed_release(&directory, &release.id).unwrap() else { panic!() };
     assert!(error.to_string().contains("differ from its ID"), "{error}");
     let mut corrupt = digest(&archive);
     corrupt.size -= 1;
     assert!(install_release(&archive, &corrupt, &release.id, &directory).is_err());
-    assert_eq!(fs::read(&asset).unwrap(), b"tampered");
+    assert_eq!(fs::read(&map).unwrap(), b"tampered");
 
     assert_eq!(install_release(&archive, &digest(&archive), &release.id, &directory).unwrap().id, release.id);
     assert!(matches!(installed_release(&directory, &release.id).unwrap(), Installed::Verified(_)));

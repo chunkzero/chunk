@@ -3,25 +3,27 @@
 The runner on a JVM machine: the main process of the `chunk-jvm` image, which
 [management](../../packages/management/README.md) starts when core asks for JVM capacity. It asks core what its host
 runs (`chunk:launch`), downloads that release's archive from core (`chunk:archive`), checks its size and SHA-256, and
-unpacks and verifies it with [`chunk-build`](../chunk-build/README.md). It then starts the app's JVM as a child process
-and stays in front of it: it forwards SIGTERM, SIGINT and SIGQUIT, sends SIGKILL once the stop grace runs out after
-SIGTERM or SIGINT, and reaps orphaned processes when it runs as PID 1.
+unpacks and verifies it with [`chunk-build`](../chunk-build/README.md). It fetches each blob of the deployment's asset
+revision that the app reads and its cache lacks (`chunk:asset-read`), checking each one's size and SHA-256, and
+materializes the app's asset directory. It then starts the app's JVM as a child process and stays in front of it: it
+forwards SIGTERM, SIGINT and SIGQUIT, sends SIGKILL once the stop grace runs out after SIGTERM or SIGINT, and reaps
+orphaned processes when it runs as PID 1.
 
 Each run of the runner makes up a new boot ID, and core binds the host to the first boot it sees. A stopped machine is
 replaced, not restarted: a restarted runner exits with code 77.
 
 ## Configuration
 
-| Variable                                                    | Required | Meaning                                                                                                         |
-| ----------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------- |
-| `CHUNK_CORE_ENDPOINT`                                       | yes      | Core, as `http://<private IP>:<port>`.                                                                          |
-| `CHUNK_JVM_CREDENTIAL`                                      | yes      | The machine credential core minted for this host, `machine/v1/<environment>/jvm/<host>/<mac>`.                  |
-| `CHUNK_ENVIRONMENT_ID`                                      | yes      | The environment, which the credential must name.                                                                |
-| `JAVA_HOME`                                                 | yes      | The Java that runs the app; `$JAVA_HOME/release` gives its version.                                             |
-| `CHUNK_CACHE`                                               | no       | Where verified releases (`releases/<release id>`) and AOT caches (`aot/`) are kept; default `/var/cache/chunk`. |
-| `CHUNK_PLAYER_ADDRESS`                                      | no       | The private IP players reach the JVM at; default: the local address of the connection to core.                  |
-| `CHUNK_STOP_GRACE`                                          | no       | Whole seconds the JVM gets to exit after SIGTERM or SIGINT; default 10.                                         |
-| `CHUNK_RELEASE_ID`, `CHUNK_APP_ID`, `CHUNK_MACHINE_PROFILE` | no       | Cross-checks: the runner exits if core launches something else.                                                 |
+| Variable                                                    | Required | Meaning                                                                                                                                  |
+| ----------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `CHUNK_CORE_ENDPOINT`                                       | yes      | Core, as `http://<private IP>:<port>`.                                                                                                   |
+| `CHUNK_JVM_CREDENTIAL`                                      | yes      | The machine credential core minted for this host, `machine/v1/<environment>/jvm/<host>/<mac>`.                                           |
+| `CHUNK_ENVIRONMENT_ID`                                      | yes      | The environment, which the credential must name.                                                                                         |
+| `JAVA_HOME`                                                 | yes      | The Java that runs the app; `$JAVA_HOME/release` gives its version.                                                                      |
+| `CHUNK_CACHE`                                               | no       | Where verified releases (`releases/<release id>`), AOT caches (`aot/`) and asset blobs (`assets/`) are kept; default `/var/cache/chunk`. |
+| `CHUNK_PLAYER_ADDRESS`                                      | no       | The private IP players reach the JVM at; default: the local address of the connection to core.                                           |
+| `CHUNK_STOP_GRACE`                                          | no       | Whole seconds the JVM gets to exit after SIGTERM or SIGINT; default 10.                                                                  |
+| `CHUNK_RELEASE_ID`, `CHUNK_APP_ID`, `CHUNK_MACHINE_PROFILE` | no       | Cross-checks: the runner exits if core launches something else.                                                                          |
 
 Empty values count as unset. Cached releases and AOT caches are verified again before reuse.
 
@@ -30,7 +32,8 @@ working directory under `/tmp`. The heap is the lowest of the cgroup v2 memory l
 launch profile's memory, less 200 MiB and a tenth of that memory for everything outside the heap. Besides the runner's
 own environment, the JVM gets what the Java runtime reads: `CHUNK_PROCESS_TOKEN` (the machine credential),
 `CHUNK_DEPLOYMENT`, `CHUNK_CORE_ENDPOINT`, `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`,
-`CHUNK_APP_ID`, `CHUNK_ARTIFACT_DIGEST`, `CHUNK_PLAYER_ADDRESS` and, when core serves a named environment,
+`CHUNK_APP_ID`, `CHUNK_ARTIFACT_DIGEST`, `CHUNK_PLAYER_ADDRESS`, `CHUNK_ASSETS` (the app's read-only asset directory
+under `$CHUNK_CACHE/assets/apps/<revision id>/<app>`) and, when core serves a named environment,
 `CHUNK_ENVIRONMENT_NAME`.
 
 ## AOT cache

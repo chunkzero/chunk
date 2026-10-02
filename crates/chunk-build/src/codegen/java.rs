@@ -12,6 +12,7 @@ mod schema;
 mod sessions;
 mod support;
 mod vars;
+mod worlds;
 
 pub(super) struct Type {
     pub ty: String,
@@ -64,6 +65,7 @@ pub(super) struct Bindings {
     configurations: Option<chunk_contract::SessionConfigurations>,
     destinations: Option<chunk_contract::DestinationManifest>,
     env: chunk_contract::EnvManifest,
+    worlds: BTreeMap<String, std::collections::BTreeSet<String>>,
 }
 
 impl Bindings {
@@ -79,7 +81,11 @@ impl Bindings {
         ]);
         files.extend(sessions::sources(self.sessions.as_ref(), package)?);
         files.extend(configurations::sources(self.configurations.as_ref(), package)?);
-        files.extend([destinations::sources(self.destinations.as_ref(), package)?, vars::source(&self.env, package)?]);
+        files.extend([
+            destinations::sources(self.destinations.as_ref(), package)?,
+            vars::source(&self.env, package)?,
+            worlds::source(&self.worlds, package)?,
+        ]);
         Ok(files)
     }
 }
@@ -135,6 +141,7 @@ pub(super) fn bindings(contract: &BackendMetadata) -> io::Result<Bindings> {
         configurations: contract.contracts.session_configurations.clone(),
         destinations: contract.contracts.destinations.clone(),
         env: contract.contracts.env.clone(),
+        worlds: contract.assets.worlds.clone(),
     })
 }
 

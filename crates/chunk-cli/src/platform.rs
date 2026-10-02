@@ -8,6 +8,7 @@ use chunk_management::{
 };
 use clap::{Args, Subcommand};
 
+mod assets;
 mod auth;
 mod config;
 mod deploy;
@@ -50,6 +51,8 @@ pub(crate) enum Command {
     Secrets(secrets::Secrets),
     /// Add, verify, list or remove an environment's custom domains.
     Domains(domains::Domains),
+    /// Push, pull, deploy or list the project's worlds, resource packs and files.
+    Assets(assets::Assets),
 }
 
 pub(crate) async fn run(command: Command) -> io::Result<()> {
@@ -66,6 +69,7 @@ pub(crate) async fn run(command: Command) -> io::Result<()> {
         Command::Logs(options) => resources::logs(options).await,
         Command::Secrets(options) => secrets::run(options).await,
         Command::Domains(options) => domains::run(options).await,
+        Command::Assets(options) => assets::run(options).await,
     }
 }
 

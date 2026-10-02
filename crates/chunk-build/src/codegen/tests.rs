@@ -247,3 +247,18 @@ fn session_configuration_providers_are_scoped_to_their_app_and_detect_java_colli
             .contains("collides")
     );
 }
+
+#[test]
+fn declared_worlds_become_typed_constants_per_app() {
+    let root = tempfile::tempdir().unwrap();
+    let mut contract: serde_json::Value = serde_json::from_slice(&fs::read(fixture()).unwrap()).unwrap();
+    contract["assets"] = serde_json::json!({"worlds": {"arena": ["koth", "lobbyMap"]}});
+    let path = root.path().join("contract.json");
+    fs::write(&path, serde_json::to_vec(&contract).unwrap()).unwrap();
+    let output = root.path().join("generated");
+    generate(&path, &output, GenerationTarget::Java { package: "example" }).unwrap();
+    let worlds = fs::read_to_string(output.join("java/example/Worlds.java")).unwrap();
+    assert!(worlds.contains(
+        "public static final class Arena {\nprivate Arena() {}\npublic static final dev.chunkzero.backend.api.WorldAsset KOTH = new dev.chunkzero.backend.api.WorldAsset(\"arena\", \"koth\");\npublic static final dev.chunkzero.backend.api.WorldAsset LOBBY_MAP = new dev.chunkzero.backend.api.WorldAsset(\"arena\", \"lobbyMap\");"
+    ), "{worlds}");
+}
