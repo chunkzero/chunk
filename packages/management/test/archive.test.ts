@@ -14,8 +14,11 @@ function broken(options: ArchiveOptions) {
   return verify(releaseArchive("r1", undefined, options));
 }
 
-test("reads the apps and profiles chunk build writes", async () => {
-  const manifest = await verify(releaseArchive("r1", [{ id: "lobby", sessions: ["default", "duel"] }]));
+test("reads the apps, profiles and asset declarations chunk build writes", async () => {
+  const assets = { worlds: { lobby: ["hub"] }, packs: { ui: { required: true } }, app_packs: { lobby: ["ui"] } };
+  const manifest = await verify(
+    releaseArchive("r1", [{ id: "lobby", sessions: ["default", "duel"] }], { manifest: (m) => ({ ...m, assets }) }),
+  );
   expect(manifest).toEqual({
     id: "r1",
     java_version: 25,
@@ -29,6 +32,7 @@ test("reads the apps and profiles chunk build writes", async () => {
       },
     ],
     profiles: { default: { memory_mib: 1024, max_sessions: 16 } },
+    assets: { ...assets, packs: { ui: { required: true, prompt: undefined } } },
   });
 });
 
@@ -36,7 +40,7 @@ test("stores releases without checking what the environment validates", async ()
   const unchecked = await broken({
     omit: (path) => path.startsWith("apps/"),
     replace: { "backend.json": "not JSON", "contract.json": '{"contract_version":2.0}' },
-    manifest: (manifest) => ({ ...manifest, java_version: "anything", assets: { missing: "0" } }),
+    manifest: (manifest) => ({ ...manifest, java_version: "anything" }),
   });
   expect(unchecked).toMatchObject({ id: "r1", java_version: undefined });
   const unrunnable = await broken({ manifest: (manifest) => ({ ...manifest, java_version: 2 ** 31 }) });
@@ -47,7 +51,7 @@ test("rejects release.json management cannot read", async () => {
   await expect(broken({ badChecksum: true })).rejects.toThrow("checksum");
   await expect(broken({ omit: (path) => path === "release.json" })).rejects.toThrow("no release.json");
   await expect(verify(rawArchive([["release.json", "not JSON"]]))).rejects.toThrow("is not UTF-8 JSON");
-  await expect(verify(rawArchive([["release.json", '{"id":"r1","apps":[]}']]))).rejects.toThrow("is not version 3");
+  await expect(verify(rawArchive([["release.json", '{"id":"r1","apps":[]}']]))).rejects.toThrow("is not version 4");
   await expect(broken({ manifest: (manifest) => ({ ...manifest, id: "r2" }) })).rejects.toThrow("names release r2");
   await expect(verify(releaseArchive("r1"), {}, "r9")).rejects.toThrow("names release r1");
   const profile = (value: unknown) =>
@@ -107,7 +111,7 @@ test("rejects archives that differ from their declaration or exceed the budget",
 
 test("rejects archive path metadata amplification within the entry and expanded byte limits", async () => {
   const files: [string, string][] = [
-    ["release.json", JSON.stringify({ id: "r1", version: 3, apps: [], profiles: {} })],
+    ["release.json", JSON.stringify({ id: "r1", version: 4, apps: [], profiles: {}, assets: {} })],
   ];
   for (let i = 0; i < 499; i++) files.push([`${i}/${"a/".repeat(1900)}f`, ""]);
   // 999 headers including GNU long names, but 948,599 distinct ancestors.

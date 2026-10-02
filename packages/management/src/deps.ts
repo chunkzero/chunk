@@ -17,6 +17,8 @@ export interface Deps {
   resolveTxt: (hostname: string) => Promise<string[][]>;
   /** How clients reach this service. */
   publicUrl: string;
+  /** How environments' machines reach this service. */
+  machineUrl: string;
   /** Where players reach environments; unset leaves environments without hostnames. */
   edge: Edge | undefined;
   /** Where environments replicate their logs; unset turns replication off. */

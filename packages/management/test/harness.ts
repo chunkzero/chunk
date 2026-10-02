@@ -13,12 +13,13 @@ import { listenForChanges } from "../src/changes.ts";
 import { deriveKeys, type Keys, randomToken } from "../src/crypto.ts";
 import { connect, type Database, migrate } from "../src/db.ts";
 import type { Deps } from "../src/deps.ts";
+import { AssetService } from "../src/gen/chunk/management/v1/assets_pb.ts";
 import { DeploymentService } from "../src/gen/chunk/management/v1/deployments_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { localReleaseStore } from "../src/releases/local-store.ts";
 import type { ReleaseStore } from "../src/releases/store.ts";
 import { createHandler, type HandlerOptions } from "../src/server.ts";
-import { releaseArchive } from "./fixtures.ts";
+import { assetRevision, releaseArchive } from "./fixtures.ts";
 
 /** Tests that need Postgres run only when this is set, for example to a Podman container's URL. */
 export const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -93,6 +94,7 @@ export async function startHarness(overrides: Partial<Deps> = {}, options: Handl
       return records.map((record) => [record]);
     },
     publicUrl: url,
+    machineUrl: url,
     edge: { domain: "play.example.net", port: 25565 },
     logStore: undefined,
     jvmImage: "chunk-jvm:{java}",
@@ -184,12 +186,24 @@ export async function uploadRelease(
   await deployments.completeReleaseUpload({ projectId, releaseId });
 }
 
-/** Uploads a fixture release and deploys it; returns the deployment ID. */
+/** Uploads an asset revision, an empty one by default, with all its blobs, and completes it; returns its ID. */
+export async function uploadAssets(h: Harness, projectId: string, revision = assetRevision()) {
+  const assets = h.client(AssetService);
+  const { uploads } = await assets.uploadAssets({ projectId, manifest: revision.manifest });
+  for (const { sha256, upload } of uploads) {
+    await fetch(upload?.url ?? "", { method: "PUT", body: revision.blobs.get(sha256) ?? new Uint8Array() });
+  }
+  await assets.completeAssetUpload({ projectId, revisionId: revision.id });
+  return revision.id;
+}
+
+/** Uploads a fixture release and an empty asset revision, and deploys them; returns the deployment ID. */
 export async function deployRelease(h: Harness, projectId: string, environmentId: string, releaseId: string) {
   await uploadRelease(h, projectId, releaseId);
+  const assetRevisionId = await uploadAssets(h, projectId);
   const deployed = await h
     .client(DeploymentService)
-    .deploy({ requestId: crypto.randomUUID(), environmentId, releaseId });
+    .deploy({ requestId: crypto.randomUUID(), environmentId, releaseId, assetRevisionId });
   return deployed.deployment?.id ?? "";
 }
 

@@ -25,7 +25,7 @@ bun src/main.ts
 | `CHUNK_OPERATOR_TOKEN`                 | unset                         | An API token for the operator, at least 32 characters, recorded on start.                                   |
 | `CHUNK_PUBLIC_URL`                     | `http://localhost:$PORT`      | How clients reach this service; used in upload and login URLs.                                              |
 | `HOST` / `PORT`                        | `0.0.0.0` / `8080`            | The listen address.                                                                                         |
-| `CHUNK_DATA_DIR`                       | `data`                        | Release archives are stored under `releases/` here, unless a release bucket is set.                         |
+| `CHUNK_DATA_DIR`                       | `data`                        | Release archives and asset blobs are stored under `releases/` here, unless a release bucket is set.         |
 | `CHUNK_DASHBOARD_DIR`                  | unset                         | The dashboard's build (`pnpm build:dashboard` writes `packages/dashboard/dist`), served at `/`.             |
 | `CHUNK_MAX_RELEASE_EXPANDED_BYTES`     | `8589934592`                  | How far a release archive may expand while it is verified.                                                  |
 | `CHUNK_MAX_RELEASE_ENTRIES`            | `100000`                      | How many entries a release archive may hold.                                                                |
@@ -57,12 +57,12 @@ Clients call `POST $CHUNK_PUBLIC_URL/chunk.management.v1.<Service>/<Method>` wit
 the Connect protocol (`application/json` or `application/proto`) or gRPC-Web. Bun serves HTTP/1.1 only, so plain gRPC
 clients don't work. `GET /healthz` answers `ok`.
 
-| Service                                                                               | Callers                                                              |
-| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `ProjectService`, `DeploymentService`, `SecretService`, `DomainService`, `LogService` | The operator's tokens                                                |
-| `AuthService`                                                                         | The operator's tokens; `StartLogin` and `PollLogin` need none        |
-| `EnvironmentService`                                                                  | Each environment's core, with the token management gives its machine |
-| `EdgeService`                                                                         | Edges, with `CHUNK_EDGE_TOKEN`                                       |
+| Service                                                                                               | Callers                                                              |
+| ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `ProjectService`, `DeploymentService`, `AssetService`, `SecretService`, `DomainService`, `LogService` | The operator's tokens                                                |
+| `AuthService`                                                                                         | The operator's tokens; `StartLogin` and `PollLogin` need none        |
+| `EnvironmentService`                                                                                  | Each environment's core, with the token management gives its machine |
+| `EdgeService`                                                                                         | Edges, with `CHUNK_EDGE_TOKEN`                                       |
 
 The operator signs in to the dashboard with a token. More tokens, optionally limited to one project or given an expiry,
 come from `AuthService.CreateToken`, or from a device-style login: `StartLogin` returns a URL whose `/login` page the
@@ -79,10 +79,26 @@ tar within the expansion and entry limits, and its `release.json` names the rele
 machine profiles. Management doesn't check the backend contract; the environment decides whether it can serve a release
 when it loads it.
 
-`Deploy` makes a ready release an environment's desired deployment, which the environment's core loads and reports as
-`DEPLOYMENT_STATE_ACTIVE` or `DEPLOYMENT_STATE_FAILED`. `Deploy`, `Promote`, `Rollback` and JVM capacity requests refuse
-a release with `FAILED_PRECONDITION` when there is no JVM image for it: `CHUNK_JVM_IMAGE` is unset, or `release.json`
-has no integer `java_version` from 1 to 1000.
+`Deploy` makes a ready release and a ready asset revision an environment's desired deployment, which the environment's
+core loads and reports as `DEPLOYMENT_STATE_ACTIVE` or `DEPLOYMENT_STATE_FAILED`. The revision must hold every world and
+pack the release's `release.json` declares, or the call fails with `FAILED_PRECONDITION`; `Promote`, `Rollback` and
+forks carry the revision along with the release. `Deploy`, `Promote`, `Rollback` and JVM capacity requests refuse a
+release with `FAILED_PRECONDITION` when there is no JVM image for it: `CHUNK_JVM_IMAGE` is unset, or `release.json` has
+no integer `java_version` from 1 to 1000.
+
+## Assets
+
+An asset revision is a canonical JSON manifest of a project's worlds, resource packs and files by SHA-256, which
+`chunk build` writes beside a release; its ID is the SHA-256 of the manifest. `AssetService.UploadAssets` declares one
+and returns an upload target for each blob the project doesn't hold yet, and `CompleteAssetUpload` verifies every blob's
+size and SHA-256, and each pack's SHA-1, before marking the revision `ASSET_REVISION_STATE_READY`. Blobs are stored once
+per project in the release store, under `<project>/blobs/<sha256>`. `SetAssetHead` moves the project's head, the
+revision `chunk platform assets pull` fetches, only from the head the caller expects.
+
+Environments fetch blobs at `GET /blobs/<sha256>` with their bearer token, and players' clients fetch resource packs at
+`GET /packs/<pack token>/<sha256>` on `CHUNK_PUBLIC_URL`, each environment having a random pack token of its own. Both
+serve only blobs of revisions the environment's deployments pin, packs only for the pack URL, streaming them from disk
+or redirecting to a presigned URL of the release bucket.
 
 ## Release storage
 

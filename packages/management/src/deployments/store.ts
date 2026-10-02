@@ -1,6 +1,9 @@
 import { create } from "@bufbuild/protobuf";
+import { ConnectError } from "@connectrpc/connect";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 
+import { checkContract, decodeRevision } from "../assets/revision.ts";
+import { loadReadyRevision } from "../assets/store.ts";
 import { newId } from "../crypto.ts";
 import { type Db, fetchRows } from "../db.ts";
 import { jvmImage } from "../environments/machines.ts";
@@ -43,6 +46,7 @@ export function toDeployment(row: DeploymentRow): Deployment {
     message: row.message,
     createTime: timestamp(row.create_time),
     updateTime: timestamp(row.update_time),
+    assetRevisionId: row.asset_revision_id,
   });
 }
 
@@ -64,15 +68,22 @@ export function requireJvmImage(manifest: ReleaseManifest, template: string | un
 
 const unfinished = [DeploymentState.PENDING, DeploymentState.IN_PROGRESS];
 
+/** What a deployment pins: a release and an asset revision of one project. */
+export interface Deployable {
+  release_id: string;
+  asset_revision_id: string;
+}
+
 /**
- * Makes a READY release of the environment's project its desired state, superseding unfinished deployments. The
- * active deployment keeps serving until the new one activates. A release no JVM image runs is refused. Call with the
+ * Makes a READY release and asset revision of the environment's project its desired state, superseding unfinished
+ * deployments. The active deployment keeps serving until the new one activates. A release no JVM image runs, and a
+ * revision that lacks a world or pack the release declares, are refused before anything is written. Call with the
  * environment row locked.
  */
 export async function createDeployment(
   db: Db,
   environment: EnvironmentRow,
-  releaseId: string,
+  { release_id: releaseId, asset_revision_id: assetRevisionId }: Deployable,
   trigger: DeploymentTrigger,
   jvmImageTemplate: string | undefined,
   stopPrevious = false,
@@ -83,6 +94,12 @@ export async function createDeployment(
     throw failedPrecondition("the release has not finished uploading");
   }
   requireJvmImage(release.manifest, jvmImageTemplate);
+  const assets = await loadReadyRevision(db, environment.project_id, assetRevisionId);
+  try {
+    checkContract(release.manifest.assets, decodeRevision(assets.manifest));
+  } catch (error) {
+    throw failedPrecondition((error as Error).message);
+  }
   await db
     .update(deployments)
     .set({ state: DeploymentState.SUPERSEDED, update_time: sql`now()` })
@@ -93,6 +110,7 @@ export async function createDeployment(
       id: newId("dep"),
       environment_id: environment.id,
       release_id: release.id,
+      asset_revision_id: assets.id,
       state: DeploymentState.PENDING,
       trigger,
       stop_previous: stopPrevious,
@@ -104,9 +122,9 @@ export async function createDeployment(
 }
 
 /**
- * Deploys to a fork the release of `deploymentId`, the newest deployment resident in the database it restored, unless
- * the fork has a deployment already. That deployment belongs to an environment of the fork's project; when it is gone,
- * or no JVM image runs its release, the fork stays without a deployment until one is deployed to it.
+ * Deploys to a fork the release and asset revision of `deploymentId`, the newest deployment resident in the database it
+ * restored, unless the fork has a deployment already. That deployment belongs to an environment of the fork's project;
+ * when it is gone, or can't be deployed again, the fork stays without a deployment until one is deployed to it.
  */
 export async function deployRestored(
   db: Db,
@@ -126,19 +144,25 @@ export async function deployRestored(
     .limit(1);
   if (deployed) return;
   const [restored] = await db
-    .select({ release_id: deployments.release_id })
+    .select({ release_id: deployments.release_id, asset_revision_id: deployments.asset_revision_id })
     .from(deployments)
     .innerJoin(environments, eq(environments.id, deployments.environment_id))
     .where(and(eq(deployments.id, deploymentId), eq(environments.project_id, fork.project_id)));
-  const release = restored && (await findRelease(db, fork.project_id, restored.release_id));
-  const java = release?.manifest?.java_version;
-  if (release?.state !== ReleaseState.READY || !release.manifest || !jvmImage(jvmImageTemplate, java)) {
+  // createDeployment refuses before it writes anything.
+  const refusal = restored
+    ? await createDeployment(db, fork, restored, DeploymentTrigger.FORK, jvmImageTemplate).then(
+        () => undefined,
+        (error: unknown) => {
+          if (error instanceof ConnectError) return error;
+          throw error;
+        },
+      )
+    : notFound("deployment");
+  if (refusal) {
     console.warn(
-      `fork ${forkId} stays without a deployment: its restored deployment ${deploymentId} can't be deployed`,
+      `fork ${forkId} stays without a deployment: its restored deployment ${deploymentId} can't be deployed: ${refusal.rawMessage}`,
     );
-    return;
   }
-  await createDeployment(db, fork, release.id, DeploymentTrigger.FORK, jvmImageTemplate);
 }
 
 /**

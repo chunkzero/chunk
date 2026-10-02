@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 
+import { encodeRevision } from "../src/assets/revision.ts";
+
 const encoder = new TextEncoder();
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
@@ -53,8 +55,8 @@ export interface ArchiveOptions {
 }
 
 /**
- * A gzip-compressed tar laid out like `chunk build`'s: app JARs named by digest, an asset whose path needs a GNU
- * long name, backend files and release.json.
+ * A gzip-compressed tar laid out like `chunk build`'s: app JARs named by digest, a file whose path needs a GNU long
+ * name, backend files and release.json, whose apps declare no worlds or packs unless `options.manifest` adds them.
  */
 export function releaseArchive(
   id: string,
@@ -76,9 +78,7 @@ export function releaseArchive(
       ),
     };
   });
-  const asset = encoder.encode("hello");
-  const assetPath = `assets/${"a".repeat(120)}.txt`;
-  files.push([assetPath, asset]);
+  files.push([`backend/${"a".repeat(120)}.txt`, encoder.encode("hello")]);
   const source = "export default {};\n";
   const contract = { contract_version: 2, runtime_profile: "transactional_v1", tables: {}, functions: {} };
   files.push(
@@ -88,11 +88,11 @@ export function releaseArchive(
   );
   const manifest = {
     id,
-    version: 3,
+    version: 4,
     java_version: 25,
     apps: artifacts,
     profiles: { default: { memory_mib: 1024, max_sessions: 16 } },
-    assets: { [assetPath]: sha256(asset) },
+    assets: {},
   };
   files.push(["release.json", encoder.encode(JSON.stringify(options.manifest?.(manifest) ?? manifest))]);
   const kept = files
@@ -110,4 +110,39 @@ export function releaseArchive(
 export function rawArchive(files: [string, string][]) {
   const bytes = Bun.gzipSync(tar(files.map(([name, text]) => [name, encoder.encode(text)])));
   return { bytes, sha256: sha256(bytes), sizeBytes: BigInt(bytes.byteLength) };
+}
+
+/** An asset revision's canonical manifest, its ID and its blobs' bytes by SHA-256, from the bytes of each entry. */
+export function assetRevision({
+  packs = {},
+  shared = {},
+  apps = {},
+}: {
+  packs?: Record<string, string>;
+  shared?: Record<string, string>;
+  apps?: Record<string, { worlds?: Record<string, string>; files?: Record<string, string> }>;
+} = {}) {
+  const blobs = new Map<string, Uint8Array>();
+  const blob = (text: string) => {
+    const bytes = encoder.encode(text);
+    blobs.set(sha256(bytes), bytes);
+    return { sha256: sha256(bytes), size: bytes.byteLength };
+  };
+  const map = <T>(entries: Record<string, string>, read: (text: string) => T) =>
+    new Map(Object.entries(entries).map(([key, text]) => [key, read(text)]));
+  const manifest = encodeRevision({
+    version: 1,
+    packs: map(packs, (text) => ({
+      ...blob(text),
+      sha1: createHash("sha1").update(encoder.encode(text)).digest("hex"),
+    })),
+    shared: map(shared, blob),
+    apps: new Map(
+      Object.entries(apps).map(([app, assets]) => [
+        app,
+        { worlds: map(assets.worlds ?? {}, blob), files: map(assets.files ?? {}, blob) },
+      ]),
+    ),
+  });
+  return { manifest, id: sha256(manifest), blobs };
 }

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 
+import { type AssetContract, readContract } from "../assets/revision.ts";
 import { type ArchiveLimits, scanArchive } from "./archive.ts";
 
 /**
@@ -12,11 +13,13 @@ export interface ReleaseManifest {
   java_version: number | undefined;
   apps: { id: string; sessions: Record<string, { machine_profile: string; capacity: number }> }[];
   profiles: Record<string, { memory_mib: number; max_sessions: number }>;
+  /** The worlds and packs the asset revision deployed with the release must hold. */
+  assets: AssetContract;
 }
 
 const manifestPath = "release.json";
 const maxManifestBytes = 16 * 1024 * 1024;
-const manifestVersion = 3;
+const manifestVersion = 4;
 
 /**
  * Checks a stored archive in one pass: its size and digest against the declaration, its tar structure within
@@ -99,8 +102,14 @@ function readManifest(bytes: Uint8Array): ReleaseManifest | string {
     // fromEntries defines own properties, so a name like `__proto__` stays a plain key.
     apps.push({ id: appId, sessions: Object.fromEntries(sessions) });
   }
+  let assets: AssetContract;
+  try {
+    assets = readContract(value.assets);
+  } catch (error) {
+    return `has invalid assets: ${(error as Error).message}`;
+  }
   const java_version = isJavaVersion(value.java_version) ? value.java_version : undefined;
-  return { id: value.id, java_version, apps, profiles: Object.fromEntries(profiles) };
+  return { id: value.id, java_version, apps, profiles: Object.fromEntries(profiles), assets };
 }
 
 /** chunk_contract's app and session names. */

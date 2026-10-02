@@ -3,11 +3,12 @@ import { link, mkdir, open, rm } from "node:fs/promises";
 import { dirname, join, parse, resolve } from "node:path";
 
 import { type Keys, randomToken } from "../crypto.ts";
-import type { ReleaseStore } from "./store.ts";
+import { contentType, type ReleaseStore } from "./store.ts";
 
 const uploadPath = "/releases/upload/";
 const downloadPath = "/releases/download/";
-const keyPattern = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/([0-9a-f]{64})\.tar\.gz$/;
+/** Release archives, `<project>/<release>/<sha256>.tar.gz`, and asset blobs, `<project>/blobs/<sha256>`. */
+const keyPattern = /^[A-Za-z0-9_-]+\/[A-Za-z0-9_-]+\/([0-9a-f]{64})(?:\.tar\.gz)?$/;
 
 /** Flushes the entries of `from` and each directory above it, up to and including `to`. */
 async function syncDirectories(from: string, to: string) {
@@ -23,8 +24,8 @@ async function syncDirectories(from: string, to: string) {
 }
 
 /**
- * Stores archives in a local directory, which it creates durably first. Uploads go to this service through URLs signed
- * for one archive's key, digest and size, so they need no bearer token. Bytes that do not match are never stored, and
+ * Stores objects in a local directory, which it creates durably first. Uploads go to this service through URLs signed
+ * for one object's key, digest and size, so they need no bearer token. Bytes that do not match are never stored, and
  * a stored object is never replaced.
  */
 export async function localReleaseStore({
@@ -36,7 +37,7 @@ export async function localReleaseStore({
   directory: string;
   keys: Keys;
   publicUrl: string;
-  /** Where machines reach this service; download URLs only go to machines. */
+  /** Where machines reach this service. */
   machineUrl: string;
 }): Promise<ReleaseStore> {
   const root = resolve(directory);
@@ -50,7 +51,7 @@ export async function localReleaseStore({
     const path = join(root, key);
     const file = Bun.file(path);
     if (!(await file.exists())) return undefined;
-    // A concurrent upload may have linked the archive without syncing its directories yet.
+    // A concurrent upload may have linked the object without syncing its directories yet.
     await syncDirectories(dirname(path), root);
     return file;
   }
@@ -66,9 +67,13 @@ export async function localReleaseStore({
       return new Response("invalid download signature\n", { status: 403 });
     }
     if (Number(expires) * 1000 < Date.now()) return new Response("download URL expired\n", { status: 403 });
-    const file = Bun.file(join(directory, key));
+    return serveFile(key);
+  }
+
+  async function serveFile(key: string): Promise<Response> {
+    const file = Bun.file(join(root, key));
     if (!(await file.exists())) return new Response("not found\n", { status: 404 });
-    return new Response(file, { headers: { "content-type": "application/gzip" } });
+    return new Response(file, { headers: { "content-type": contentType(key) } });
   }
 
   return {
@@ -83,20 +88,23 @@ export async function localReleaseStore({
       return {
         url: `${publicUrl}${uploadPath}${key}?${query}`,
         method: "PUT",
-        headers: { "content-type": "application/gzip" },
+        headers: { "content-type": contentType(key) },
       };
     },
 
-    async downloadUrl(key, expireTime) {
+    async downloadUrl(key, expireTime, audience = "machines") {
       const expires = Math.floor(expireTime.getTime() / 1000).toString();
       const signature = keys.sign(["download", key, expires].join("\n"));
-      return `${machineUrl}${downloadPath}${key}?${new URLSearchParams({ expires, signature })}`;
+      const base = audience === "machines" ? machineUrl : publicUrl;
+      return `${base}${downloadPath}${key}?${new URLSearchParams({ expires, signature })}`;
     },
+
+    serve: (key) => serveFile(key),
 
     exists: async (key) => (await stored(key)) !== undefined,
 
     async complete(key, _expected, verify) {
-      // Uploads were checked against the key's digest as they were stored, so the stored archive is the upload.
+      // Uploads were checked against the key's digest as they were stored, so the stored object is the upload.
       const file = await stored(key);
       return file && verify(file.stream());
     },
@@ -121,7 +129,7 @@ export async function localReleaseStore({
         return new Response("invalid upload signature\n", { status: 403 });
       }
       if (Number(expires) * 1000 < Date.now()) return new Response("upload URL expired\n", { status: 403 });
-      if (!request.body) return new Response("missing body\n", { status: 400 });
+      if (!request.body && size !== "0") return new Response("missing body\n", { status: 400 });
 
       const path = join(root, key);
       // Only below the root, so uploads fail instead of recreating a deleted root that was never synced.
@@ -136,9 +144,9 @@ export async function localReleaseStore({
       const expected = BigInt(size);
       let received = 0n;
       try {
-        for await (const chunk of request.body) {
+        for await (const chunk of request.body ?? []) {
           received += BigInt(chunk.byteLength);
-          if (received > expected) return new Response("archive is larger than declared\n", { status: 413 });
+          if (received > expected) return new Response("object is larger than declared\n", { status: 413 });
           hash.update(chunk);
           for (let offset = 0; offset < chunk.byteLength;) {
             const { bytesWritten } = await file.write(chunk, offset, chunk.byteLength - offset);
@@ -147,7 +155,7 @@ export async function localReleaseStore({
           }
         }
         if (received !== expected || hash.digest("hex") !== sha256) {
-          return new Response("archive does not match its declared size and digest\n", { status: 400 });
+          return new Response("object does not match its declared size and digest\n", { status: 400 });
         }
         await file.sync();
         await file.close();

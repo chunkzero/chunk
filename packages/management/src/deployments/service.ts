@@ -18,6 +18,9 @@ import { deployments, environments, projects } from "../schema.ts";
 import { releaseHandlers } from "./releases.ts";
 import { createDeployment, toDeployment } from "./store.ts";
 
+/** The columns a deployment carries to the next: its release and asset revision. */
+const pinned = { release_id: deployments.release_id, asset_revision_id: deployments.asset_revision_id };
+
 export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof DeploymentService>> {
   const { db, keys } = deps;
   return {
@@ -25,13 +28,16 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
 
     async deploy(request, context) {
       const caller = callerOf(context);
-      const releaseId = required(request.releaseId, "release_id");
+      const deployable = {
+        release_id: required(request.releaseId, "release_id"),
+        asset_revision_id: required(request.assetRevisionId, "asset_revision_id"),
+      };
       return idempotent({ db, keys, caller, method: DeploymentService.method.deploy, request }, async (tx) => {
         const environment = await loadEnvironment(tx, caller, request.environmentId, { lock: true });
         const deployment = await createDeployment(
           tx,
           environment,
-          releaseId,
+          deployable,
           DeploymentTrigger.DEPLOY,
           deps.jvmImage,
           request.stopPrevious,
@@ -55,17 +61,11 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
         });
         if (source.project_id !== target.project_id) throw invalid("both environments must be in one project");
         const [active] = await tx
-          .select({ release_id: deployments.release_id })
+          .select(pinned)
           .from(deployments)
           .where(eq(deployments.id, source.active_deployment_id));
         if (!active) throw failedPrecondition("the source environment has no active deployment");
-        const deployment = await createDeployment(
-          tx,
-          target,
-          active.release_id,
-          DeploymentTrigger.PROMOTE,
-          deps.jvmImage,
-        );
+        const deployment = await createDeployment(tx, target, active, DeploymentTrigger.PROMOTE, deps.jvmImage);
         return { response: create(PromoteResponseSchema, { deployment }), projectId: target.project_id };
       });
     },
@@ -74,7 +74,7 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
       const caller = callerOf(context);
       return idempotent({ db, keys, caller, method: DeploymentService.method.rollback, request }, async (tx) => {
         const environment = await loadEnvironment(tx, caller, request.environmentId, { lock: true });
-        const releaseOf = tx.select({ release_id: deployments.release_id }).from(deployments);
+        const releaseOf = tx.select(pinned).from(deployments);
         const [earlier] = request.deploymentId
           ? await releaseOf.where(
               and(eq(deployments.id, request.deploymentId), eq(deployments.environment_id, environment.id)),
@@ -92,13 +92,7 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
         if (!earlier) {
           throw request.deploymentId ? notFound("deployment") : failedPrecondition("no earlier deployment was active");
         }
-        const deployment = await createDeployment(
-          tx,
-          environment,
-          earlier.release_id,
-          DeploymentTrigger.ROLLBACK,
-          deps.jvmImage,
-        );
+        const deployment = await createDeployment(tx, environment, earlier, DeploymentTrigger.ROLLBACK, deps.jvmImage);
         return { response: create(RollbackResponseSchema, { deployment }), projectId: environment.project_id };
       });
     },
