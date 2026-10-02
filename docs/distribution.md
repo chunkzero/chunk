@@ -65,8 +65,9 @@ The `Nightly CLI` workflow ([`.github/workflows/nightly.yml`](../.github/workflo
 for Linux and macOS on x64 and arm64, and Windows x64, every day `main` has changed, and on manual runs from `main`.
 Each archive is `chunk-<version>-<os>-<arch>.tar.gz` with a `.sha256`, where the version is
 `<workspace version>-nightly.<UTC date>.g<12-character commit>`, and the CLI reports that version. They are published as
-a GitHub prerelease `v<version>`; the 30 newest are kept, and older ones can no longer be installed. Nightlies carry no
-JVM artifacts, so `chunk create` still pins the workspace version's. Install them through the
+a GitHub prerelease `v<version>`; the 30 newest are kept, and older ones can no longer be installed. Linux archives are
+built on Ubuntu 24.04 and need its glibc and OpenSSL 3; macOS and Windows archives link OpenSSL statically. Nightlies
+carry no JVM artifacts, so `chunk create` still pins the workspace version's. Install them through the
 [Chunkzero aqua registry](https://github.com/chunkzero/aqua-registry) as `chunkzero/chunk-nightly`.
 
 `scripts/package-sdk.py --no-maven` packages the archive for the host platform, and `scripts/nightly.py` plans the
