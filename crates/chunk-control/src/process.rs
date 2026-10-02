@@ -166,6 +166,8 @@ impl ProcessHost {
                 .args(["-c", GATE, "sh"])
                 .arg(&self.config.java)
                 .arg(format!("-Xmx{}m", size.memory_mib))
+                // Polar worlds load zstd through JNI.
+                .arg("--enable-native-access=ALL-UNNAMED")
                 .arg("-jar")
                 .arg(&jar)
                 .env("CHUNK_PROCESS_TOKEN", &process.token)

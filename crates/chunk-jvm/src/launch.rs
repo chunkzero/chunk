@@ -114,7 +114,13 @@ pub(crate) fn prepare(
 fn flags(heap: u64, cpus: usize, recording: bool) -> Vec<String> {
     let collector = if cpus == 1 { "-XX:+UseSerialGC" } else { "-XX:+UseG1GC" };
     let initial = (!recording).then(|| format!("-Xms{heap}m"));
-    let rest = [format!("-Xmx{heap}m"), collector.into(), "-XX:+ExitOnOutOfMemoryError".into()];
+    // Polar worlds load zstd through JNI.
+    let rest = [
+        format!("-Xmx{heap}m"),
+        collector.into(),
+        "-XX:+ExitOnOutOfMemoryError".into(),
+        "--enable-native-access=ALL-UNNAMED".into(),
+    ];
     initial.into_iter().chain(rest).collect()
 }
 
