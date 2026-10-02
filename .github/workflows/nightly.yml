@@ -90,6 +90,10 @@ jobs:
           tar -xzf "dist/$name.tar.gz" -C "$RUNNER_TEMP/sdk"
           chunk="$RUNNER_TEMP/sdk/$name/chunk"
           test "$("$chunk" --version)" = "chunk $CHUNK_RELEASE_VERSION"
+          if [ "$RUNNER_OS" = macOS ] && otool -L "$chunk" | tail -n +2 | grep -v -e '/usr/lib/' -e '/System/'; then
+            echo "chunk links libraries macOS does not ship" >&2
+            exit 1
+          fi
           "$chunk" gen examples/local --target typescript --frozen \
             --output "$RUNNER_TEMP/generated" --backend-output "$RUNNER_TEMP/backend"
       - uses: actions/upload-artifact@v4
