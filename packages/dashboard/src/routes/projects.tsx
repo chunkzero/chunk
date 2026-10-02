@@ -49,9 +49,9 @@ export function Projects() {
           size="sm"
           variant="outline"
           icon={Add01Icon}
-          onClick={() => {
-            // Memberships may have changed since the principal was loaded.
-            void principal.refetch();
+          onClick={async () => {
+            // Memberships may have changed since the principal was loaded; the dialog starts from the current ones.
+            await principal.refetch();
             setCreating(true);
           }}
         >
