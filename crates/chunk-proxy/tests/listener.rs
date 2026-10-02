@@ -70,6 +70,7 @@ async fn status_handles_fragmentation_and_multiple_protocol_versions() {
         assert_eq!(json["description"]["text"], "hello \"player\"\nwelcome");
         assert_eq!(json["version"]["protocol"], 776);
         assert_eq!(json["version"]["name"], "26.2");
+        assert_eq!(json["enforcesSecureChat"], false);
         assert_eq!(read_frame(&mut client).await, [1, 0x80, 0, 0, 0, 0, 0, 0, 1]);
         closed(&mut client).await;
     }
