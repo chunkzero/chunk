@@ -1,7 +1,7 @@
 use super::*;
 use chunk_proto::sync::v1::{
     CallRequest, CallResponse, Error, JvmAotRecord, JvmAotUse, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead,
-    SubscribeRequest, Update, call_response, core_server, error::Code,
+    JvmAssetRead, JvmAssets, SubscribeRequest, Update, call_response, core_server, error::Code,
 };
 use config::Expected;
 use prost::Message;
@@ -86,6 +86,16 @@ struct Script {
 /// The AOT cache the fake core keeps.
 const AOT_CACHE: &[u8] = b"an AOT cache";
 
+/// The one file of the asset revision the fake core names, shared by every app.
+const SHARED_FILE: &[u8] = b"shared settings";
+
+fn asset_revision() -> chunk_contract::AssetRevision {
+    let mut revision = chunk_contract::AssetRevision { version: 1, ..Default::default() };
+    let blob = chunk_contract::AssetBlob { sha256: format!("{:x}", Sha256::digest(SHARED_FILE)), size: 15 };
+    revision.shared.insert("settings.json".into(), blob);
+    revision
+}
+
 struct FakeCore {
     script: Script,
     launches: AtomicUsize,
@@ -110,6 +120,7 @@ impl FakeCore {
             generation: 3,
             aot: self.script.aot.clone(),
             environment_name: "prod".into(),
+            assets: Some(JvmAssets { revision_id: asset_revision().id(), manifest: asset_revision().encode() }),
         }
     }
 }
@@ -158,6 +169,12 @@ impl core_server::Core for Served {
                 let start = usize::try_from(read.offset).unwrap();
                 let data = archive[start..archive.len().min(start + CHUNK)].to_vec();
                 JvmArchiveChunk { data }.encode_to_vec()
+            }
+            "chunk:asset-read" => {
+                let read = JvmAssetRead::decode(request.arguments.as_slice()).unwrap();
+                assert_eq!(read.sha256, format!("{:x}", Sha256::digest(SHARED_FILE)));
+                let start = usize::try_from(read.offset).unwrap();
+                JvmArchiveChunk { data: SHARED_FILE[start..SHARED_FILE.len().min(start + 4)].to_vec() }.encode_to_vec()
             }
             "chunk:aot-read" => {
                 core.aot_reads.fetch_add(1, Ordering::SeqCst);
@@ -323,6 +340,9 @@ async fn a_runner_retries_an_unavailable_core_then_starts_the_verified_release()
     assert!(Path::new(working.trim()).starts_with(machine.path("work")));
     assert!(!Path::new(working.trim()).exists());
     assert_eq!(machine.cached(), [RELEASE.1.as_str()]);
+    let assets = Path::new(env["CHUNK_ASSETS"]);
+    assert_eq!(assets, machine.path("cache/assets/apps").join(asset_revision().id()).join("lobby"));
+    assert_eq!(fs::read(assets.join("shared/settings.json")).unwrap(), SHARED_FILE);
 }
 
 #[tokio::test]
