@@ -51,7 +51,11 @@ abstract class GenerateTestContracts
             val root = project.rootProject.layout.projectDirectory
             workingDirectory.convention(root)
             generatorSources.from(
+                root.file("Cargo.toml"),
+                root.file("Cargo.lock"),
+                root.file("crates/chunk-build/Cargo.toml"),
                 root.dir("crates/chunk-build/src"),
+                root.file("crates/chunk-contract/Cargo.toml"),
                 root.dir("crates/chunk-contract/src"),
             )
             outputDirectory.convention(project.layout.buildDirectory.dir("generated/contracts"))
