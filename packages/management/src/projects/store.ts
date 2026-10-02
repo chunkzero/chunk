@@ -1,42 +1,20 @@
 import { create } from "@bufbuild/protobuf";
+import { eq } from "drizzle-orm";
 
 import type { Edge } from "../config.ts";
 import type { Db } from "../db.ts";
-import type { SleepingPingMode } from "../gen/chunk/management/v1/common_pb.ts";
 import {
   type Environment,
   EnvironmentSchema,
-  type EnvironmentState,
   type Project,
   ProjectSchema,
 } from "../gen/chunk/management/v1/projects_pb.ts";
 import { type Caller, checkProjectAccess } from "../rpc/caller.ts";
 import { notFound, required, timestamp } from "../rpc/validate.ts";
+import { environments, projects } from "../schema.ts";
 
-export interface ProjectRow {
-  seq: bigint;
-  id: string;
-  owner_id: string;
-  name: string;
-  create_time: Date;
-}
-
-export interface EnvironmentRow {
-  seq: bigint;
-  id: string;
-  project_id: string;
-  name: string;
-  state: EnvironmentState;
-  active_deployment_id: string;
-  hostname: string;
-  sleeping_ping: SleepingPingMode;
-  drain_max_age_seconds: number;
-  drain_deadline_seconds: number;
-  online_players: number;
-  forked_from_environment_id: string;
-  forked_from_snapshot_id: string;
-  create_time: Date;
-}
+export type ProjectRow = typeof projects.$inferSelect;
+export type EnvironmentRow = typeof environments.$inferSelect;
 
 export function toProject(row: ProjectRow): Project {
   return create(ProjectSchema, {
@@ -76,7 +54,7 @@ function joinAddress(hostname: string, edge: Edge | undefined): string {
 }
 
 export async function findProject(db: Db, id: string): Promise<ProjectRow | undefined> {
-  const [row] = await db<ProjectRow[]>`select * from projects where id = ${id}`;
+  const [row] = await db.select().from(projects).where(eq(projects.id, id));
   return row;
 }
 
@@ -98,8 +76,11 @@ export async function loadEnvironment(
   id: string,
   { lock = false, field = "environment_id" } = {},
 ): Promise<EnvironmentRow> {
-  const [row] = await db<EnvironmentRow[]>`
-    select * from environments where id = ${required(id, field)} ${lock ? db`for update` : db``}`;
+  const query = db
+    .select()
+    .from(environments)
+    .where(eq(environments.id, required(id, field)));
+  const [row] = await (lock ? query.for("update") : query);
   if (!row) throw notFound("environment");
   checkProjectAccess(caller, row.project_id);
   return row;

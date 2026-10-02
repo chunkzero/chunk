@@ -1,12 +1,15 @@
+import { and, asc, eq, exists, gt, inArray, ne, not, sql } from "drizzle-orm";
+
 import { untilAborted } from "../abort.ts";
 import { issueEnvironmentToken } from "../auth/tokens.ts";
 import { notify } from "../changes.ts";
-import { advisoryLock, type Db, type Sql } from "../db.ts";
+import { advisoryLock, type Database, type Db } from "../db.ts";
 import type { Deps } from "../deps.ts";
 import { CapacityState, Workload } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { boundedProvider, type ProviderTimeouts, ProviderTimeoutError } from "../providers/bounded.ts";
 import { type Machine, NoCapacityError, type Provider } from "../providers/provider.ts";
+import { capacityRequests, environments, reconcilerLeader } from "../schema.ts";
 import { type CapacityRow, capacityCredentialContext } from "./capacity.ts";
 import { desiredDeployment } from "./desired.ts";
 import {
@@ -30,23 +33,25 @@ export interface ReconcilerOptions extends MachineOptions {
   capacityRetryMs: number;
 }
 
-interface EnvironmentRow {
-  id: string;
-  state: EnvironmentState;
-  revision: bigint;
-  lease: bigint;
-  ready_to_suspend: boolean;
-  report_desired_revision: bigint;
-  machine_id: string;
-  machine_addresses: string[];
-  machine_token: Uint8Array | null;
-  alarm_epoch: bigint;
-  alarm_generation: bigint;
-  alarm_due_seconds: bigint | null;
-  alarm_due_nanos: number | null;
-  alarm_fired: boolean;
-  forked_from_environment_id: string;
-}
+const environmentColumns = {
+  id: environments.id,
+  state: environments.state,
+  revision: environments.revision,
+  lease: environments.lease,
+  ready_to_suspend: environments.ready_to_suspend,
+  report_desired_revision: environments.report_desired_revision,
+  machine_id: environments.machine_id,
+  machine_addresses: environments.machine_addresses,
+  machine_token: environments.machine_token,
+  alarm_epoch: environments.alarm_epoch,
+  alarm_generation: environments.alarm_generation,
+  alarm_due_seconds: environments.alarm_due_seconds,
+  alarm_due_nanos: environments.alarm_due_nanos,
+  alarm_fired: environments.alarm_fired,
+  forked_from_environment_id: environments.forked_from_environment_id,
+};
+
+type EnvironmentRow = Pick<typeof environments.$inferSelect, keyof typeof environmentColumns>;
 
 const intervalMs = 5000;
 /** The advisory lock the leading reconciler holds. */
@@ -116,9 +121,9 @@ export function startReconciler(
       try {
         if (await leader.hold()) {
           // Only the lock holder bumps, so another epoch means this process lost the lock since it last bumped.
-          const [current] = await deps.sql<{ epoch: bigint }[]>`select epoch from reconciler_leader`;
+          const [current] = await deps.db.select({ epoch: reconcilerLeader.epoch }).from(reconcilerLeader);
           if (epoch === undefined || current?.epoch !== epoch) {
-            epoch = await takeLeadership(deps.sql);
+            epoch = await takeLeadership(deps.db);
             lastFullPass = 0;
           }
           const full = Date.now() - lastFullPass >= intervalMs;
@@ -150,8 +155,11 @@ export function startReconciler(
 }
 
 /** Starts a new leader epoch and returns it. */
-export async function takeLeadership(sql: Sql): Promise<bigint> {
-  const [row] = await sql<{ epoch: bigint }[]>`update reconciler_leader set epoch = epoch + 1 returning epoch`;
+export async function takeLeadership(db: Db): Promise<bigint> {
+  const [row] = await db
+    .update(reconcilerLeader)
+    .set({ epoch: sql`${reconcilerLeader.epoch} + 1` })
+    .returning({ epoch: reconcilerLeader.epoch });
   if (!row) throw new Error("reconciler_leader has no row");
   return row.epoch;
 }
@@ -191,10 +199,12 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions, signal?
   };
   return {
     async pass(epoch, environmentIds) {
-      const run: Run = { deps, options: bounded, fenced: fence(deps.sql, epoch), retries, signal };
+      const run: Run = { deps, options: bounded, fenced: fence(deps.db, epoch), retries, signal };
       const ids =
         environmentIds ??
-        (await deps.sql<{ id: string }[]>`select id from environments order by seq`).map(({ id }) => id);
+        (await deps.db.select({ id: environments.id }).from(environments).orderBy(environments.seq)).map(
+          ({ id }) => id,
+        );
       const runs = ids.flatMap((id) => [
         pool.schedule(
           `environment/${id}`,
@@ -223,31 +233,31 @@ export function reconcile(deps: Deps, options: ReconcilerOptions, epoch: bigint)
   return createReconciler(deps, options).pass(epoch);
 }
 
-function fence(sql: Sql, epoch: bigint): Fence {
-  return async (body) => {
-    const { result } = await sql.begin(async (tx) => {
-      const [current] = await tx`select 1 from reconciler_leader where epoch = ${epoch} for share`;
+function fence(db: Database, epoch: bigint): Fence {
+  return (body) =>
+    db.transaction(async (tx) => {
+      const [current] = await tx
+        .select({ one: sql`1` })
+        .from(reconcilerLeader)
+        .where(eq(reconcilerLeader.epoch, epoch))
+        .for("share");
       if (!current) throw new Superseded();
-      return { result: await body(tx) };
+      return body(tx);
     });
-    return result;
-  };
 }
 
 async function reconcileEnvironment(run: Run, id: string) {
   const { deps, options, fenced, retries, signal } = run;
-  const { sql, logStore } = deps;
+  const { db, logStore } = deps;
   const { provider } = options;
   // Read when the run starts, not when it was scheduled, since it may have waited for the pool.
-  const [environment] = await sql<EnvironmentRow[]>`
-    select id, state, revision, lease, ready_to_suspend, report_desired_revision, machine_id, machine_addresses,
-      machine_token, alarm_epoch, alarm_generation, alarm_due_seconds, alarm_due_nanos, alarm_fired,
-      forked_from_environment_id
-    from environments
-    where id = ${id}`;
+  const [environment] = await db.select(environmentColumns).from(environments).where(eq(environments.id, id));
   if (!environment) return;
-  const capacity = await sql<CapacityRow[]>`
-    select * from capacity_requests where environment_id = ${id} and not torn_down order by create_time`;
+  const capacity = await db
+    .select()
+    .from(capacityRequests)
+    .where(and(eq(capacityRequests.environment_id, id), not(capacityRequests.torn_down)))
+    .orderBy(asc(capacityRequests.create_time));
 
   if (environment.state === EnvironmentState.DELETING) {
     // By name: a deleting environment's machine names are never used again. A failed removal holds up no other.
@@ -259,15 +269,24 @@ async function reconcileEnvironment(run: Run, id: string) {
     // Once no machine is left to write them, and bounded like a provider call so a stalled store holds up no worker.
     if (logStore) {
       // Forks whose core hasn't attached yet still restore from this log, so it stays until they have or are deleted.
-      const [restoring] = await sql`
-        select 1 from environments
-        where forked_from_environment_id = ${id} and epoch = 0 and state <> ${EnvironmentState.DELETING}
-        limit 1`;
+      const [restoring] = await db
+        .select({ one: sql`1` })
+        .from(environments)
+        .where(
+          and(
+            eq(environments.forked_from_environment_id, id),
+            eq(environments.epoch, 0n),
+            ne(environments.state, EnvironmentState.DELETING),
+          ),
+        )
+        .limit(1);
       if (restoring) return;
       const bound = AbortSignal.any([AbortSignal.timeout(options.timeouts.callMs), ...(signal ? [signal] : [])]);
       await untilAborted(bound, logStore.deleteEnvironment(id, bound));
     }
-    await fenced((tx) => tx`delete from environments where id = ${id} and state = ${EnvironmentState.DELETING}`);
+    await fenced((tx) =>
+      tx.delete(environments).where(and(eq(environments.id, id), eq(environments.state, EnvironmentState.DELETING))),
+    );
     for (const request of capacity) {
       retries.clear(capacityKey(request));
       retries.clear(teardownKey(request));
@@ -277,7 +296,7 @@ async function reconcileEnvironment(run: Run, id: string) {
   }
   // A fork's core runs without a deployment: it restores the fork, and its first attach deploys the release the restored
   // data was serving, if any. Without one it suspends once idle, like any core.
-  if (!environment.forked_from_environment_id && !(await desiredDeployment(sql, id))) return;
+  if (!environment.forked_from_environment_id && !(await desiredDeployment(db, id))) return;
 
   // Core has no state to fail into, so it retries for as long as it takes, backing off while calls fail transiently.
   const key = coreKey(id);
@@ -301,9 +320,10 @@ async function reconcileEnvironment(run: Run, id: string) {
 /** Runs core's machine, suspending it and the extra machines while idle, and the extra machines otherwise. */
 async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRow[]) {
   const { deps, options, fenced, retries } = run;
-  const { sql } = deps;
+  const { db } = deps;
   const { provider } = options;
   const id = environment.id;
+  const thisEnvironment = eq(environments.id, id);
   const observed = environment.machine_id ? await provider.status(environment.machine_id) : undefined;
   let core = observed && observed.state !== "missing" ? observed : await createCore(deps, options, fenced, environment);
   if (!core) return;
@@ -315,24 +335,42 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
   if (idle) {
     // Checked against the latest accepted report on every pass, retries included, since core may have reported
     // activity or accepted a wake after this pass read the environment. A later change resumes it next pass.
-    const [marked] = await fenced(
-      (tx) => tx<{ changed: boolean }[]>`
-        update environments set state = ${EnvironmentState.SUSPENDED}
-        where id = ${id} and revision = ${environment.revision} and lease > 0 and ready_to_suspend
-          and report_desired_revision = revision and state <> ${EnvironmentState.DELETING}
-        returning ${environment.state !== EnvironmentState.SUSPENDED} as changed`,
+    const [marked] = await fenced((tx) =>
+      tx
+        .update(environments)
+        .set({ state: EnvironmentState.SUSPENDED })
+        .where(
+          and(
+            thisEnvironment,
+            eq(environments.revision, environment.revision),
+            gt(environments.lease, 0n),
+            eq(environments.ready_to_suspend, true),
+            eq(environments.report_desired_revision, environments.revision),
+            ne(environments.state, EnvironmentState.DELETING),
+          ),
+        )
+        .returning({ id: environments.id }),
     );
     if (!marked) return;
-    if (marked.changed) await notify(sql, { kind: "environment", environmentId: id });
+    if (environment.state !== EnvironmentState.SUSPENDED) await notify(db, { kind: "environment", environmentId: id });
     // Rechecked before each suspension, outside the transaction like every provider call. A report or wake that lands
     // between the recheck and the suspension notifies, which runs the environment again once this run ends, and that
     // run resumes the machine; so does a later one, for a suspension that finishes after it gave up on the call.
     const stillIdle = async () => {
-      const [still] = await fenced(
-        (tx) => tx`
-          select 1 as idle from environments
-          where id = ${id} and state = ${EnvironmentState.SUSPENDED} and revision = ${environment.revision}
-            and lease = ${environment.lease} and ready_to_suspend and report_desired_revision = revision`,
+      const [still] = await fenced((tx) =>
+        tx
+          .select({ idle: sql`1` })
+          .from(environments)
+          .where(
+            and(
+              thisEnvironment,
+              eq(environments.state, EnvironmentState.SUSPENDED),
+              eq(environments.revision, environment.revision),
+              eq(environments.lease, environment.lease),
+              eq(environments.ready_to_suspend, true),
+              eq(environments.report_desired_revision, environments.revision),
+            ),
+          ),
       );
       return still !== undefined;
     };
@@ -340,14 +378,20 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
     // its machine is torn down while the environment sleeps; core asks for new capacity once woken. Judged from the
     // machine's state, not the suspension's reply, so one cut short is failed on a later pass.
     const failStopped = async (request: CapacityRow, machineId: string) => {
-      await fenced(
-        (tx) => tx`
-          update capacity_requests
-          set state = ${CapacityState.FAILED}, message = 'the JVM machine stopped while its environment was suspended'
-          where environment_id = ${id} and request_id = ${request.request_id} and machine_id = ${machineId}
-            and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`,
+      await fenced((tx) =>
+        tx
+          .update(capacityRequests)
+          .set({ state: CapacityState.FAILED, message: "the JVM machine stopped while its environment was suspended" })
+          .where(
+            and(
+              eq(capacityRequests.environment_id, id),
+              eq(capacityRequests.request_id, request.request_id),
+              eq(capacityRequests.machine_id, machineId),
+              inArray(capacityRequests.state, running),
+            ),
+          ),
       );
-      await notify(sql, { kind: "environment", environmentId: id });
+      await notify(db, { kind: "environment", environmentId: id });
     };
     // An extra machine whose calls fail is left for a later run, and the others and core are still suspended. Its
     // failures are kept until it is seen not running or its suspension succeeds.
@@ -366,10 +410,17 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
       }
       // Seen running, so its resume finished, and the next suspension may be resumed.
       if (request.resuming) {
-        await fenced(
-          (tx) => tx`
-            update capacity_requests set resuming = false
-            where environment_id = ${id} and request_id = ${request.request_id} and machine_id = ${machine.id}`,
+        await fenced((tx) =>
+          tx
+            .update(capacityRequests)
+            .set({ resuming: false })
+            .where(
+              and(
+                eq(capacityRequests.environment_id, id),
+                eq(capacityRequests.request_id, request.request_id),
+                eq(capacityRequests.machine_id, machine.id),
+              ),
+            ),
         );
       }
       if (!(await stillIdle())) return;
@@ -391,37 +442,47 @@ async function runCore(run: Run, environment: EnvironmentRow, active: CapacityRo
     // under a new lease. The environment is starting from here, so the successor's first report with gateways runs it
     // without waiting for the start to return. A suspended core keeps its gateways, which serve again once it resumes.
     if (core.state === "stopped") {
-      await fenced(
-        (tx) => tx`
-          update environments set gateway_addresses = '{}', report_sequence = ${closedSequence},
-            state = case
+      await fenced((tx) =>
+        tx
+          .update(environments)
+          .set({
+            gateway_addresses: [],
+            report_sequence: closedSequence,
+            state: sql`case
               when state in (${EnvironmentState.PENDING}, ${EnvironmentState.SUSPENDED}) then ${EnvironmentState.STARTING}::smallint
               else state
-            end
-          where id = ${id} and lease = ${environment.lease}`,
+            end`,
+          })
+          .where(and(thisEnvironment, eq(environments.lease, environment.lease))),
       );
-      await notify(sql, { kind: "environment", environmentId: id });
+      await notify(db, { kind: "environment", environmentId: id });
     }
     core = await provider.start(core.id);
   }
   await saveCoreAddresses(deps, fenced, environment, core);
   if (environment.state === EnvironmentState.PENDING || environment.state === EnvironmentState.SUSPENDED) {
     // Core may report its gateways before its start returns, and such a report leaves the state as it is.
-    await fenced(
-      (tx) => tx`
-        update environments set state = case
-          when cardinality(gateway_addresses) > 0 then ${EnvironmentState.RUNNING}::smallint
-          else ${EnvironmentState.STARTING}::smallint
-        end
-        where id = ${id} and state = ${environment.state}`,
+    await fenced((tx) =>
+      tx
+        .update(environments)
+        .set({
+          state: sql`case
+            when cardinality(gateway_addresses) > 0 then ${EnvironmentState.RUNNING}::smallint
+            else ${EnvironmentState.STARTING}::smallint
+          end`,
+        })
+        .where(and(thisEnvironment, eq(environments.state, environment.state))),
     );
-    await notify(sql, { kind: "environment", environmentId: id });
+    await notify(db, { kind: "environment", environmentId: id });
   }
   for (const request of active) await keepRunning(run, core, request);
 }
 
 /** A report sequence no report exceeds, which closes a lease to further reports. */
 const closedSequence = 2n ** 63n - 1n;
+
+/** The states of a request whose machine should run. */
+const running = [CapacityState.PROVISIONING, CapacityState.READY];
 
 function coreKey(environmentId: string): string {
   return `core/${environmentId}`;
@@ -460,26 +521,26 @@ async function createCore(deps: Deps, options: ReconcilerOptions, fenced: Fence,
   const context = `machine-token/${environment.id}`;
   // The token is saved before the machine exists, so a retry after a crash builds the same machine, and in the same
   // transaction as the row lock deletion takes, so a deleted or deleting environment never gets a machine.
-  const { sealed } = await fenced(async (tx) => {
-    const [row] = await tx<{ machine_token: Uint8Array | null }[]>`
-      select machine_token from environments
-      where id = ${environment.id} and state <> ${EnvironmentState.DELETING}
-      for update`;
-    if (!row || row.machine_token) return { sealed: row?.machine_token ?? undefined };
+  const notDeleting = and(eq(environments.id, environment.id), ne(environments.state, EnvironmentState.DELETING));
+  const sealed = await fenced(async (tx) => {
+    const [row] = await tx
+      .select({ machine_token: environments.machine_token })
+      .from(environments)
+      .where(notDeleting)
+      .for("update");
+    if (!row || row.machine_token) return row?.machine_token ?? undefined;
     const issued = await issueEnvironmentToken(tx, environment.id);
     const token = await keys.cipher.seal(new TextEncoder().encode(issued), context);
-    await tx`update environments set machine_token = ${token} where id = ${environment.id}`;
-    return { sealed: token };
+    await tx.update(environments).set({ machine_token: token }).where(eq(environments.id, environment.id));
+    return token;
   });
   if (!sealed) return undefined;
   const token = new TextDecoder().decode(await keys.cipher.open(sealed, context));
   const machine = await options.provider.create(coreMachineSpec(options, environment.id, token));
-  const saved = await fenced(
-    (tx) => tx`
-      update environments set machine_id = ${machine.id}
-      where id = ${environment.id} and state <> ${EnvironmentState.DELETING}`,
+  const saved = await fenced((tx) =>
+    tx.update(environments).set({ machine_id: machine.id }).where(notDeleting).returning({ id: environments.id }),
   );
-  if (saved.count === 0) {
+  if (saved.length === 0) {
     await options.provider.destroy(machine.name, { id: machine.id });
     return undefined;
   }
@@ -487,14 +548,12 @@ async function createCore(deps: Deps, options: ReconcilerOptions, fenced: Fence,
 }
 
 /** Addresses can change whenever a machine starts, and routes only list gateways on the current ones. */
-async function saveCoreAddresses({ sql }: Deps, fenced: Fence, environment: EnvironmentRow, core: Machine) {
+async function saveCoreAddresses({ db }: Deps, fenced: Fence, environment: EnvironmentRow, core: Machine) {
   if (sameList(environment.machine_addresses, core.addresses)) return;
-  await fenced(
-    (tx) => tx`
-      update environments set machine_addresses = ${sql.array(core.addresses)}::text[]
-      where id = ${environment.id}`,
+  await fenced((tx) =>
+    tx.update(environments).set({ machine_addresses: core.addresses }).where(eq(environments.id, environment.id)),
   );
-  await notify(sql, { kind: "environment", environmentId: environment.id });
+  await notify(db, { kind: "environment", environmentId: environment.id });
 }
 
 /**
@@ -511,15 +570,17 @@ async function saveCoreAddresses({ sql }: Deps, fenced: Fence, environment: Envi
  */
 async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
   const { deps, options, fenced, retries } = run;
-  const { sql, keys } = deps;
+  const { db, keys } = deps;
   const { provider } = options;
   const key = capacityKey(request);
   if (retries.waiting(key)) return;
   const jvm = request.workload === Workload.JVM;
   const name = capacityMachineName(request);
-  const active = sql`
-    environment_id = ${request.environment_id} and request_id = ${request.request_id}
-      and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY})`;
+  const active = and(
+    eq(capacityRequests.environment_id, request.environment_id),
+    eq(capacityRequests.request_id, request.request_id),
+    inArray(capacityRequests.state, running),
+  );
   const notRunning = (machine: Machine | undefined) =>
     new Error(
       machine?.state === "suspended"
@@ -536,13 +597,16 @@ async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
   // tears the machine down by name; a start still under way then finds its ID gone.
   const mayStart = (machine: Machine) =>
     fenced(async (tx) => {
-      const [row] = await tx<Pick<CapacityRow, "started" | "resuming">[]>`
-        select started, resuming from capacity_requests where ${active} and machine_id = ${machine.id} for update`;
+      const [row] = await tx
+        .select({ started: capacityRequests.started, resuming: capacityRequests.resuming })
+        .from(capacityRequests)
+        .where(and(active, eq(capacityRequests.machine_id, machine.id)))
+        .for("update");
       if (!row) return false;
       if (jvm) {
         if (spent(row, machine)) throw notRunning(machine);
         resuming = machine.state === "suspended";
-        await tx`update capacity_requests set started = true, resuming = ${resuming} where ${active}`;
+        await tx.update(capacityRequests).set({ started: true, resuming }).where(active);
       }
       return true;
     });
@@ -564,8 +628,14 @@ async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
         found = await provider.create(capacityMachineSpec(options, request, { coreHost, credential }));
       }
       const id = found.id;
-      const saved = await fenced((tx) => tx`update capacity_requests set machine_id = ${id} where ${active}`);
-      if (saved.count === 0) {
+      const saved = await fenced((tx) =>
+        tx
+          .update(capacityRequests)
+          .set({ machine_id: id })
+          .where(active)
+          .returning({ request_id: capacityRequests.request_id }),
+      );
+      if (saved.length === 0) {
         retries.clear(key);
         await provider.destroy(name, { id });
         return;
@@ -584,11 +654,11 @@ async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
       return;
     }
     const addresses = machine.addresses;
-    await fenced(
-      (tx) => tx`
-        update capacity_requests
-        set state = ${CapacityState.READY}, machine_addresses = ${sql.array(addresses)}::text[], resuming = false
-        where ${active}`,
+    await fenced((tx) =>
+      tx
+        .update(capacityRequests)
+        .set({ state: CapacityState.READY, machine_addresses: addresses, resuming: false })
+        .where(active),
     );
   } catch (error) {
     if (error instanceof Superseded) throw error;
@@ -598,23 +668,36 @@ async function keepRunning(run: Run, core: Machine, request: CapacityRow) {
     }
     retries.clear(key);
     console.error(`running capacity ${request.request_id} failed:`, error);
-    await fenced(
-      (tx) => tx`
-        update capacity_requests
-        set state = ${CapacityState.FAILED}, message = ${error instanceof Error ? error.message : String(error)}
-        where ${active}`,
+    await fenced((tx) =>
+      tx
+        .update(capacityRequests)
+        .set({ state: CapacityState.FAILED, message: error instanceof Error ? error.message : String(error) })
+        .where(active),
     );
   }
-  await notify(sql, { kind: "environment", environmentId: request.environment_id });
+  await notify(db, { kind: "environment", environmentId: request.environment_id });
 }
 
 /** Tears down the machines of an environment's failed and releasing requests; a deleting one's run removes its own. */
 async function tearDownReleased(run: Run, id: string) {
-  const requests = await run.deps.sql<CapacityRow[]>`
-    select * from capacity_requests
-    where environment_id = ${id} and not torn_down and state in (${CapacityState.FAILED}, ${CapacityState.RELEASING})
-      and exists (select 1 from environments where id = ${id} and state <> ${EnvironmentState.DELETING})
-    order by create_time`;
+  const { db } = run.deps;
+  const requests = await db
+    .select()
+    .from(capacityRequests)
+    .where(
+      and(
+        eq(capacityRequests.environment_id, id),
+        not(capacityRequests.torn_down),
+        inArray(capacityRequests.state, [CapacityState.FAILED, CapacityState.RELEASING]),
+        exists(
+          db
+            .select({ one: sql`1` })
+            .from(environments)
+            .where(and(eq(environments.id, id), ne(environments.state, EnvironmentState.DELETING))),
+        ),
+      ),
+    )
+    .orderBy(asc(capacityRequests.create_time));
   for (const request of requests) await tearDown(run, request);
 }
 
@@ -630,12 +713,19 @@ async function tearDown({ options: { provider }, fenced, retries }: Run, request
   const key = teardownKey(request);
   if (!(await isolated(retries, key, what, () => provider.destroy(name).then(() => true)))) return;
   retries.clear(key);
-  await fenced(
-    (tx) => tx`
-      update capacity_requests
-      set torn_down = true,
-        state = case when state = ${CapacityState.RELEASING}::smallint then ${CapacityState.RELEASED}::smallint else state end
-      where environment_id = ${request.environment_id} and request_id = ${request.request_id}`,
+  await fenced((tx) =>
+    tx
+      .update(capacityRequests)
+      .set({
+        torn_down: true,
+        state: sql`case when state = ${CapacityState.RELEASING}::smallint then ${CapacityState.RELEASED}::smallint else state end`,
+      })
+      .where(
+        and(
+          eq(capacityRequests.environment_id, request.environment_id),
+          eq(capacityRequests.request_id, request.request_id),
+        ),
+      ),
   );
 }
 
@@ -645,15 +735,21 @@ async function tearDown({ options: { provider }, fenced, retries }: Run, request
  * its environment deleted leaves them. A request not yet torn down keeps its machine, since a create for it may still
  * be under way.
  */
-async function sweep({ deps: { sql }, options: { provider } }: Run) {
+async function sweep({ deps: { db }, options: { provider } }: Run) {
   const machines = await provider.list();
   // Read after listing: a request only ever becomes torn down and an environment only goes away, so a listed machine
   // untracked now stays untracked, and its name is never used again.
-  const environments = await sql<{ id: string }[]>`select id from environments`;
-  const requests = await sql<Pick<CapacityRow, "environment_id" | "request_id" | "workload">[]>`
-    select environment_id, request_id, workload from capacity_requests where not torn_down`;
+  const existing = await db.select({ id: environments.id }).from(environments);
+  const requests = await db
+    .select({
+      environment_id: capacityRequests.environment_id,
+      request_id: capacityRequests.request_id,
+      workload: capacityRequests.workload,
+    })
+    .from(capacityRequests)
+    .where(not(capacityRequests.torn_down));
   const tracked = new Set([
-    ...environments.map(({ id }) => coreMachineName(id)),
+    ...existing.map(({ id }) => coreMachineName(id)),
     ...requests.map((request) => capacityMachineName(request)),
   ]);
   for (const { name } of machines) {
@@ -675,12 +771,21 @@ async function fireDueAlarm(fenced: Fence, environment: EnvironmentRow) {
   if (seconds === null || environment.alarm_fired) return;
   if (Number(seconds) * 1000 + (nanos ?? 0) / 1e6 > Date.now()) return;
   await fenced(async (tx) => {
-    const fired = await tx`
-      update environments set alarm_fired = true
-      where id = ${environment.id} and not alarm_fired
-        and alarm_epoch = ${environment.alarm_epoch} and alarm_generation = ${environment.alarm_generation}
-        and alarm_due_seconds = ${seconds} and alarm_due_nanos is not distinct from ${nanos}`;
-    if (fired.count > 0) await advanceRevision(tx, environment.id);
+    const fired = await tx
+      .update(environments)
+      .set({ alarm_fired: true })
+      .where(
+        and(
+          eq(environments.id, environment.id),
+          not(environments.alarm_fired),
+          eq(environments.alarm_epoch, environment.alarm_epoch),
+          eq(environments.alarm_generation, environment.alarm_generation),
+          eq(environments.alarm_due_seconds, seconds),
+          sql`${environments.alarm_due_nanos} is not distinct from ${nanos}`,
+        ),
+      )
+      .returning({ id: environments.id });
+    if (fired.length > 0) await advanceRevision(tx, environment.id);
   });
 }
 

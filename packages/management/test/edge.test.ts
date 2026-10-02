@@ -32,9 +32,9 @@ describe.skipIf(!databaseUrl)("EdgeService and LogService", () => {
   let epoch = 0n;
   beforeAll(async () => {
     h = await startHarness();
-    epoch = await takeLeadership(h.sql);
+    epoch = await takeLeadership(h.db);
     const token = `chunk_${randomToken()}`;
-    await ensureEdgeToken(h.sql, token);
+    await ensureEdgeToken(h.db, token);
     edge = h.client(EdgeService, token);
     options = {
       provider,

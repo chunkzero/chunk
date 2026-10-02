@@ -1,14 +1,15 @@
 import type { Changes } from "./changes.ts";
 import type { Edge } from "./config.ts";
 import type { Keys } from "./crypto.ts";
-import type { Sql } from "./db.ts";
+import type { Database } from "./db.ts";
 import type { LogStoreIssuer } from "./logstore/issuer.ts";
 import type { ArchiveLimits } from "./releases/archive.ts";
 import type { ReleaseStore } from "./releases/store.ts";
 
 /** Everything the services share. Installs swap implementations here, for example a different release store. */
 export interface Deps {
-  sql: Sql;
+  /** Drizzle over the service's pool. An install's own tables can be queried and joined with chunk's schema tables. */
+  db: Database;
   keys: Keys;
   releases: ReleaseStore;
   /** Bounds how much a release archive may expand while it is verified. */

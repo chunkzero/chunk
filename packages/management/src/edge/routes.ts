@@ -1,6 +1,7 @@
 import { create } from "@bufbuild/protobuf";
+import { sql } from "drizzle-orm";
 
-import type { Db } from "../db.ts";
+import { type Db, fetchRows } from "../db.ts";
 import type { SleepingPingMode } from "../gen/chunk/management/v1/common_pb.ts";
 import { DomainState } from "../gen/chunk/management/v1/domains_pb.ts";
 import { type Route, RouteSchema } from "../gen/chunk/management/v1/edge_pb.ts";
@@ -24,7 +25,9 @@ interface RouteRow {
  * only while the environment runs, and only on machines provisioned for it.
  */
 export async function routeTable(db: Db): Promise<Map<string, Route>> {
-  const rows = await db<RouteRow[]>`
+  const rows = await fetchRows<RouteRow>(
+    db,
+    sql`
     select e.id, e.hostname, e.state, e.sleeping_ping, e.gateway_addresses, e.pings,
       e.machine_addresses || coalesce((
         select array_agg(address)
@@ -37,7 +40,8 @@ export async function routeTable(db: Db): Promise<Map<string, Route>> {
       ), '{}') as domains
     from environments e
     where e.state <> ${EnvironmentState.DELETING}
-    order by e.seq`;
+    order by e.seq`,
+  );
   const routes = new Map<string, Route>();
   for (const row of rows) {
     const provisioned = new Set(row.machine_addresses);

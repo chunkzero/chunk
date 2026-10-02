@@ -15,11 +15,13 @@ import {
 } from "@bufbuild/protobuf/wkt";
 import { Code, createClient, type Interceptor } from "@connectrpc/connect";
 import { createConnectTransport, createGrpcWebTransport } from "@connectrpc/connect-web";
+import { SQL } from "bun";
+import { sql } from "drizzle-orm";
 
 import { start } from "../src/app.ts";
 import { loadConfig } from "../src/config.ts";
 import { randomToken } from "../src/crypto.ts";
-import { connect } from "../src/db.ts";
+import { fetchRows } from "../src/db.ts";
 import { AuthService } from "../src/gen/chunk/management/v1/auth_pb.ts";
 import { EdgeService } from "../src/gen/chunk/management/v1/edge_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
@@ -80,10 +82,10 @@ const bearer =
 
 describe.skipIf(!databaseUrl)("start", () => {
   const database = `test_app_${randomBytes(6).toString("hex")}`;
-  let admin: ReturnType<typeof connect>;
+  let admin: SQL;
   let dataDir: string;
   beforeAll(async () => {
-    admin = connect(databaseUrl ?? "");
+    admin = new SQL(databaseUrl ?? "");
     await admin.unsafe(`create database ${database}`);
     dataDir = await mkdtemp(join(tmpdir(), "chunk-management-app-"));
   });
@@ -147,8 +149,20 @@ describe.skipIf(!databaseUrl)("start", () => {
 
   test("serves an install's provider, migrations, services and credentials", async () => {
     const migrations = join(dataDir, "migrations");
-    await Bun.write(join(migrations, "0001_init.sql"), "create table extension_greetings (text text not null);");
-    await Bun.write(join(migrations, "0002_greet.sql"), "insert into extension_greetings values ('hello');");
+    // A drizzle-kit migrations folder: its journal lists the migrations in order.
+    const entries = ["0000_init", "0001_greet"].map((tag, idx) => ({
+      idx,
+      version: "7",
+      when: idx + 1,
+      tag,
+      breakpoints: true,
+    }));
+    await Bun.write(
+      join(migrations, "meta", "_journal.json"),
+      JSON.stringify({ version: "7", dialect: "postgresql", entries }),
+    );
+    await Bun.write(join(migrations, "0000_init.sql"), "create table extension_greetings (text text not null);");
+    await Bun.write(join(migrations, "0001_greet.sql"), "insert into extension_greetings values ('hello');");
     const { listed, provider } = listedProvider();
     const credentials = new Map<string, Identity>([
       ["agent", { kind: "extension", service: WhoAmIService.typeName, subject: "agent-1" }],
@@ -175,7 +189,10 @@ describe.skipIf(!databaseUrl)("start", () => {
               {
                 async whoAmI(_request, context) {
                   handled++;
-                  const [greeting] = await deps.sql<{ text: string }[]>`select text from extension_greetings`;
+                  const [greeting] = await fetchRows<{ text: string }>(
+                    deps.db,
+                    sql`select text from extension_greetings`,
+                  );
                   return { value: `${greeting?.text} ${subjectOf(context)}` };
                 },
               },

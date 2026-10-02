@@ -1,4 +1,5 @@
 import { create } from "@bufbuild/protobuf";
+import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 
 import type { Db } from "../db.ts";
 import type { Deps } from "../deps.ts";
@@ -13,65 +14,66 @@ import {
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { releaseKey } from "../releases/store.ts";
 import { notFound, timestamp } from "../rpc/validate.ts";
+import { deployments, environments, releases, secrets } from "../schema.ts";
 import { secretContext } from "../secrets/service.ts";
 
 const artifactUrlLifetimeMs = 60 * 60 * 1000;
 const served = [DeploymentState.PENDING, DeploymentState.IN_PROGRESS, DeploymentState.ACTIVE];
 
-interface DesiredDeployment {
-  id: string;
-  release_id: string;
-  project_id: string;
-  archive_sha256: string;
-  archive_size_bytes: bigint;
-  stop_previous: boolean;
-}
-
 /** The deployment an environment should serve: its newest one that neither failed nor was superseded. */
-export async function desiredDeployment(db: Db, environmentId: string): Promise<DesiredDeployment | undefined> {
-  const [row] = await db<DesiredDeployment[]>`
-    select d.id, d.release_id, r.project_id, r.archive_sha256, r.archive_size_bytes, d.stop_previous
-    from deployments d
-    join environments e on e.id = d.environment_id
-    join releases r on r.project_id = e.project_id and r.id = d.release_id
-    where d.environment_id = ${environmentId} and d.state in ${db(served)}
-    order by d.seq desc
-    limit 1`;
+export async function desiredDeployment(db: Db, environmentId: string) {
+  const [row] = await db
+    .select({
+      id: deployments.id,
+      release_id: deployments.release_id,
+      project_id: releases.project_id,
+      archive_sha256: releases.archive_sha256,
+      archive_size_bytes: releases.archive_size_bytes,
+      stop_previous: deployments.stop_previous,
+    })
+    .from(deployments)
+    .innerJoin(environments, eq(environments.id, deployments.environment_id))
+    .innerJoin(releases, and(eq(releases.project_id, environments.project_id), eq(releases.id, deployments.release_id)))
+    .where(and(eq(deployments.environment_id, environmentId), inArray(deployments.state, served)))
+    .orderBy(desc(deployments.seq))
+    .limit(1);
   return row;
 }
 
 /** The environment's complete desired state, read from one snapshot, and the lease of its current owner. */
 export async function desiredState(
-  { sql, keys, releases, logStore }: Deps,
+  { db, keys, releases: releaseStore, logStore }: Deps,
   environmentId: string,
 ): Promise<{ message: AttachResponse; lease: bigint }> {
-  const { snapshot } = await sql.begin("isolation level repeatable read read only", async (tx) => {
-    const [environment] = await tx<
-      {
-        project_id: string;
-        name: string;
-        revision: bigint;
-        lease: bigint;
-        state: EnvironmentState;
-        drain_max_age_seconds: number;
-        drain_deadline_seconds: number;
-        forked_from_environment_id: string;
-        forked_from_snapshot_id: string;
-        epoch: bigint;
-      }[]
-    >`
-      select project_id, name, revision, lease, state, drain_max_age_seconds, drain_deadline_seconds,
-        forked_from_environment_id, forked_from_snapshot_id, epoch
-      from environments where id = ${environmentId}`;
-    if (!environment || environment.state === EnvironmentState.DELETING) throw notFound("environment");
-    const deployment = await desiredDeployment(tx, environmentId);
-    const secrets = await tx<{ name: string; version: bigint; ciphertext: Uint8Array }[]>`
-      select name, version, ciphertext from secrets
-      where environment_id = ${environmentId} and ciphertext is not null
-      order by name`;
-    return { snapshot: { environment, deployment, secrets } };
-  });
-  const { environment, deployment, secrets } = snapshot;
+  const snapshot = await db.transaction(
+    async (tx) => {
+      const [environment] = await tx
+        .select({
+          project_id: environments.project_id,
+          name: environments.name,
+          revision: environments.revision,
+          lease: environments.lease,
+          state: environments.state,
+          drain_max_age_seconds: environments.drain_max_age_seconds,
+          drain_deadline_seconds: environments.drain_deadline_seconds,
+          forked_from_environment_id: environments.forked_from_environment_id,
+          forked_from_snapshot_id: environments.forked_from_snapshot_id,
+          epoch: environments.epoch,
+        })
+        .from(environments)
+        .where(eq(environments.id, environmentId));
+      if (!environment || environment.state === EnvironmentState.DELETING) throw notFound("environment");
+      const deployment = await desiredDeployment(tx, environmentId);
+      const stored = await tx
+        .select({ name: secrets.name, version: secrets.version, ciphertext: sql<Uint8Array>`${secrets.ciphertext}` })
+        .from(secrets)
+        .where(and(eq(secrets.environment_id, environmentId), isNotNull(secrets.ciphertext)))
+        .orderBy(secrets.name);
+      return { environment, deployment, secrets: stored };
+    },
+    { isolationLevel: "repeatable read", accessMode: "read only" },
+  );
+  const { environment, deployment } = snapshot;
 
   const message = create(AttachResponseSchema, {
     revision: environment.revision,
@@ -80,7 +82,7 @@ export async function desiredState(
     projectId: environment.project_id,
     drain: { maxAgeSeconds: environment.drain_max_age_seconds, deadlineSeconds: environment.drain_deadline_seconds },
     secrets: await Promise.all(
-      secrets.map(async ({ name, version, ciphertext }) => ({
+      snapshot.secrets.map(async ({ name, version, ciphertext }) => ({
         name,
         version,
         value: await keys.cipher.open(ciphertext, secretContext(environmentId, name)),
@@ -93,7 +95,7 @@ export async function desiredState(
     message.stopPrevious = deployment.stop_previous;
     message.release = create(ReleaseArtifactSchema, {
       releaseId: deployment.release_id,
-      url: await releases.downloadUrl(key, new Date(Date.now() + artifactUrlLifetimeMs)),
+      url: await releaseStore.downloadUrl(key, new Date(Date.now() + artifactUrlLifetimeMs)),
       sha256: deployment.archive_sha256,
       sizeBytes: deployment.archive_size_bytes,
     });

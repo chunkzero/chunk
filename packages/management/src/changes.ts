@@ -1,4 +1,6 @@
-import type { Db, Sql } from "./db.ts";
+import { sql } from "drizzle-orm";
+
+import type { Database, Db } from "./db.ts";
 
 const channel = "chunk_management_changes";
 
@@ -22,13 +24,13 @@ export interface Subscription {
 
 /** Announces a change. Inside a transaction, Postgres delivers it only when the transaction commits. */
 export async function notify(db: Db, change: Change): Promise<void> {
-  await db`select pg_notify(${channel}, ${`${change.kind}:${change.environmentId}`})`;
+  await db.execute(sql`select pg_notify(${channel}, ${`${change.kind}:${change.environmentId}`})`);
 }
 
-/** Listens for changes from every process sharing the database. */
-export async function listenForChanges(sql: Sql): Promise<Changes> {
+/** Listens for changes from every process sharing the database, on a connection Bun.SQL keeps for listening. */
+export async function listenForChanges(db: Database): Promise<Changes> {
   const subscribers = new Set<{ matches: (change: Change) => boolean; signal: () => void }>();
-  await sql.listen(channel, (payload) => {
+  await db.$client.listen(channel, (payload) => {
     const [kind, environmentId = ""] = payload.split(":");
     if (kind !== "environment" && kind !== "logs") return;
     for (const subscriber of subscribers) {

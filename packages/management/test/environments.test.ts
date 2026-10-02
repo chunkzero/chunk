@@ -2,9 +2,10 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 
 import { Code } from "@connectrpc/connect";
+import { sql } from "drizzle-orm";
 
 import { issueEnvironmentToken } from "../src/auth/tokens.ts";
-import type { Sql } from "../src/db.ts";
+import type { Database, Db } from "../src/db.ts";
 import { claimLease } from "../src/environments/store.ts";
 import { DeploymentState, LogSeverity, LogSource } from "../src/gen/chunk/management/v1/common_pb.ts";
 import { DeploymentService } from "../src/gen/chunk/management/v1/deployments_pb.ts";
@@ -22,7 +23,7 @@ describe.skipIf(!databaseUrl)("EnvironmentService", () => {
 
   async function environment() {
     const { projectId, environmentId } = await createEnvironment(h);
-    const token = await issueEnvironmentToken(h.sql, environmentId);
+    const token = await issueEnvironmentToken(h.db, environmentId);
     return { projectId, environmentId, client: h.client(EnvironmentService, token), token };
   }
 
@@ -206,24 +207,24 @@ describe.skipIf(!databaseUrl)("EnvironmentService", () => {
 
   test("a takeover whose transaction began before an earlier one's still never precedes it", async () => {
     const { environmentId } = await environment();
-    await claimLease(h.sql, environmentId, "core-a", 1n);
+    await claimLease(h.db, environmentId, "core-a", 1n);
     // C's transaction begins, then waits until B has taken over and committed.
     let release = () => {};
     const gate = new Promise<void>((resolve) => (release = resolve));
     let begun = () => {};
     const started = new Promise<void>((resolve) => (begun = resolve));
     const delayed = {
-      begin: (run: (tx: unknown) => Promise<unknown>) =>
-        h.sql.begin(async (tx) => {
-          await tx`select 1`;
+      transaction: (run: (tx: Db) => Promise<unknown>) =>
+        h.db.transaction(async (tx) => {
+          await tx.execute(sql`select 1`);
           begun();
           await gate;
           return run(tx);
         }),
-    } as unknown as Sql;
+    } as unknown as Database;
     const c = claimLease(delayed, environmentId, "core-c", 1n);
     await started;
-    await claimLease(h.sql, environmentId, "core-b", 1n);
+    await claimLease(h.db, environmentId, "core-b", 1n);
     release();
     await c;
 

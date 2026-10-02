@@ -1,5 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
+import { eq } from "drizzle-orm";
 
 import { untilAborted } from "../abort.ts";
 import { notify } from "../changes.ts";
@@ -18,14 +19,15 @@ import { listSnapshots, olderThan, parseSnapshotId, snapshotId, type StoredSnaps
 import { type Caller, callerOf } from "../rpc/caller.ts";
 import { idempotent } from "../rpc/idempotency.ts";
 import { failedPrecondition, invalid, notFound, page, pageOf, slug, timestamp, unique } from "../rpc/validate.ts";
+import { environments } from "../schema.ts";
 import { copySecrets } from "../secrets/service.ts";
-import { type EnvironmentRow, hostnameOf, loadEnvironment, toEnvironment } from "./store.ts";
+import { hostnameOf, loadEnvironment, toEnvironment } from "./store.ts";
 
 /** How long listing an environment's snapshots may take. */
 const listTimeoutMs = 30_000;
 
 export function forkHandlers({
-  sql,
+  db,
   keys,
   edge,
   logStore,
@@ -34,7 +36,7 @@ export function forkHandlers({
   const sourceOf = async (request: ForkEnvironmentRequest, caller: Caller, signal: AbortSignal) => {
     if (!logStore) throw failedPrecondition("forks need log replication, which this install has turned off");
     const field = "source_environment_id";
-    const source = await loadEnvironment(sql, caller, request.sourceEnvironmentId, { field });
+    const source = await loadEnvironment(db, caller, request.sourceEnvironmentId, { field });
     const snapshots = await storedSnapshots(logStore, source.id, signal);
     if (request.snapshotId && !snapshots.some((snapshot) => snapshotId(snapshot) === request.snapshotId)) {
       throw notFound("snapshot");
@@ -60,24 +62,32 @@ export function forkHandlers({
         (error: unknown) => ({ error }),
       );
       const method = ProjectService.method.forkEnvironment;
-      return idempotent({ sql, keys, caller, method, request }, async (tx) => {
+      return idempotent({ db, keys, caller, method, request }, async (tx) => {
         if ("error" in checked) throw checked.error;
         // Held until the fork exists, so the source can't start deleting its log before then.
-        const [source] = await tx<EnvironmentRow[]>`
-          select * from environments where id = ${checked.source.id} for share`;
+        const [source] = await tx
+          .select()
+          .from(environments)
+          .where(eq(environments.id, checked.source.id))
+          .for("share");
         if (!source || source.state === EnvironmentState.DELETING) {
           throw failedPrecondition("the source environment is being deleted");
         }
         const id = newId("env");
-        const [row] = await unique(
-          "an environment with this name already exists in the project",
-          () =>
-            tx<EnvironmentRow[]>`
-            insert into environments (id, project_id, name, state, sleeping_ping, hostname, forked_from_environment_id,
-              forked_from_snapshot_id)
-            values (${id}, ${source.project_id}, ${name}, ${EnvironmentState.PENDING}, ${SleepingPingMode.CACHE},
-              ${hostnameOf(id, edge)}, ${source.id}, ${request.snapshotId})
-            returning *`,
+        const [row] = await unique("an environment with this name already exists in the project", () =>
+          tx
+            .insert(environments)
+            .values({
+              id,
+              project_id: source.project_id,
+              name,
+              state: EnvironmentState.PENDING,
+              sleeping_ping: SleepingPingMode.CACHE,
+              hostname: hostnameOf(id, edge),
+              forked_from_environment_id: source.id,
+              forked_from_snapshot_id: request.snapshotId,
+            })
+            .returning(),
         );
         if (!row) throw new Error("environment insert returned no row");
         if (request.copySecrets) await copySecrets(tx, keys, source.id, id);
@@ -87,7 +97,7 @@ export function forkHandlers({
     },
 
     async listSnapshots(request, context) {
-      const environment = await loadEnvironment(sql, callerOf(context), request.environmentId);
+      const environment = await loadEnvironment(db, callerOf(context), request.environmentId);
       const p = page(request);
       const after = p.after === undefined ? undefined : parseSnapshotId(p.after);
       if (p.after !== undefined && !after) throw invalid("page_token is not valid");

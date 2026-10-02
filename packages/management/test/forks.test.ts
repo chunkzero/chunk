@@ -127,7 +127,7 @@ describe.skipIf(!databaseUrl)("environment forks", () => {
     expect(message.restore).toMatchObject({ snapshotId: "1-4", sourceEnvironmentId: sourceId });
     expect(message.restore?.source?.prefix).toBe(`environments/${sourceId}/`);
 
-    await claimLease(h.sql, forkId, crypto.randomUUID(), 1n);
+    await claimLease(h.db, forkId, crypto.randomUUID(), 1n);
     expect((await desiredState(h.deps, forkId)).message.restore).toBeUndefined();
   });
 
@@ -143,7 +143,7 @@ describe.skipIf(!databaseUrl)("environment forks", () => {
     const forkId = forked.environment?.id ?? "";
     // The source moves on meanwhile; the fork still runs what its restored data was serving.
     await deployRelease(h, projectId, sourceId, "rel_later");
-    const client = h.client(EnvironmentService, await issueEnvironmentToken(h.sql, forkId));
+    const client = h.client(EnvironmentService, await issueEnvironmentToken(h.db, forkId));
     const attach = async (epoch: bigint) => {
       const abort = new AbortController();
       const request = { instanceId: crypto.randomUUID(), core: true, epoch, restoredDeploymentId: served };

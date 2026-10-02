@@ -1,5 +1,6 @@
 import { type Timestamp, timestampDate } from "@bufbuild/protobuf/wkt";
 import type { ServiceImpl } from "@connectrpc/connect";
+import { and, eq, lt, sql } from "drizzle-orm";
 
 import { notify } from "../changes.ts";
 import type { Db } from "../db.ts";
@@ -7,6 +8,7 @@ import type { Deps } from "../deps.ts";
 import type { EnvironmentService } from "../gen/chunk/management/v1/environment_pb.ts";
 import { environmentOf } from "../rpc/caller.ts";
 import { invalid } from "../rpc/validate.ts";
+import { blockedAddresses, environments } from "../schema.ts";
 import { blockKey } from "./blocklist.ts";
 
 const maxBatch = 1000;
@@ -25,7 +27,7 @@ type Reports = Pick<
 >;
 
 /** The at-least-once and best-effort reports; each batch is written as one JSON document. */
-export function reportServices({ sql }: Deps): Reports {
+export function reportServices({ db }: Deps): Reports {
   return {
     async reportUsage(request, context) {
       const environmentId = environmentOf(context);
@@ -46,9 +48,13 @@ export function reportServices({ sql }: Deps): Reports {
       // Each span is cut to the time its instance owned the environment, on management's clock, so neither a core that
       // hasn't heard of its successor yet nor clocks that disagree make spans overlap. A span its instance never owned
       // any of is dropped. Holding the environment's row orders this with takeovers, which cut stored spans.
-      await sql.begin(async (tx) => {
-        await tx`select 1 from environments where id = ${environmentId} for share`;
-        await tx`
+      await db.transaction(async (tx) => {
+        await tx
+          .select({ one: sql`1` })
+          .from(environments)
+          .where(eq(environments.id, environmentId))
+          .for("share");
+        await tx.execute(sql`
           insert into usage_records (environment_id, id, instance_id, start_time, end_time, player_seconds)
           select ${environmentId}, id, instance_id, cut_start, cut_end,
             case when cut_end - cut_start = end_time - start_time then player_seconds
@@ -68,7 +74,7 @@ export function reportServices({ sql }: Deps): Reports {
             ) o using (instance_id)
           ) r
           where cut_end > cut_start
-          on conflict do nothing`;
+          on conflict do nothing`);
       });
       return {};
     },
@@ -97,18 +103,19 @@ export function reportServices({ sql }: Deps): Reports {
         };
       });
       // One writer per environment at a time, so entries commit in seq order and followers never skip one.
-      const inserted = await sql.begin(async (tx) => {
-        await tx`select pg_advisory_xact_lock(hashtext(${`logs/${environmentId}`}))`;
-        return tx`
+      const inserted = await db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`logs/${environmentId}`}))`);
+        return tx.execute(sql`
         insert into log_entries
           (environment_id, instance_id, sequence, time, source, severity, message, app_id, deployment_id)
         select ${environmentId}, instance_id, sequence, time, source, severity, message, app_id, deployment_id
         from jsonb_to_recordset(${JSON.stringify(entries)}::text::jsonb)
           as e(instance_id text, sequence bigint, time timestamptz, source smallint, severity smallint, message text,
             app_id text, deployment_id text)
-        on conflict do nothing`;
+        on conflict do nothing
+        returning seq`);
       });
-      if (inserted.count > 0) await notify(sql, { kind: "logs", environmentId });
+      if (inserted.length > 0) await notify(db, { kind: "logs", environmentId });
       return {};
     },
 
@@ -133,14 +140,14 @@ export function reportServices({ sql }: Deps): Reports {
         const previous = latest.get(key);
         if (!previous || previous.time <= row.time) latest.set(key, row);
       }
-      await sql`
+      await db.execute(sql`
         insert into metric_samples (environment_id, instance_id, name, labels, time, value)
         select ${environmentId}, instance_id, name, labels, time, value
         from jsonb_to_recordset(${JSON.stringify([...latest.values()])}::text::jsonb)
           as s(instance_id text, name text, labels jsonb, time timestamptz, value double precision)
         on conflict (environment_id, instance_id, name, labels) do update
           set time = excluded.time, value = excluded.value
-          where metric_samples.time <= excluded.time`;
+          where metric_samples.time <= excluded.time`);
       return {};
     },
 
@@ -155,14 +162,16 @@ export function reportServices({ sql }: Deps): Reports {
         blocks.set(key, Math.max(blocks.get(key) ?? 0, at + blockDurationMs));
       }
       const rows = [...blocks].map(([address, until]) => ({ address, expire_time: new Date(until).toISOString() }));
-      await sql`delete from blocked_addresses where environment_id = ${environmentId} and expire_time < now()`;
-      await sql`
+      await db
+        .delete(blockedAddresses)
+        .where(and(eq(blockedAddresses.environment_id, environmentId), lt(blockedAddresses.expire_time, sql`now()`)));
+      await db.execute(sql`
         insert into blocked_addresses (environment_id, address, expire_time)
         select ${environmentId}, address, expire_time
         from jsonb_to_recordset(${JSON.stringify(rows)}::text::jsonb) as b(address text, expire_time timestamptz)
         where expire_time > now()
         on conflict (environment_id, address) do update
-          set expire_time = greatest(blocked_addresses.expire_time, excluded.expire_time)`;
+          set expire_time = greatest(blocked_addresses.expire_time, excluded.expire_time)`);
       return {};
     },
   };
@@ -173,15 +182,15 @@ export function reportServices({ sql }: Deps): Reports {
  * `reportUsage` cuts its later reports.
  */
 export async function endUsage(db: Db, environmentId: string, instanceId: string, at: string): Promise<void> {
-  await db`
+  await db.execute(sql`
     delete from usage_records
-    where environment_id = ${environmentId} and instance_id = ${instanceId} and start_time >= ${at}::timestamptz`;
-  await db`
+    where environment_id = ${environmentId} and instance_id = ${instanceId} and start_time >= ${at}::timestamptz`);
+  await db.execute(sql`
     update usage_records
     set end_time = ${at}::timestamptz,
       player_seconds = floor(player_seconds * extract(epoch from ${at}::timestamptz - start_time)
         / extract(epoch from end_time - start_time))::bigint
-    where environment_id = ${environmentId} and instance_id = ${instanceId} and end_time > ${at}::timestamptz`;
+    where environment_id = ${environmentId} and instance_id = ${instanceId} and end_time > ${at}::timestamptz`);
 }
 
 function batch<T>(items: T[], field: string): T[] {

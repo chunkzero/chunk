@@ -163,21 +163,21 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
       );
 
     const a = await deploy();
-    await activateDeployment(h.sql, a);
+    await activateDeployment(h.db, a);
     const b = await deploy();
     const c = await deploy();
-    await activateDeployment(h.sql, b);
-    await activateDeployment(h.sql, a);
+    await activateDeployment(h.db, b);
+    await activateDeployment(h.db, a);
     expect(await states(a, b, c)).toEqual([
       DeploymentState.SUPERSEDED,
       DeploymentState.ACTIVE,
       DeploymentState.PENDING,
     ]);
     expect((await projects.getEnvironment({ environmentId })).environment?.activeDeploymentId).toBe(b);
-    expect((await desiredDeployment(h.sql, environmentId))?.id).toBe(c);
+    expect((await desiredDeployment(h.db, environmentId))?.id).toBe(c);
 
-    await failDeployment(h.sql, c, "rejected");
-    expect((await desiredDeployment(h.sql, environmentId))?.id).toBe(b);
+    await failDeployment(h.db, c, "rejected");
+    expect((await desiredDeployment(h.db, environmentId))?.id).toBe(b);
   });
 
   test("a release whose Java version has no JVM image is refused at deploy", async () => {
@@ -203,9 +203,9 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
 
     // The environment reports serving r2, then r3; part 2's ReportStatus does this.
     const r2 = (await deploy(staging, "r2")).deployment?.id ?? "";
-    await activateDeployment(h.sql, r2);
+    await activateDeployment(h.db, r2);
     const r3 = (await deploy(staging, "r3")).deployment?.id ?? "";
-    await activateDeployment(h.sql, r3);
+    await activateDeployment(h.db, r3);
     expect((await deployments.getDeployment({ deploymentId: r2 })).deployment?.state).toBe(DeploymentState.SUPERSEDED);
     expect((await deployments.listApps({ environmentId: staging })).apps).toEqual([
       expect.objectContaining({ id: "lobby", sessions: ["default"] }),

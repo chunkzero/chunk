@@ -155,14 +155,16 @@ environments run code you trust.
 
 ```sh
 pnpm --filter @chunkzero/management generate   # regenerate src/gen from proto/ (needs buf from mise)
+pnpm --filter @chunkzero/management db:generate  # write a migration for changes to src/schema.ts
 pnpm --filter @chunkzero/management typecheck
 podman run -d --rm --name chunk-test-postgres -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 \
   docker.io/library/postgres:17
 TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/postgres pnpm --filter @chunkzero/management test
 ```
 
-Tests that need Postgres skip when `TEST_DATABASE_URL` is unset; each test file uses its own schema. The provider tests
-use `DOCKER_HOST`, or rootless Podman's socket, and skip when neither exists. The STS test runs against MinIO when
-`TEST_MINIO_URL` is set, for example
+`src/schema.ts` defines the tables, and `migrations/` holds the drizzle-kit migrations generated from it; review each
+generated migration before committing it. Tests that need Postgres skip when `TEST_DATABASE_URL` is unset; each test
+file uses its own database. The provider tests use `DOCKER_HOST`, or rootless Podman's socket, and skip when neither
+exists. The STS test runs against MinIO when `TEST_MINIO_URL` is set, for example
 `podman run --rm -p 127.0.0.1:59000:9000 -e MINIO_ROOT_USER=chunkroot -e MINIO_ROOT_PASSWORD=chunkrootsecret cgr.dev/chainguard/minio server /data`
 with `TEST_MINIO_URL=http://127.0.0.1:59000`. `just managed-smoke` runs the whole self-hosted path end to end.
