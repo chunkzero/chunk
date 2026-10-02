@@ -12,10 +12,10 @@ import {
   type DomainService,
   DomainState,
 } from "../gen/chunk/management/v1/domains_pb.ts";
-import { loadEnvironment } from "../projects/store.ts";
+import { loadEnvironment, reachableProjects } from "../projects/store.ts";
 import { callerOf, checkProjectAccess } from "../rpc/caller.ts";
 import { invalid, notFound, page, pageOf, required, seqAfter, timestamp, unique } from "../rpc/validate.ts";
-import { domains, environments } from "../schema.ts";
+import { domains, environments, projects } from "../schema.ts";
 
 type DomainRow = typeof domains.$inferSelect & { project_id: string; environment_hostname: string };
 
@@ -54,14 +54,20 @@ export function domainService({ db, resolveTxt, edge }: Deps): Partial<ServiceIm
       .select({
         ...getTableColumns(domains),
         project_id: environments.project_id,
+        owner_id: projects.owner_id,
         environment_hostname: environments.hostname,
       })
       .from(domains)
-      .innerJoin(environments, eq(environments.id, domains.environment_id));
+      .innerJoin(environments, eq(environments.id, domains.environment_id))
+      .innerJoin(projects, eq(projects.id, environments.project_id));
 
+  /** The domain, or undefined when it is missing or of an owner the caller doesn't reach. */
   const loadDomain = async (id: string, context: HandlerContext) => {
-    const [row] = await selectDomains().where(eq(domains.id, required(id, "domain_id")));
-    if (row) checkProjectAccess(callerOf(context), row.project_id);
+    const caller = callerOf(context);
+    const [row] = await selectDomains().where(
+      and(eq(domains.id, required(id, "domain_id")), reachableProjects(caller)),
+    );
+    if (row) checkProjectAccess(caller, row.project_id, row.owner_id, "domain");
     return row;
   };
 

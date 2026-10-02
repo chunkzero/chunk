@@ -35,8 +35,22 @@ export interface Extensions {
   extend?: (router: ConnectRouter, deps: Deps) => void;
   /** Methods of the services `extend` registers that anyone may call without a bearer token; each checks its request. */
   publicMethods?: readonly DescMethod[];
-  /** Replaces the authenticator; `tokens` is chunk's own, for the bearers the install does not recognize itself. */
+  /**
+   * Replaces the authenticator; `tokens` is chunk's own, for the bearers the install does not recognize itself. Setting
+   * `owners` on a person's caller limits them to those owners' projects; it is resolved again on every request.
+   */
   authenticator?: (tokens: Authenticator, deps: Deps) => Authenticator;
+  /**
+   * Ways to sign in that the dashboard offers above its API token form, each a link to `url` with a `return` query
+   * parameter naming the dashboard path to come back to. The flow ends by redirecting to the dashboard's
+   * `/signed-in?return=<that path>#token=<API token>`, which checks the token, keeps it for the tab and goes back.
+   */
+  signInOptions?: readonly { label: string; url: string }[];
+  /**
+   * Serves plain HTTP paths, such as a sign-in flow's start and callback; undefined passes the request on. It is tried
+   * after the RPCs, `/healthz` and the release store's URLs, and before the dashboard.
+   */
+  routes?: (request: Request, deps: Deps) => Promise<Response | undefined>;
   /** Issues environments' log store credentials instead of `config.logStore`. */
   logStore?: LogStoreIssuer;
   /** Starts background work once the service is set up; the returned function stops it before the database closes. */
@@ -88,10 +102,12 @@ export async function start(config: Config, extensions: Extensions = {}) {
       changes: await listenForChanges(db),
       shutdown: shutdown.signal,
     };
-    const { extend, authenticator, publicMethods } = extensions;
+    const { extend, authenticator, publicMethods, signInOptions, routes } = extensions;
     const options: HandlerOptions = { dashboardDir: config.dashboardDir };
     if (extend) options.extend = (router) => extend(router, deps);
     if (publicMethods) options.publicMethods = publicMethods;
+    if (signInOptions) options.signInOptions = signInOptions;
+    if (routes) options.routes = (request) => routes(request, deps);
     if (authenticator) options.authenticator = authenticator(tokenAuthenticator(db), deps);
     const handler = createHandler(deps, options);
     const { machines } = config;

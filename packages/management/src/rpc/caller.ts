@@ -11,8 +11,15 @@ import {
 import { AuthService } from "../gen/chunk/management/v1/auth_pb.ts";
 import { EdgeService } from "../gen/chunk/management/v1/edge_pb.ts";
 import { EnvironmentService } from "../gen/chunk/management/v1/environment_pb.ts";
+import { notFound } from "./validate.ts";
 
 export interface Principal {
+  id: string;
+  displayName: string;
+}
+
+/** An account or team that owns projects, by the ID projects store as `owner_id`. */
+export interface Owner {
   id: string;
   displayName: string;
 }
@@ -23,6 +30,11 @@ export interface Caller {
   tokenId: string;
   /** Set when the token only reaches this project. */
   projectId: string | undefined;
+  /**
+   * The owners whose projects the caller may reach; undefined reaches every project. An install's authenticator sets
+   * it on each request, so a change in who belongs to an owner applies to tokens already issued.
+   */
+  owners?: readonly Owner[] | undefined;
 }
 
 /**
@@ -53,7 +65,9 @@ const serviceKinds = new Map<string, Identity["kind"]>([
 /** A method's `<service type name>/<method name>`. */
 export const methodKey = (method: DescMethod) => `${method.parent.typeName}/${method.name}`;
 
-const publicMethods = new Set([AuthService.method.startLogin, AuthService.method.pollLogin].map(methodKey));
+const publicMethods = new Set(
+  [AuthService.method.startLogin, AuthService.method.pollLogin, AuthService.method.getSignInOptions].map(methodKey),
+);
 
 /**
  * Authenticates and authorizes a call from its headers alone, so the server can turn it away before Connect reads its
@@ -108,7 +122,23 @@ export function subjectOf(context: HandlerContext): string {
   return subject;
 }
 
-export function checkProjectAccess(caller: Caller, projectId: string): void {
+/** Whether the caller may reach projects of `ownerId`. */
+export function reachesOwner(caller: Caller, ownerId: string): boolean {
+  return caller.owners?.some((owner) => owner.id === ownerId) ?? true;
+}
+
+/**
+ * Fails unless the caller may reach the project `projectId` of `ownerId`, which is undefined when no such project
+ * exists. A project of an owner the caller doesn't reach fails with NOT_FOUND for `resource`, as a missing one does, so
+ * other owners' projects stay hidden. A token limited to another project fails with PERMISSION_DENIED.
+ */
+export function checkProjectAccess(
+  caller: Caller,
+  projectId: string,
+  ownerId: string | undefined,
+  resource = "project",
+): void {
+  if (caller.owners && (ownerId === undefined || !reachesOwner(caller, ownerId))) throw notFound(resource);
   if (caller.projectId !== undefined && caller.projectId !== projectId) {
     throw new ConnectError("the token does not reach this project", Code.PermissionDenied);
   }

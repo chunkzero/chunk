@@ -207,7 +207,10 @@ export type CreateProjectRequest = Message<"chunk.management.v1.CreateProjectReq
   name: string;
 
   /**
-   * Optional: the owning account or team, for installs with several.
+   * Optional: the owning account or team, for installs with several. A caller
+   * limited to some owners must name one of them, which fails with
+   * PERMISSION_DENIED otherwise; left empty, it defaults to the caller's only
+   * owner, and fails with INVALID_ARGUMENT when they have several.
    *
    * @generated from field: string owner_id = 3;
    */
@@ -723,7 +726,10 @@ export const EnvironmentStateSchema: GenEnum<EnvironmentState> /*@__PURE__*/ = e
 );
 
 /**
- * Projects and their environments, for the CLI and dashboards.
+ * Projects and their environments, for the CLI and dashboards. A caller
+ * limited to some owners (see GetCurrentPrincipalResponse.owners) reaches only
+ * their projects; anything of another owner's answers NOT_FOUND, as if it
+ * didn't exist.
  *
  * @generated from service chunk.management.v1.ProjectService
  */

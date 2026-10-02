@@ -17,7 +17,7 @@ import {
   universalServerResponseToFetch,
 } from "@connectrpc/connect/protocol";
 
-import { authService } from "./auth/service.ts";
+import { authService, type SignInOption } from "./auth/service.ts";
 import { tokenAuthenticator } from "./auth/tokens.ts";
 import { dashboardHandler } from "./dashboard.ts";
 import { deploymentService } from "./deployments/service.ts";
@@ -50,6 +50,10 @@ export interface HandlerOptions {
   extend?: (router: ConnectRouter) => void;
   /** Methods of extension services that anyone may call without a bearer token; each checks its request itself. */
   publicMethods?: readonly DescMethod[];
+  /** What `AuthService.GetSignInOptions` answers with. */
+  signInOptions?: readonly SignInOption[];
+  /** Serves plain HTTP paths, such as a sign-in flow's; see `createHandler` for which requests reach it. */
+  routes?: (request: Request) => Promise<Response | undefined>;
 }
 
 /** The largest RPC message a client may send; release archives go to the release store instead. */
@@ -60,7 +64,11 @@ export interface Server {
   timeout(request: Request, seconds: number): void;
 }
 
-/** Serves chunk.management.v1 over Connect, gRPC-Web and gRPC, plus the release store's own URLs. */
+/**
+ * Serves chunk.management.v1 over Connect, gRPC-Web and gRPC, plus plain HTTP. A request is answered by the first of:
+ * the RPC its path names, `/healthz`, the release store's URLs, `options.routes`, then the dashboard. So an install's
+ * routes can't shadow an RPC or a release URL, and every path they don't answer falls through to the dashboard.
+ */
 export function createHandler(
   deps: Deps,
   options: HandlerOptions = {},
@@ -68,7 +76,7 @@ export function createHandler(
   const authenticator = options.authenticator ?? tokenAuthenticator(deps.db);
   const router = createConnectRouter({ interceptors: [logUnexpectedErrors, refuseNul], readMaxBytes: maxRpcBytes });
   router
-    .service(AuthService, authService(deps))
+    .service(AuthService, authService(deps, options.signInOptions))
     .service(ProjectService, projectService(deps))
     .service(DeploymentService, deploymentService(deps))
     .service(SecretService, secretService(deps))
@@ -119,6 +127,7 @@ export function createHandler(
     if (pathname === "/healthz") return new Response("ok\n");
     return (
       (await deps.releases.fetch?.(request)) ??
+      (await options.routes?.(request)) ??
       (await dashboard?.(request)) ??
       new Response("not found\n", { status: 404 })
     );

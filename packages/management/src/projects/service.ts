@@ -13,12 +13,12 @@ import {
   EnvironmentState,
   ProjectService,
 } from "../gen/chunk/management/v1/projects_pb.ts";
-import { callerOf, checkProjectAccess } from "../rpc/caller.ts";
+import { type Caller, callerOf, checkProjectAccess, reachesOwner } from "../rpc/caller.ts";
 import { idempotent } from "../rpc/idempotency.ts";
 import { invalid, page, pageOf, required, seqAfter, slug, unique } from "../rpc/validate.ts";
 import { environments, projects } from "../schema.ts";
 import { forkHandlers } from "./forks.ts";
-import { hostnameOf, loadEnvironment, loadProject, toEnvironment, toProject } from "./store.ts";
+import { hostnameOf, loadEnvironment, loadProject, reachableProjects, toEnvironment, toProject } from "./store.ts";
 
 const maxDrainSeconds = 7 * 24 * 60 * 60;
 
@@ -31,11 +31,12 @@ export function projectService(deps: Deps): Partial<ServiceImpl<typeof ProjectSe
         throw new ConnectError("a project token cannot create projects", Code.PermissionDenied);
       }
       const name = slug(request.name, "name");
+      const ownerId = ownerFor(caller, request.ownerId);
       return idempotent({ db, keys, caller, method: ProjectService.method.createProject, request }, async (tx) => {
         const [row] = await unique("a project with this name already exists", () =>
           tx
             .insert(projects)
-            .values({ id: newId("prj"), owner_id: request.ownerId, name })
+            .values({ id: newId("prj"), owner_id: ownerId, name })
             .returning(),
         );
         return create(CreateProjectResponseSchema, { project: row && toProject(row) });
@@ -56,6 +57,7 @@ export function projectService(deps: Deps): Partial<ServiceImpl<typeof ProjectSe
         .where(
           and(
             caller.projectId === undefined ? undefined : eq(projects.id, caller.projectId),
+            reachableProjects(caller),
             request.ownerId ? eq(projects.owner_id, request.ownerId) : undefined,
             after === undefined ? undefined : gt(projects.seq, after),
           ),
@@ -142,12 +144,14 @@ export function projectService(deps: Deps): Partial<ServiceImpl<typeof ProjectSe
 
     async deleteEnvironment(request, context) {
       const caller = callerOf(context);
+      // An environment of an owner the caller doesn't reach is left alone like a missing one.
       const [row] = await db
-        .select({ project_id: environments.project_id })
+        .select({ project_id: environments.project_id, owner_id: projects.owner_id })
         .from(environments)
-        .where(eq(environments.id, required(request.environmentId, "environment_id")));
+        .innerJoin(projects, eq(projects.id, environments.project_id))
+        .where(and(eq(environments.id, required(request.environmentId, "environment_id")), reachableProjects(caller)));
       if (row) {
-        checkProjectAccess(caller, row.project_id);
+        checkProjectAccess(caller, row.project_id, row.owner_id, "environment");
         await deleteEnvironment(db, request.environmentId);
       }
       return {};
@@ -155,4 +159,23 @@ export function projectService(deps: Deps): Partial<ServiceImpl<typeof ProjectSe
 
     ...forkHandlers(deps),
   };
+}
+
+/**
+ * The owner a new project of the caller's gets: the one requested, which must be one of the caller's owners when it is
+ * limited to some, or else its only one.
+ */
+function ownerFor(caller: Caller, requested: string): string {
+  const { owners } = caller;
+  if (!owners) return requested;
+  if (requested) {
+    if (!reachesOwner(caller, requested)) {
+      throw new ConnectError("the caller cannot create projects for this owner", Code.PermissionDenied);
+    }
+    return requested;
+  }
+  const [only, ...others] = owners;
+  if (!only) throw new ConnectError("the caller has no owner to create projects for", Code.PermissionDenied);
+  if (others.length > 0) throw invalid("owner_id is required when the caller has several owners");
+  return only.id;
 }

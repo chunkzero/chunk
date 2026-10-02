@@ -54,3 +54,16 @@ test("never serves files outside the dashboard directory", async () => {
 test("service routes come before the dashboard", async () => {
   expect(await (await get("/healthz")).text()).toBe("ok\n");
 });
+
+test("an install's routes answer before the dashboard, which serves the paths they pass on", async () => {
+  const deps = { releases: { fetch: async () => undefined } } as unknown as Deps;
+  const routed = createHandler(deps, {
+    dashboardDir: join(parent, "dist"),
+    routes: async (request) =>
+      new URL(request.url).pathname === "/auth/start" ? Response.redirect("https://id.example.com/") : undefined,
+  });
+  const start = await routed(new Request("http://chunk.test/auth/start"));
+  expect(start.headers.get("location")).toBe("https://id.example.com/");
+  const page = await routed(new Request("http://chunk.test/auth/elsewhere"));
+  expect(await page.text()).toContain("<title>chunk</title>");
+});

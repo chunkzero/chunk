@@ -1,5 +1,5 @@
 import { create } from "@bufbuild/protobuf";
-import { eq } from "drizzle-orm";
+import { eq, getTableColumns, inArray, type SQL } from "drizzle-orm";
 
 import type { Edge } from "../config.ts";
 import type { Db } from "../db.ts";
@@ -58,10 +58,16 @@ export async function findProject(db: Db, id: string): Promise<ProjectRow | unde
   return row;
 }
 
+/** Narrows a query over `projects` to those the caller may reach; undefined when it reaches every project. */
+export function reachableProjects(caller: Caller): SQL | undefined {
+  const ownerIds = caller.owners?.map((owner) => owner.id);
+  return ownerIds && inArray(projects.owner_id, ownerIds);
+}
+
 /** Loads a project the caller may reach, or fails with NOT_FOUND or PERMISSION_DENIED. */
 export async function loadProject(db: Db, caller: Caller, id: string): Promise<ProjectRow> {
-  checkProjectAccess(caller, required(id, "project_id"));
-  const row = await findProject(db, id);
+  const row = await findProject(db, required(id, "project_id"));
+  checkProjectAccess(caller, id, row?.owner_id);
   if (!row) throw notFound("project");
   return row;
 }
@@ -77,11 +83,13 @@ export async function loadEnvironment(
   { lock = false, field = "environment_id" } = {},
 ): Promise<EnvironmentRow> {
   const query = db
-    .select()
+    .select({ ...getTableColumns(environments), owner_id: projects.owner_id })
     .from(environments)
+    .innerJoin(projects, eq(projects.id, environments.project_id))
     .where(eq(environments.id, required(id, field)));
-  const [row] = await (lock ? query.for("update") : query);
+  const [row] = await (lock ? query.for("update", { of: environments }) : query);
   if (!row) throw notFound("environment");
-  checkProjectAccess(caller, row.project_id);
-  return row;
+  const { owner_id: ownerId, ...environment } = row;
+  checkProjectAccess(caller, environment.project_id, ownerId, "environment");
+  return environment;
 }

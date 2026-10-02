@@ -5,7 +5,10 @@ package chunk.management.v1;
 import "chunk/management/v1/common.proto";
 import "google/protobuf/timestamp.proto";
 
-// Projects and their environments, for the CLI and dashboards.
+// Projects and their environments, for the CLI and dashboards. A caller
+// limited to some owners (see GetCurrentPrincipalResponse.owners) reaches only
+// their projects; anything of another owner's answers NOT_FOUND, as if it
+// didn't exist.
 service ProjectService {
   // Creates a project. Idempotent by request_id.
   rpc CreateProject(CreateProjectRequest) returns (CreateProjectResponse);
@@ -98,7 +101,10 @@ message Snapshot {
 message CreateProjectRequest {
   string request_id = 1;
   string name = 2;
-  // Optional: the owning account or team, for installs with several.
+  // Optional: the owning account or team, for installs with several. A caller
+  // limited to some owners must name one of them, which fails with
+  // PERMISSION_DENIED otherwise; left empty, it defaults to the caller's only
+  // owner, and fails with INVALID_ARGUMENT when they have several.
   string owner_id = 3;
 }
 
