@@ -101,6 +101,7 @@ export function Button({
   type = "button",
   icon,
   style,
+  href,
   children,
   ...props
 }: Omit<ComponentProps<"button">, "className" | "style"> & {
@@ -108,10 +109,13 @@ export function Button({
   size?: keyof typeof sizes;
   icon?: IconSvgElement;
   style?: stylex.StyleXStyles;
+  /** Renders a link to here that looks like the button. */
+  href?: string;
 }) {
+  const element = href === undefined ? { type } : { render: <a href={href} />, nativeButton: false };
   return (
     <BaseButton
-      type={type}
+      {...element}
       {...props}
       {...stylex.props(
         styles.base,

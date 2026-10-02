@@ -1,5 +1,6 @@
 import * as stylex from "@stylexjs/stylex";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { useLocation } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { Logo } from "../components/logo.tsx";
@@ -15,6 +16,7 @@ const styles = stylex.create({
   screen: { display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100svh", padding: space.s6 },
   form: { display: "flex", flexDirection: "column", gap: space.s5, width: "100%", maxWidth: "20rem" },
   field: { display: "flex", flexDirection: "column", gap: space.s2 },
+  options: { display: "flex", flexDirection: "column", gap: space.s2 },
   token: { fontFamily: fonts.mono },
   hint: { fontSize: fontSizes.xs, lineHeight: lineHeights.xs, color: colors.mutedForeground },
   submit: { width: "100%" },
@@ -22,6 +24,12 @@ const styles = stylex.create({
 
 export function SignIn() {
   const [token, setCandidate] = useState("");
+  const here = useLocation({ select: (location) => `${location.pathname}${location.searchStr}` });
+  const options = useQuery({
+    queryKey: ["sign-in-options"],
+    queryFn: async () => (await api.auth.getSignInOptions({})).options,
+    staleTime: Infinity,
+  });
   const attempt = useMutation({
     mutationFn: (candidate: string) =>
       api.auth.getCurrentPrincipal({}, { headers: { authorization: `Bearer ${candidate}` } }),
@@ -38,6 +46,15 @@ export function SignIn() {
         }}
       >
         <Logo />
+        {options.data && options.data.length > 0 && (
+          <div {...stylex.props(styles.options)}>
+            {options.data.map((option) => (
+              <Button key={option.url} variant="outline" href={withReturn(option.url, here)} style={styles.submit}>
+                {option.label}
+              </Button>
+            ))}
+          </div>
+        )}
         <div {...stylex.props(styles.field)}>
           <Label htmlFor="token">API token</Label>
           <Input
@@ -62,4 +79,11 @@ export function SignIn() {
       </form>
     </div>
   );
+}
+
+/** `url` with the dashboard path to come back to as its `return` query parameter. */
+function withReturn(url: string, path: string) {
+  const target = new URL(url, window.location.origin);
+  target.searchParams.set("return", path);
+  return target.href;
 }
