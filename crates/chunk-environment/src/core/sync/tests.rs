@@ -207,6 +207,8 @@ struct Fixture {
     directory: tempfile::TempDir,
     backend: Backend,
     stop: CancellationToken,
+    /// Ends the services' open streams; the transport's shutdown cancels it too.
+    streams: CancellationToken,
     task: JoinHandle<io::Result<()>>,
     control: Arc<Control>,
     /// Core's endpoint.
@@ -243,6 +245,7 @@ impl Fixture {
         backend.deploy(deployment()).await.unwrap();
         let (ready, started) = oneshot::channel();
         let stop = CancellationToken::new();
+        let streams = CancellationToken::new();
         let gateways = Arc::new(Gateways::default());
         let gateway = gateways.mint("proxy");
         let archives = Arc::new(super::super::Archives::default());
@@ -256,16 +259,27 @@ impl Fixture {
             control: chunk_control::Config { environment: "test".into(), defers_retirement: false },
             host,
             fresh: false,
-            services: Some(services(
-                backend.clone(),
-                gateways.clone(),
-                archives.clone(),
-                aot.clone(),
-                "test".into(),
-                Some("prod".into()),
-                None,
-                Some(PRIVATE),
-            )),
+            services: Some(Box::new({
+                let streams = streams.clone();
+                let inner = services(
+                    backend.clone(),
+                    gateways.clone(),
+                    archives.clone(),
+                    aot.clone(),
+                    "test".into(),
+                    Some("prod".into()),
+                    None,
+                    Some(PRIVATE),
+                );
+                move |control, token, transport, operations| {
+                    let ending = streams.clone();
+                    drop(tokio::spawn(async move {
+                        transport.cancelled().await;
+                        ending.cancel();
+                    }));
+                    inner(control, token, streams, operations)
+                }
+            })),
         };
         let task = tokio::spawn(chunk_control::server::run(config, ready, stop.clone()));
         let started = started.await.unwrap();
@@ -276,6 +290,7 @@ impl Fixture {
             directory,
             backend,
             stop,
+            streams,
             task,
             control: started.control,
             endpoint,
@@ -513,7 +528,8 @@ async fn a_stream_whose_client_stopped_reading_releases_its_subscription_and_end
     // A position-only advance while the client is full.
     fixture.call(&cli, "touch", "touch", "null").await;
 
-    fixture.stop.cancel();
+    // The transport keeps running, so the client reads the stream to its end before the server closes any connection.
+    fixture.streams.cancel();
     let deployment = chunk_js::DeploymentId::new("test").unwrap();
     let released = async {
         while fixture.backend.release(deployment.clone()).await.is_err() {
