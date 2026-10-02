@@ -86,6 +86,7 @@ that thread; continue asynchronous work on it with `scope.onTick(...)`.
 | Method                                            | Use                                                                                            |
 | ------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `createInstance()`, `getInstances()`              | Worlds owned by the session, unregistered with their entities at the end                       |
+| `registerSharedInstance(view)`                    | A view of a container the session doesn't own, unregistered at the end; the container stays    |
 | `getEvents()`                                     | This session's event node: its lifecycle events, its players' events and its instances' events |
 | `getScheduler()`, `repeatEvery(interval, action)` | Tasks on the tick thread, cancelled at the end                                                 |
 | `onTick(action)`                                  | Run code on the tick thread from any thread                                                    |
@@ -143,17 +144,12 @@ request for a few seconds, under the same operation so a repeat can't move the p
 
 Declare shared dependencies as public static `@Component` factories instead of wiring them by hand. The return type is
 the component's identity and the parameters are its dependencies. From the
-[arena example](../../examples/arena/apps/arena/src/main/java/example/arena/ArenaComponents.java), which parses its
-world once per JVM and gives each session its own backend client:
+[arena example](../../examples/arena/apps/arena/src/main/java/example/arena/ArenaComponents.java), which gives each
+session its own backend client:
 
 ```java
 public final class ArenaComponents {
     private ArenaComponents() {}
-
-    @Component(Component.Scope.PROCESS)
-    public static PolarWorld world() {
-        return PolarWorlds.read("/worlds/arena.polar");
-    }
 
     @Component(Component.Scope.SESSION)
     public static BackendClient backend(BackendSession session) {
@@ -169,6 +165,22 @@ by the app's sessions and may depend only on other process components. Factories
 closes only what that lookup created. Factories must be non-generic, take their dependencies as parameters, and return
 values they own. In Kotlin, use top-level functions or `@JvmStatic` functions in objects. The
 [Gradle plugin](../gradle-plugin/README.md#components) checks the graph at build time and generates direct calls.
+
+## Assets
+
+`dev.chunkzero.runtime.assets.Assets` reads the deployment's assets from the read-only directory the platform names in
+`CHUNK_ASSETS`. `Assets.file("config/rules.json")` returns the app's `assets/config/rules.json`, or else the project's
+shared one. `Assets.world(Worlds.Arena.KOTH)` resolves a world the app declares in `app.ts`, by its generated handle;
+another app's world is an error. A `World` is resolved and parsed once per JVM:
+
+```java
+// A fresh copy per session, owned by the scope, once every chunk is loaded and lit.
+Assets.world(Worlds.Arena.KOTH).copy(scope).thenCompose(instance -> scope.onTick(this::open));
+// One read-only copy per JVM, loaded on first use; each session gets its own view and entities.
+Assets.world(Worlds.Lobby.HUB).shared(scope).thenCompose(view -> scope.onTick(() -> open(view)));
+```
+
+Call both on the tick thread. A shared world's blocks can't be changed, since every session sees them.
 
 ## Events
 

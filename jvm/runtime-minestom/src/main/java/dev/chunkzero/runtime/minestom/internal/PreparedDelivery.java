@@ -13,7 +13,7 @@ import dev.chunkzero.runtime.ManagedPlayer;
 import dev.chunkzero.runtime.SessionManager;
 import dev.chunkzero.runtime.TickExecutor;
 
-import net.minestom.server.instance.InstanceContainer;
+import net.minestom.server.instance.Instance;
 import net.minestom.server.network.ConnectionState;
 import net.minestom.server.network.player.GameProfile;
 import net.minestom.server.network.player.PlayerConnection;
@@ -92,7 +92,7 @@ final class PreparedDelivery {
         return removed.isDone() && !removed.isCompletedExceptionally();
     }
 
-    synchronized InstanceContainer configure(ManagedPlayer current) {
+    synchronized Instance configure(ManagedPlayer current) {
         if (closed || connection != current.getPlayerConnection())
             throw new IllegalStateException("Delivery closed");
         if (session.getPhase() != JvmSessionPhase.JVM_SESSION_PHASE_READY)

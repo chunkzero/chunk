@@ -20,6 +20,7 @@ import net.minestom.server.event.trait.PlayerEvent;
 import net.minestom.server.instance.ChunkLoader;
 import net.minestom.server.instance.Instance;
 import net.minestom.server.instance.InstanceContainer;
+import net.minestom.server.instance.SharedInstance;
 import net.minestom.server.registry.RegistryKey;
 import net.minestom.server.timer.ExecutionType;
 import net.minestom.server.timer.Scheduler;
@@ -61,7 +62,7 @@ public final class SessionScope {
     private final @Nullable BackendSession backend;
     private final ComponentRegistry components;
     private final Mover mover;
-    private final List<InstanceContainer> ownedInstances = new CopyOnWriteArrayList<>();
+    private final List<Instance> ownedInstances = new CopyOnWriteArrayList<>();
     private final List<AutoCloseable> resources = new ArrayList<>();
     private final Map<Player, List<AutoCloseable>> playerResources = new IdentityHashMap<>();
     private final Map<Class<?>, AutoCloseable> sharedResources = new HashMap<>();
@@ -154,7 +155,8 @@ public final class SessionScope {
         return scheduler;
     }
 
-    public List<InstanceContainer> getInstances() {
+    /** This scope's instances in creation order; players enter the first. */
+    public List<Instance> getInstances() {
         return List.copyOf(ownedInstances);
     }
 
@@ -182,6 +184,23 @@ public final class SessionScope {
         ownedInstances.add(instance);
         try {
             process.instanceManager().registerInstance(instance);
+        } catch (Throwable failure) {
+            ownedInstances.remove(instance);
+            throw failure;
+        }
+        return instance;
+    }
+
+    /**
+     * Adds {@code instance}, a view of a container this scope doesn't own, to this scope's
+     * instances. Disposal unregisters the view and leaves its container.
+     */
+    public <T extends SharedInstance> T registerSharedInstance(T instance) {
+        checkThread();
+        checkActive();
+        ownedInstances.add(instance);
+        try {
+            process.instanceManager().registerSharedInstance(instance);
         } catch (Throwable failure) {
             ownedInstances.remove(instance);
             throw failure;
