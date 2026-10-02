@@ -6,7 +6,7 @@ import { and, eq, sql } from "drizzle-orm";
 import type { Deps } from "../deps.ts";
 import { type DeploymentService, ReleaseState, UploadTargetSchema } from "../gen/chunk/management/v1/deployments_pb.ts";
 import { loadEnvironment, loadProject } from "../projects/store.ts";
-import { type ReleaseManifest, verifyRelease } from "../releases/manifest.ts";
+import { verifyRelease } from "../releases/manifest.ts";
 import { maxArchiveBytes, releaseKey } from "../releases/store.ts";
 import { callerOf } from "../rpc/caller.ts";
 import { failedPrecondition, invalid, notFound } from "../rpc/validate.ts";
@@ -21,12 +21,6 @@ export function releaseHandlers({
   releases,
   archiveLimits,
 }: Deps): Pick<ServiceImpl<typeof DeploymentService>, "uploadRelease" | "completeReleaseUpload" | "listApps"> {
-  const isStored = async (key: string) => {
-    const stored = await releases.read(key);
-    await stored?.cancel();
-    return stored !== undefined;
-  };
-
   return {
     async uploadRelease(request, context) {
       const project = await loadProject(db, callerOf(context), request.projectId);
@@ -67,7 +61,7 @@ export function releaseHandlers({
           throw new ConnectError("the project already holds this release with different contents", Code.AlreadyExists);
         }
         // A READY release whose archive was lost takes the same bytes again.
-        if (await isStored(key)) return { release: toRelease(release) };
+        if (await releases.exists(key)) return { release: toRelease(release) };
       }
       const expireTime = new Date(Date.now() + uploadLifetimeMs);
       const target = await releases.uploadTarget(
@@ -85,23 +79,24 @@ export function releaseHandlers({
       const project = await loadProject(db, callerOf(context), request.projectId);
       const release = await findRelease(db, project.id, request.releaseId);
       if (!release) throw notFound("release");
-      if (release.state === ReleaseState.READY) {
-        if (!(await isStored(releaseKey(project.id, release.id, release.archive_sha256)))) {
-          throw failedPrecondition("the archive is missing; upload it again");
-        }
-        return { release: toRelease(release) };
-      }
-
-      // Verify the declaration read above, and finalize only if it is still the declaration.
       const { archive_sha256: sha256, archive_size_bytes: sizeBytes } = release;
-      const stored = await releases.read(releaseKey(project.id, release.id, sha256));
-      if (!stored) throw failedPrecondition("the archive has not been uploaded");
-      let manifest: ReleaseManifest;
-      try {
-        manifest = await verifyRelease(stored, { releaseId: release.id, sha256, sizeBytes }, archiveLimits);
-      } catch (error) {
-        throw failedPrecondition(`the archive is not a valid release: ${(error as Error).message}`);
+      const key = releaseKey(project.id, release.id, sha256);
+      const wasReady = release.state === ReleaseState.READY;
+      if (wasReady && (await releases.exists(key))) return { release: toRelease(release) };
+
+      // Verify the declaration read above, and finalize only if it is still the declaration. A READY release whose
+      // archive was lost takes the same bytes again.
+      const manifest = await releases.complete(key, { sha256, sizeBytes }, (archive) =>
+        verifyRelease(archive, { releaseId: release.id, sha256, sizeBytes }, archiveLimits).catch((error: unknown) => {
+          throw failedPrecondition(`the archive is not a valid release: ${(error as Error).message}`);
+        }),
+      );
+      if (!manifest) {
+        throw failedPrecondition(
+          wasReady ? "the archive is missing; upload it again" : "the archive has not been uploaded",
+        );
       }
+      if (wasReady) return { release: toRelease(release) };
       const [ready] = await db
         .update(releaseRows)
         .set({ state: ReleaseState.READY, manifest })

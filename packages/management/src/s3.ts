@@ -38,6 +38,21 @@ export async function s3Request<T>(what: string, call: () => Promise<T>, signal?
   return result;
 }
 
+/** An object's contents, failing like `s3Request` does. */
+export function s3Stream(what: string, file: Bun.S3File): ReadableStream<Uint8Array> {
+  const reader = file.stream().getReader();
+  return new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await reader.read().catch((error: unknown) => {
+        throw s3Error(what, error);
+      });
+      if (done) controller.close();
+      else controller.enqueue(value);
+    },
+    cancel: (reason) => reader.cancel(reason),
+  });
+}
+
 /** Only the error's code is kept: the rest may carry the response. */
 function s3Error(what: string, error: unknown): Error {
   const code = (error as { code?: unknown } | undefined)?.code;

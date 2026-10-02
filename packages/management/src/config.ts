@@ -1,5 +1,6 @@
 import type { ProviderTimeouts } from "./providers/bounded.ts";
 import type { ArchiveLimits } from "./releases/archive.ts";
+import type { Bucket } from "./s3.ts";
 
 export interface Config {
   databaseUrl: string;
@@ -11,8 +12,10 @@ export interface Config {
   publicUrl: string;
   host: string;
   port: number;
-  /** Local release archives live under here. */
+  /** Release archives live under here unless `releaseStore` is set. */
   dataDir: string;
+  /** Where release archives live instead of `dataDir`. */
+  releaseStore: ReleaseBucket | undefined;
   archiveLimits: ArchiveLimits;
   /** Where players reach environments; unset leaves environments without hostnames. */
   edge: Edge | undefined;
@@ -68,6 +71,13 @@ export interface LogStore {
   credentialSeconds: number;
 }
 
+/** An S3-compatible bucket holding release archives below `prefix`. */
+export interface ReleaseBucket extends Bucket {
+  prefix: string;
+  /** The endpoint clients upload to; machines and this service use `endpoint`. */
+  publicEndpoint: string;
+}
+
 export interface Edge {
   /** Environments get hostnames below this domain, whose wildcard the operator points at the edge. */
   domain: string;
@@ -95,6 +105,7 @@ export function loadConfig(env: Env = process.env): Config {
     host: env.HOST ?? "0.0.0.0",
     port,
     dataDir: env.CHUNK_DATA_DIR ?? "data",
+    releaseStore: releaseStoreOf(env),
     archiveLimits: {
       maxExpandedBytes: positive(env, "CHUNK_MAX_RELEASE_EXPANDED_BYTES", 8 * 1024 ** 3),
       maxEntries: positive(env, "CHUNK_MAX_RELEASE_ENTRIES", 100_000),
@@ -158,6 +169,28 @@ function logStoreOf(env: Env): LogStore | undefined {
     stsEndpoint: env.CHUNK_LOG_STORE_STS_ENDPOINT ?? endpoint,
     roleArn: sharedCredentials ? "" : required(env, "CHUNK_LOG_STORE_ROLE_ARN"),
     credentialSeconds: positive(env, "CHUNK_LOG_STORE_CREDENTIAL_SECONDS", 3600),
+  };
+}
+
+/** Connection settings left unset fall back to the log store's, for installs that keep both in one bucket. */
+function releaseStoreOf(env: Env): ReleaseBucket | undefined {
+  const bucket = env.CHUNK_RELEASE_STORE_BUCKET;
+  if (!bucket) return undefined;
+  const setting = (name: string) => env[`CHUNK_RELEASE_STORE_${name}`] || env[`CHUNK_LOG_STORE_${name}`];
+  const connection = (name: string) => {
+    const value = setting(name);
+    if (!value) throw new Error(`CHUNK_RELEASE_STORE_${name} is required`);
+    return value;
+  };
+  const endpoint = connection("ENDPOINT");
+  return {
+    endpoint,
+    publicEndpoint: env.CHUNK_RELEASE_STORE_PUBLIC_ENDPOINT || endpoint,
+    region: setting("REGION") ?? "us-east-1",
+    bucket,
+    prefix: env.CHUNK_RELEASE_STORE_PREFIX ?? "releases/",
+    accessKeyId: connection("ACCESS_KEY_ID"),
+    secretAccessKey: connection("SECRET_ACCESS_KEY"),
   };
 }
 

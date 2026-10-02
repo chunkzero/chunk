@@ -15,6 +15,7 @@ import { type LogStoreIssuer, logStoreIssuer } from "./logstore/issuer.ts";
 import { dockerProvider, socketPathFrom } from "./providers/docker.ts";
 import type { Provider } from "./providers/provider.ts";
 import { localReleaseStore } from "./releases/local-store.ts";
+import { s3ReleaseStore } from "./releases/s3-store.ts";
 import { maxArchiveBytes } from "./releases/store.ts";
 import type { Authenticator } from "./rpc/caller.ts";
 import { installation } from "./schema.ts";
@@ -70,12 +71,14 @@ export async function start(config: Config, extensions: Extensions = {}) {
     const deps: Deps = {
       db,
       keys,
-      releases: await localReleaseStore({
-        directory: join(config.dataDir, "releases"),
-        keys,
-        publicUrl: config.publicUrl,
-        machineUrl: config.machines?.managementUrl ?? config.publicUrl,
-      }),
+      releases: config.releaseStore
+        ? s3ReleaseStore(config.releaseStore)
+        : await localReleaseStore({
+            directory: join(config.dataDir, "releases"),
+            keys,
+            publicUrl: config.publicUrl,
+            machineUrl: config.machines?.managementUrl ?? config.publicUrl,
+          }),
       archiveLimits: config.archiveLimits,
       resolveTxt,
       publicUrl: config.publicUrl,

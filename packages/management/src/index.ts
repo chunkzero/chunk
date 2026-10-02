@@ -15,6 +15,7 @@ export {
 export { ProviderTimeoutError } from "./providers/bounded.ts";
 export { type LogStoreGrant, type LogStoreIssuer } from "./logstore/issuer.ts";
 export { localReleaseStore } from "./releases/local-store.ts";
+export { s3ReleaseStore } from "./releases/s3-store.ts";
 export { type ExpectedArchive, releaseKey, type ReleaseStore, type UploadTarget } from "./releases/store.ts";
 export { type Authenticator, type Caller, callerOf, type Identity, type Principal, subjectOf } from "./rpc/caller.ts";
 export * as schema from "./schema.ts";
