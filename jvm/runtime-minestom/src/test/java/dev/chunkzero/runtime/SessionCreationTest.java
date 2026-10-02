@@ -18,12 +18,15 @@ import org.junit.jupiter.api.Test;
 
 import tools.jackson.core.type.TypeReference;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -231,6 +234,44 @@ class SessionCreationTest {
             }
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_FAILED, phases(manager).get("failed"));
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_ENDING, phases(manager).get("leaky"));
+        } finally {
+            process.stop();
+        }
+    }
+
+    @Test
+    void sessionWhoseCreationOutlastsTheDeadlineFailsAndIgnoresLaterCompletion() {
+        var process = ServerProcess.create();
+        var ticks = new TickExecutor();
+        var creation = new CompletableFuture<Void>();
+        var manager =
+                new SessionManager(
+                        process,
+                        ticks,
+                        Map.of(
+                                "arena/default",
+                                new SessionRegistration(
+                                        "arena",
+                                        () ->
+                                                new Session() {
+                                                    @Override
+                                                    public CompletionStage<Void> onCreate(
+                                                            SessionScope scope) {
+                                                        scope.createInstance();
+                                                        return creation;
+                                                    }
+                                                })),
+                        null);
+        manager.setCreateDeadline(Duration.ofMillis(50));
+        try {
+            var created = manager.create("slow", session(16, "{}"));
+            var deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (!created.isDone() && System.nanoTime() < deadline) ticks.flush();
+            var failure = assertThrows(CompletionException.class, created::join);
+            assertInstanceOf(TimeoutException.class, failure.getCause());
+            creation.complete(null);
+            flush(ticks);
+            assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_FAILED, manager.phase("slow"));
         } finally {
             process.stop();
         }

@@ -19,6 +19,7 @@ import org.jetbrains.annotations.Nullable;
 
 import tools.jackson.databind.JsonNode;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -29,6 +30,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -38,6 +41,9 @@ import java.util.stream.Collectors;
 @ApiStatus.Internal
 public final class SessionManager {
     private static final Pattern SESSION_ID = Pattern.compile("[A-Za-z0-9_-]{1,128}");
+
+    /** Matches how long control waits for a created session to become ready. */
+    private static final Duration CREATE_DEADLINE = Duration.ofSeconds(10);
 
     private final ServerProcess process;
     private final TickExecutor ticks;
@@ -52,6 +58,7 @@ public final class SessionManager {
     private Function<String, CompletionStage<Void>> withdraw =
             ignored -> CompletableFuture.completedFuture(null);
     private SessionScope.Mover mover = SessionScope.Mover.UNAVAILABLE;
+    private Duration createDeadline = CREATE_DEADLINE;
 
     SessionManager(
             ServerProcess process, TickExecutor ticks, Map<String, Supplier<Session>> factories) {
@@ -110,6 +117,10 @@ public final class SessionManager {
 
     void setMover(SessionScope.Mover mover) {
         this.mover = mover;
+    }
+
+    void setCreateDeadline(Duration createDeadline) {
+        this.createDeadline = createDeadline;
     }
 
     /**
@@ -327,32 +338,40 @@ public final class SessionManager {
         }
 
         void start() {
+            // The deadline applies to a copy, so a late completion of the session's own future is
+            // ignored.
+            var created = new CompletableFuture<Void>();
+            created.orTimeout(createDeadline.toMillis(), TimeUnit.MILLISECONDS);
             invoke(() -> behavior.onCreate(scope))
                     .whenComplete(
-                            (ignored, error) ->
-                                    ticks.submit(
-                                            () -> {
-                                                if (error == null
-                                                        && !scope.getInstances().isEmpty()) {
-                                                    if (!finishing)
-                                                        phase =
-                                                                JvmSessionPhase
-                                                                        .JVM_SESSION_PHASE_READY;
-                                                    process.eventHandler()
-                                                            .call(new SessionCreateEvent(scope));
-                                                    ready.complete(null);
-                                                } else {
-                                                    creationFailure =
-                                                            error == null
-                                                                    ? new IllegalStateException(
-                                                                            "Session has no"
-                                                                                    + " instances")
-                                                                    : error;
-                                                    ready.completeExceptionally(creationFailure);
-                                                    finish();
-                                                }
-                                                return null;
-                                            }));
+                            (ignored, error) -> {
+                                if (error == null) created.complete(null);
+                                else created.completeExceptionally(error);
+                            });
+            created.whenComplete(
+                    (ignored, error) ->
+                            ticks.submit(
+                                    () -> {
+                                        if (error == null && !scope.getInstances().isEmpty()) {
+                                            if (!finishing)
+                                                phase = JvmSessionPhase.JVM_SESSION_PHASE_READY;
+                                            process.eventHandler()
+                                                    .call(new SessionCreateEvent(scope));
+                                            ready.complete(null);
+                                        } else {
+                                            creationFailure = creationFailure(error);
+                                            ready.completeExceptionally(creationFailure);
+                                            finish();
+                                        }
+                                        return null;
+                                    }));
+        }
+
+        private Throwable creationFailure(@Nullable Throwable error) {
+            if (error == null) return new IllegalStateException("Session has no instances");
+            if (error instanceof TimeoutException)
+                return new TimeoutException("onCreate did not finish within " + createDeadline);
+            return error;
         }
 
         public CompletableFuture<Void> join(Player player) {
