@@ -1,7 +1,7 @@
 import * as stylex from "@stylexjs/stylex";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useLocation } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Logo } from "../components/logo.tsx";
 import { ErrorText } from "../components/page.tsx";
@@ -9,7 +9,7 @@ import { Button } from "../components/ui/button.tsx";
 import { Input } from "../components/ui/input.tsx";
 import { Label } from "../components/ui/label.tsx";
 import { api, errorMessage } from "../lib/client.ts";
-import { setToken } from "../lib/session.ts";
+import { setToken, startSignIn } from "../lib/session.ts";
 import { colors, fonts, fontSizes, lineHeights, space } from "../tokens.stylex.ts";
 
 const styles = stylex.create({
@@ -30,6 +30,11 @@ export function SignIn() {
     queryFn: async () => (await api.auth.getSignInOptions({})).options,
     staleTime: Infinity,
   });
+  const offered = (options.data?.length ?? 0) > 0;
+  const [state, setState] = useState<string>();
+  useEffect(() => {
+    if (offered) setState(startSignIn());
+  }, [offered]);
   const attempt = useMutation({
     mutationFn: (candidate: string) =>
       api.auth.getCurrentPrincipal({}, { headers: { authorization: `Bearer ${candidate}` } }),
@@ -46,10 +51,10 @@ export function SignIn() {
         }}
       >
         <Logo />
-        {options.data && options.data.length > 0 && (
+        {state && (
           <div {...stylex.props(styles.options)}>
-            {options.data.map((option) => (
-              <Button key={option.url} variant="outline" href={withReturn(option.url, here)} style={styles.submit}>
+            {options.data?.map((option) => (
+              <Button key={option.url} variant="outline" href={handoff(option.url, here, state)} style={styles.submit}>
                 {option.label}
               </Button>
             ))}
@@ -81,9 +86,10 @@ export function SignIn() {
   );
 }
 
-/** `url` with the dashboard path to come back to as its `return` query parameter. */
-function withReturn(url: string, path: string) {
+/** `url` with the dashboard path to come back to and the sign-in's `state`, which the flow echoes back. */
+function handoff(url: string, path: string, state: string) {
   const target = new URL(url, window.location.origin);
   target.searchParams.set("return", path);
+  target.searchParams.set("state", state);
   return target.href;
 }

@@ -10,7 +10,7 @@ import { Login } from "./routes/login.tsx";
 import { Missing } from "./routes/missing.tsx";
 import { Project } from "./routes/project.tsx";
 import { Projects } from "./routes/projects.tsx";
-import { SignedIn } from "./routes/signed-in.tsx";
+import { SignedIn, takeHandoff } from "./routes/signed-in.tsx";
 
 const rootRoute = createRootRoute({ component: Layout, notFoundComponent: Missing });
 
@@ -38,6 +38,7 @@ export const routeTree = rootRoute.addChildren([
     path: "/signed-in",
     validateSearch: (search: Record<string, unknown>): { return?: string } =>
       typeof search.return === "string" ? { return: search.return } : {},
+    beforeLoad: ({ location, search }) => takeHandoff(location.hash, search.return),
     component: SignedIn,
   }),
   createRoute({ getParentRoute: () => rootRoute, path: "/p/$project", component: Project }),
