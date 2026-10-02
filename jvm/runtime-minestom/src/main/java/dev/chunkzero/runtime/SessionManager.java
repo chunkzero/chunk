@@ -339,7 +339,9 @@ public final class SessionManager {
 
         void start() {
             // The deadline settles a copy of the session's own future, so a late completion of the
-            // latter is ignored and its failures pass through unchanged.
+            // latter is ignored and its failures pass through unchanged. orTimeout fires on the
+            // JDK's
+            // own delay scheduler, so session work that fills the common pool can't hold it back.
             var created = new CompletableFuture<Void>();
             var deadline =
                     new CompletableFuture<Void>()
