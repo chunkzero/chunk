@@ -316,7 +316,12 @@ fn run_action(
         engine.register(deployment_id.clone(), deployment.source.clone(), Limits::default())?;
         let execution = engine.execute_action(&deployment_id, invocation, Rc::new(host), cancellation)?;
         for log in execution.logs {
-            console!(log.level.as_str(), invocation = %id, message = secrets.redact(log.message));
+            console!(
+                log.level.as_str(),
+                deployment = deployment.id.as_str(),
+                invocation = %id,
+                message = secrets.redact(log.message)
+            );
         }
         let mut value = serde_json::from_str(&execution.value)?;
         result.normalize_api(&mut value);

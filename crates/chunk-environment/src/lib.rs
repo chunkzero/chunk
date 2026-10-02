@@ -231,9 +231,10 @@ async fn run_core(
         }
     }
     drop(managed);
-    // The core attach ended with `managed`, so an attach that takes no lease renews the log store's credentials through
-    // the final flush.
-    let result = managed::renewing(renewer, stop_services(gateway.into_inner(), core)).await;
+    // The core attach ended with `managed`, so an attach that takes no lease renews the log store's credentials, and
+    // telemetry counts awake time, through the final flush.
+    let stopped = managed::renewing(renewer, stop_services(gateway.into_inner(), core));
+    let result = if let Some(telemetry) = &telemetry { telemetry.counting(stopped).await } else { stopped.await };
     if let Some(telemetry) = telemetry {
         telemetry.finish(FINAL_SHIPMENT).await;
     }

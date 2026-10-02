@@ -128,8 +128,9 @@ export function pure(ctx) { return typeof ctx.fetch+':'+JSON.stringify(ctx.env)+
 export function echo(ctx,args) { console.log('echoed', args.url); return 'echoed'; }
 export async function logs(ctx) { console.log({body:JSON.stringify({token:ctx.env.TOKEN})}); return ctx.runQuery('echo',{url:ctx.env.TOKEN}); }
 export function later(ctx,args) { return ctx.scheduler.runAt(Date.now()+200,'env',null); }
+export async function late(ctx) { await ctx.sleep(500); console.log('logged late'); return 'late'; }
 ".into(),
-        functions:["run","credential","fanout","leak","held","env","pure","echo","logs","later"].into_iter().map(|name| (name.into(),Function {
+        functions:["run","credential","fanout","leak","held","env","pure","echo","logs","later","late"].into_iter().map(|name| (name.into(),Function {
             kind:match name { "pure" | "echo" => FunctionKind::Query, "later" => FunctionKind::Mutation, _ => FunctionKind::Action },
             visibility:Visibility::Public,export:name.into(),
             arguments:if matches!(name, "run" | "credential" | "fanout" | "echo") {Schema::Object { fields:fields.clone() }} else {Schema::Null},result:Schema::String,
@@ -273,6 +274,23 @@ async fn logs_redact_secrets_inside_nested_json_and_nested_calls() {
     let logs = console_logs();
     assert!(logs.contains("function=\"echo\""), "{logs}");
     assert!(!logs.contains("redaction-secret"), "{logs}");
+    drop(backend);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn action_logs_name_their_deployment_after_another_is_deployed() {
+    console_logs();
+    let directory = tempfile::tempdir().unwrap();
+    let backend = configured(&directory, ACTION_BYTES);
+    backend.deploy(deployment("before")).await.unwrap();
+    let id = backend.allocate_action_id().await.unwrap();
+    let mut running = backend.start_action(id, call("before", "late", json!(null))).await.unwrap();
+    backend.deploy(deployment("after")).await.unwrap();
+    assert!(matches!(*running.status.borrow(), ActionStatus::Running));
+    assert_eq!(&*running.outcome().await.unwrap(), r#""late""#);
+    let logs = console_logs();
+    let line = logs.lines().find(|line| line.contains("logged late")).unwrap();
+    assert!(line.contains(r#"deployment="before""#), "{line}");
     drop(backend);
 }
 
