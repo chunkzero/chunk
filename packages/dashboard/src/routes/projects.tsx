@@ -36,7 +36,8 @@ const styles = stylex.create({
 export function Projects() {
   const projects = useProjects();
   // Owners matter only to callers who can choose between several.
-  const owners = usePrincipal().data?.owners ?? [];
+  const principal = usePrincipal();
+  const owners = principal.data?.owners ?? [];
   const ownerNames = owners.length > 1 ? new Map(owners.map((owner) => [owner.id, owner.displayName])) : undefined;
   const [creating, setCreating] = useState(false);
 
@@ -44,7 +45,16 @@ export function Projects() {
     <Page>
       <div {...stylex.props(styles.heading)}>
         <h1 {...stylex.props(styles.title)}>Projects</h1>
-        <Button size="sm" variant="outline" icon={Add01Icon} onClick={() => setCreating(true)}>
+        <Button
+          size="sm"
+          variant="outline"
+          icon={Add01Icon}
+          onClick={() => {
+            // Memberships may have changed since the principal was loaded.
+            void principal.refetch();
+            setCreating(true);
+          }}
+        >
           New project
         </Button>
       </div>
