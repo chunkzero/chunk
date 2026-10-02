@@ -38,12 +38,19 @@ export function s3ReleaseStore(bucket: ReleaseBucket): ReleaseStore {
       if (!(await exists(upload(key)))) {
         return (await exists(archive(key))) ? verify(read(archive(key))) : undefined;
       }
-      const result = await verify(read(upload(key)));
-      // The upload may have been replaced since, so only bytes that match the digest verified above are copied.
-      const checked = matching(read(upload(key)), expected);
-      await s3Request("release store copy", () =>
-        client.write(archive(key), new Response(checked), { type: "application/gzip" }),
-      );
+      let result;
+      try {
+        result = await verify(read(upload(key)));
+        // The upload may have been replaced since, so only bytes that match the digest verified above are copied.
+        const checked = matching(read(upload(key)), expected);
+        await s3Request("release store copy", () =>
+          client.write(archive(key), new Response(checked), { type: "application/gzip" }),
+        );
+      } catch (error) {
+        // A concurrent completion may have stored the archive and removed the upload meanwhile.
+        if (await exists(archive(key))) return verify(read(archive(key)));
+        throw error;
+      }
       await s3Request("release store cleanup", () => client.delete(upload(key))).catch((error: unknown) =>
         console.error("removing a stored release's upload failed:", error),
       );
