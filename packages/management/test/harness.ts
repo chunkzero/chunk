@@ -17,7 +17,7 @@ import { DeploymentService } from "../src/gen/chunk/management/v1/deployments_pb
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { localReleaseStore } from "../src/releases/local-store.ts";
 import type { ReleaseStore } from "../src/releases/store.ts";
-import { createHandler } from "../src/server.ts";
+import { createHandler, type HandlerOptions } from "../src/server.ts";
 import { releaseArchive } from "./fixtures.ts";
 
 /** Tests that need Postgres run only when this is set, for example to a Podman container's URL. */
@@ -53,9 +53,9 @@ export interface Harness {
 
 /**
  * Serves the API on a random port against a fresh database, a temporary release directory and a fake resolver, with
- * `overrides` replacing the defaults.
+ * `overrides` replacing the defaults and the handler built with `options`.
  */
-export async function startHarness(overrides: Partial<Deps> = {}): Promise<Harness> {
+export async function startHarness(overrides: Partial<Deps> = {}, options: HandlerOptions = {}): Promise<Harness> {
   if (!databaseUrl) throw new Error("TEST_DATABASE_URL is not set");
   const database = `test_${randomBytes(6).toString("hex")}`;
   const admin = new SQL(databaseUrl);
@@ -114,7 +114,7 @@ export async function startHarness(overrides: Partial<Deps> = {}): Promise<Harne
     fetch: (request) => handler(request),
     close,
   };
-  handler = createHandler(deps);
+  handler = createHandler(deps, options);
 
   function client<T extends DescService>(service: T, token: string | null = operatorToken): Client<T> {
     const transport = createConnectTransport({

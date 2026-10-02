@@ -33,9 +33,18 @@ service AuthService {
   rpc ListTokens(ListTokensRequest) returns (ListTokensResponse);
   // Revokes a token; logging out revokes the CLI's own. Idempotent.
   rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+  // Lists the ways to sign in to the dashboard besides an API token, which an
+  // install may offer. Needs no token.
+  rpc GetSignInOptions(GetSignInOptionsRequest) returns (GetSignInOptionsResponse);
 }
 
 message Principal {
+  string id = 1;
+  string display_name = 2;
+}
+
+// An account or team that owns projects; see Project.owner_id.
+message Owner {
   string id = 1;
   string display_name = 2;
 }
@@ -95,6 +104,9 @@ message GetCurrentPrincipalResponse {
   Principal principal = 1;
   // The calling token.
   Token token = 2;
+  // The owners whose projects the caller may reach. Empty when the caller
+  // reaches every project, as on single-tenant installs.
+  repeated Owner owners = 3;
 }
 
 message CreateTokenRequest {
@@ -126,3 +138,18 @@ message RevokeTokenRequest {
 }
 
 message RevokeTokenResponse {}
+
+message GetSignInOptionsRequest {}
+
+message GetSignInOptionsResponse {
+  repeated SignInOption options = 1;
+}
+
+message SignInOption {
+  // The button's text, such as "Continue with Example".
+  string label = 1;
+  // Where the button leads. The dashboard adds `return` and `state` query
+  // parameters: the page to come back to, and a single-use value the flow
+  // must echo back to `/signed-in` with the token.
+  string url = 2;
+}

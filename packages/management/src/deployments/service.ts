@@ -14,7 +14,7 @@ import { loadEnvironment } from "../projects/store.ts";
 import { callerOf, checkProjectAccess } from "../rpc/caller.ts";
 import { idempotent } from "../rpc/idempotency.ts";
 import { failedPrecondition, invalid, notFound, page, pageOf, required, seqAfter } from "../rpc/validate.ts";
-import { deployments, environments } from "../schema.ts";
+import { deployments, environments, projects } from "../schema.ts";
 import { releaseHandlers } from "./releases.ts";
 import { createDeployment, toDeployment } from "./store.ts";
 
@@ -36,7 +36,7 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
           deps.jvmImage,
           request.stopPrevious,
         );
-        return create(DeployResponseSchema, { deployment });
+        return { response: create(DeployResponseSchema, { deployment }), projectId: environment.project_id };
       });
     },
 
@@ -66,7 +66,7 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
           DeploymentTrigger.PROMOTE,
           deps.jvmImage,
         );
-        return create(PromoteResponseSchema, { deployment });
+        return { response: create(PromoteResponseSchema, { deployment }), projectId: target.project_id };
       });
     },
 
@@ -99,18 +99,19 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
           DeploymentTrigger.ROLLBACK,
           deps.jvmImage,
         );
-        return create(RollbackResponseSchema, { deployment });
+        return { response: create(RollbackResponseSchema, { deployment }), projectId: environment.project_id };
       });
     },
 
     async getDeployment(request, context) {
       const [row] = await db
-        .select({ ...getTableColumns(deployments), project_id: environments.project_id })
+        .select({ ...getTableColumns(deployments), project_id: environments.project_id, owner_id: projects.owner_id })
         .from(deployments)
         .innerJoin(environments, eq(environments.id, deployments.environment_id))
+        .innerJoin(projects, eq(projects.id, environments.project_id))
         .where(eq(deployments.id, required(request.deploymentId, "deployment_id")));
       if (!row) throw notFound("deployment");
-      checkProjectAccess(callerOf(context), row.project_id);
+      checkProjectAccess(callerOf(context), row.project_id, row.owner_id, "deployment");
       return { deployment: toDeployment(row) };
     },
 

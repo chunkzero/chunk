@@ -12,7 +12,7 @@ import { file_google_protobuf_duration, file_google_protobuf_timestamp } from "@
  * Describes the file chunk/management/v1/auth.proto.
  */
 export const file_chunk_management_v1_auth: GenFile /*@__PURE__*/ = fileDesc(
-  "Ch5jaHVuay9tYW5hZ2VtZW50L3YxL2F1dGgucHJvdG8SE2NodW5rLm1hbmFnZW1lbnQudjEiLQoJUHJpbmNpcGFsEgoKAmlkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSKXAQoFVG9rZW4SCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCRISCgpwcm9qZWN0X2lkGAMgASgJEi8KC2NyZWF0ZV90aW1lGAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIvCgtleHBpcmVfdGltZRgFIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiKAoRU3RhcnRMb2dpblJlcXVlc3QSEwoLY2xpZW50X25hbWUYASABKAkitgEKElN0YXJ0TG9naW5SZXNwb25zZRIQCghsb2dpbl9pZBgBIAEoCRIRCgl1c2VyX2NvZGUYAiABKAkSGAoQdmVyaWZpY2F0aW9uX3VybBgDIAEoCRIvCgtleHBpcmVfdGltZRgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASMAoNcG9sbF9pbnRlcnZhbBgFIAEoCzIZLmdvb2dsZS5wcm90b2J1Zi5EdXJhdGlvbiIkChBQb2xsTG9naW5SZXF1ZXN0EhAKCGxvZ2luX2lkGAEgASgJIn4KEVBvbGxMb2dpblJlc3BvbnNlEi4KBXN0YXRlGAEgASgOMh8uY2h1bmsubWFuYWdlbWVudC52MS5Mb2dpblN0YXRlEg4KBnNlY3JldBgCIAEoCRIpCgV0b2tlbhgDIAEoCzIaLmNodW5rLm1hbmFnZW1lbnQudjEuVG9rZW4iKAoTQXBwcm92ZUxvZ2luUmVxdWVzdBIRCgl1c2VyX2NvZGUYASABKAkiFgoUQXBwcm92ZUxvZ2luUmVzcG9uc2UiHAoaR2V0Q3VycmVudFByaW5jaXBhbFJlcXVlc3QiewobR2V0Q3VycmVudFByaW5jaXBhbFJlc3BvbnNlEjEKCXByaW5jaXBhbBgBIAEoCzIeLmNodW5rLm1hbmFnZW1lbnQudjEuUHJpbmNpcGFsEikKBXRva2VuGAIgASgLMhouY2h1bmsubWFuYWdlbWVudC52MS5Ub2tlbiJ7ChJDcmVhdGVUb2tlblJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoCRIMCgRuYW1lGAIgASgJEhIKCnByb2plY3RfaWQYAyABKAkSLwoLZXhwaXJlX3RpbWUYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIlAKE0NyZWF0ZVRva2VuUmVzcG9uc2USKQoFdG9rZW4YASABKAsyGi5jaHVuay5tYW5hZ2VtZW50LnYxLlRva2VuEg4KBnNlY3JldBgCIAEoCSI6ChFMaXN0VG9rZW5zUmVxdWVzdBIRCglwYWdlX3NpemUYASABKAUSEgoKcGFnZV90b2tlbhgCIAEoCSJZChJMaXN0VG9rZW5zUmVzcG9uc2USKgoGdG9rZW5zGAEgAygLMhouY2h1bmsubWFuYWdlbWVudC52MS5Ub2tlbhIXCg9uZXh0X3BhZ2VfdG9rZW4YAiABKAkiJgoSUmV2b2tlVG9rZW5SZXF1ZXN0EhAKCHRva2VuX2lkGAEgASgJIhUKE1Jldm9rZVRva2VuUmVzcG9uc2UqdQoKTG9naW5TdGF0ZRIbChdMT0dJTl9TVEFURV9VTlNQRUNJRklFRBAAEhcKE0xPR0lOX1NUQVRFX1BFTkRJTkcQARIYChRMT0dJTl9TVEFURV9BUFBST1ZFRBACEhcKE0xPR0lOX1NUQVRFX0VYUElSRUQQAzLKBQoLQXV0aFNlcnZpY2USXQoKU3RhcnRMb2dpbhImLmNodW5rLm1hbmFnZW1lbnQudjEuU3RhcnRMb2dpblJlcXVlc3QaJy5jaHVuay5tYW5hZ2VtZW50LnYxLlN0YXJ0TG9naW5SZXNwb25zZRJaCglQb2xsTG9naW4SJS5jaHVuay5tYW5hZ2VtZW50LnYxLlBvbGxMb2dpblJlcXVlc3QaJi5jaHVuay5tYW5hZ2VtZW50LnYxLlBvbGxMb2dpblJlc3BvbnNlEmMKDEFwcHJvdmVMb2dpbhIoLmNodW5rLm1hbmFnZW1lbnQudjEuQXBwcm92ZUxvZ2luUmVxdWVzdBopLmNodW5rLm1hbmFnZW1lbnQudjEuQXBwcm92ZUxvZ2luUmVzcG9uc2USeAoTR2V0Q3VycmVudFByaW5jaXBhbBIvLmNodW5rLm1hbmFnZW1lbnQudjEuR2V0Q3VycmVudFByaW5jaXBhbFJlcXVlc3QaMC5jaHVuay5tYW5hZ2VtZW50LnYxLkdldEN1cnJlbnRQcmluY2lwYWxSZXNwb25zZRJgCgtDcmVhdGVUb2tlbhInLmNodW5rLm1hbmFnZW1lbnQudjEuQ3JlYXRlVG9rZW5SZXF1ZXN0GiguY2h1bmsubWFuYWdlbWVudC52MS5DcmVhdGVUb2tlblJlc3BvbnNlEl0KCkxpc3RUb2tlbnMSJi5jaHVuay5tYW5hZ2VtZW50LnYxLkxpc3RUb2tlbnNSZXF1ZXN0GicuY2h1bmsubWFuYWdlbWVudC52MS5MaXN0VG9rZW5zUmVzcG9uc2USYAoLUmV2b2tlVG9rZW4SJy5jaHVuay5tYW5hZ2VtZW50LnYxLlJldm9rZVRva2VuUmVxdWVzdBooLmNodW5rLm1hbmFnZW1lbnQudjEuUmV2b2tlVG9rZW5SZXNwb25zZWIGcHJvdG8z",
+  "Ch5jaHVuay9tYW5hZ2VtZW50L3YxL2F1dGgucHJvdG8SE2NodW5rLm1hbmFnZW1lbnQudjEiLQoJUHJpbmNpcGFsEgoKAmlkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSIpCgVPd25lchIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkilwEKBVRva2VuEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAkSEgoKcHJvamVjdF9pZBgDIAEoCRIvCgtjcmVhdGVfdGltZRgEIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLwoLZXhwaXJlX3RpbWUYBSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIigKEVN0YXJ0TG9naW5SZXF1ZXN0EhMKC2NsaWVudF9uYW1lGAEgASgJIrYBChJTdGFydExvZ2luUmVzcG9uc2USEAoIbG9naW5faWQYASABKAkSEQoJdXNlcl9jb2RlGAIgASgJEhgKEHZlcmlmaWNhdGlvbl91cmwYAyABKAkSLwoLZXhwaXJlX3RpbWUYBCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjAKDXBvbGxfaW50ZXJ2YWwYBSABKAsyGS5nb29nbGUucHJvdG9idWYuRHVyYXRpb24iJAoQUG9sbExvZ2luUmVxdWVzdBIQCghsb2dpbl9pZBgBIAEoCSJ+ChFQb2xsTG9naW5SZXNwb25zZRIuCgVzdGF0ZRgBIAEoDjIfLmNodW5rLm1hbmFnZW1lbnQudjEuTG9naW5TdGF0ZRIOCgZzZWNyZXQYAiABKAkSKQoFdG9rZW4YAyABKAsyGi5jaHVuay5tYW5hZ2VtZW50LnYxLlRva2VuIigKE0FwcHJvdmVMb2dpblJlcXVlc3QSEQoJdXNlcl9jb2RlGAEgASgJIhYKFEFwcHJvdmVMb2dpblJlc3BvbnNlIhwKGkdldEN1cnJlbnRQcmluY2lwYWxSZXF1ZXN0IqcBChtHZXRDdXJyZW50UHJpbmNpcGFsUmVzcG9uc2USMQoJcHJpbmNpcGFsGAEgASgLMh4uY2h1bmsubWFuYWdlbWVudC52MS5QcmluY2lwYWwSKQoFdG9rZW4YAiABKAsyGi5jaHVuay5tYW5hZ2VtZW50LnYxLlRva2VuEioKBm93bmVycxgDIAMoCzIaLmNodW5rLm1hbmFnZW1lbnQudjEuT3duZXIiewoSQ3JlYXRlVG9rZW5SZXF1ZXN0EhIKCnJlcXVlc3RfaWQYASABKAkSDAoEbmFtZRgCIAEoCRISCgpwcm9qZWN0X2lkGAMgASgJEi8KC2V4cGlyZV90aW1lGAQgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCJQChNDcmVhdGVUb2tlblJlc3BvbnNlEikKBXRva2VuGAEgASgLMhouY2h1bmsubWFuYWdlbWVudC52MS5Ub2tlbhIOCgZzZWNyZXQYAiABKAkiOgoRTGlzdFRva2Vuc1JlcXVlc3QSEQoJcGFnZV9zaXplGAEgASgFEhIKCnBhZ2VfdG9rZW4YAiABKAkiWQoSTGlzdFRva2Vuc1Jlc3BvbnNlEioKBnRva2VucxgBIAMoCzIaLmNodW5rLm1hbmFnZW1lbnQudjEuVG9rZW4SFwoPbmV4dF9wYWdlX3Rva2VuGAIgASgJIiYKElJldm9rZVRva2VuUmVxdWVzdBIQCgh0b2tlbl9pZBgBIAEoCSIVChNSZXZva2VUb2tlblJlc3BvbnNlIhkKF0dldFNpZ25Jbk9wdGlvbnNSZXF1ZXN0Ik4KGEdldFNpZ25Jbk9wdGlvbnNSZXNwb25zZRIyCgdvcHRpb25zGAEgAygLMiEuY2h1bmsubWFuYWdlbWVudC52MS5TaWduSW5PcHRpb24iKgoMU2lnbkluT3B0aW9uEg0KBWxhYmVsGAEgASgJEgsKA3VybBgCIAEoCSp1CgpMb2dpblN0YXRlEhsKF0xPR0lOX1NUQVRFX1VOU1BFQ0lGSUVEEAASFwoTTE9HSU5fU1RBVEVfUEVORElORxABEhgKFExPR0lOX1NUQVRFX0FQUFJPVkVEEAISFwoTTE9HSU5fU1RBVEVfRVhQSVJFRBADMrsGCgtBdXRoU2VydmljZRJdCgpTdGFydExvZ2luEiYuY2h1bmsubWFuYWdlbWVudC52MS5TdGFydExvZ2luUmVxdWVzdBonLmNodW5rLm1hbmFnZW1lbnQudjEuU3RhcnRMb2dpblJlc3BvbnNlEloKCVBvbGxMb2dpbhIlLmNodW5rLm1hbmFnZW1lbnQudjEuUG9sbExvZ2luUmVxdWVzdBomLmNodW5rLm1hbmFnZW1lbnQudjEuUG9sbExvZ2luUmVzcG9uc2USYwoMQXBwcm92ZUxvZ2luEiguY2h1bmsubWFuYWdlbWVudC52MS5BcHByb3ZlTG9naW5SZXF1ZXN0GikuY2h1bmsubWFuYWdlbWVudC52MS5BcHByb3ZlTG9naW5SZXNwb25zZRJ4ChNHZXRDdXJyZW50UHJpbmNpcGFsEi8uY2h1bmsubWFuYWdlbWVudC52MS5HZXRDdXJyZW50UHJpbmNpcGFsUmVxdWVzdBowLmNodW5rLm1hbmFnZW1lbnQudjEuR2V0Q3VycmVudFByaW5jaXBhbFJlc3BvbnNlEmAKC0NyZWF0ZVRva2VuEicuY2h1bmsubWFuYWdlbWVudC52MS5DcmVhdGVUb2tlblJlcXVlc3QaKC5jaHVuay5tYW5hZ2VtZW50LnYxLkNyZWF0ZVRva2VuUmVzcG9uc2USXQoKTGlzdFRva2VucxImLmNodW5rLm1hbmFnZW1lbnQudjEuTGlzdFRva2Vuc1JlcXVlc3QaJy5jaHVuay5tYW5hZ2VtZW50LnYxLkxpc3RUb2tlbnNSZXNwb25zZRJgCgtSZXZva2VUb2tlbhInLmNodW5rLm1hbmFnZW1lbnQudjEuUmV2b2tlVG9rZW5SZXF1ZXN0GiguY2h1bmsubWFuYWdlbWVudC52MS5SZXZva2VUb2tlblJlc3BvbnNlEm8KEEdldFNpZ25Jbk9wdGlvbnMSLC5jaHVuay5tYW5hZ2VtZW50LnYxLkdldFNpZ25Jbk9wdGlvbnNSZXF1ZXN0Gi0uY2h1bmsubWFuYWdlbWVudC52MS5HZXRTaWduSW5PcHRpb25zUmVzcG9uc2ViBnByb3RvMw",
   [file_google_protobuf_duration, file_google_protobuf_timestamp],
 );
 
@@ -36,6 +36,29 @@ export type Principal = Message<"chunk.management.v1.Principal"> & {
  * Use `create(PrincipalSchema)` to create a new message.
  */
 export const PrincipalSchema: GenMessage<Principal> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_auth, 0);
+
+/**
+ * An account or team that owns projects; see Project.owner_id.
+ *
+ * @generated from message chunk.management.v1.Owner
+ */
+export type Owner = Message<"chunk.management.v1.Owner"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string display_name = 2;
+   */
+  displayName: string;
+};
+
+/**
+ * Describes the message chunk.management.v1.Owner.
+ * Use `create(OwnerSchema)` to create a new message.
+ */
+export const OwnerSchema: GenMessage<Owner> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_auth, 1);
 
 /**
  * @generated from message chunk.management.v1.Token
@@ -75,7 +98,7 @@ export type Token = Message<"chunk.management.v1.Token"> & {
  * Describes the message chunk.management.v1.Token.
  * Use `create(TokenSchema)` to create a new message.
  */
-export const TokenSchema: GenMessage<Token> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_auth, 1);
+export const TokenSchema: GenMessage<Token> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_auth, 2);
 
 /**
  * @generated from message chunk.management.v1.StartLoginRequest
@@ -95,7 +118,7 @@ export type StartLoginRequest = Message<"chunk.management.v1.StartLoginRequest">
  */
 export const StartLoginRequestSchema: GenMessage<StartLoginRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  2,
+  3,
 );
 
 /**
@@ -138,7 +161,7 @@ export type StartLoginResponse = Message<"chunk.management.v1.StartLoginResponse
  */
 export const StartLoginResponseSchema: GenMessage<StartLoginResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  3,
+  4,
 );
 
 /**
@@ -157,7 +180,7 @@ export type PollLoginRequest = Message<"chunk.management.v1.PollLoginRequest"> &
  */
 export const PollLoginRequestSchema: GenMessage<PollLoginRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  4,
+  5,
 );
 
 /**
@@ -188,7 +211,7 @@ export type PollLoginResponse = Message<"chunk.management.v1.PollLoginResponse">
  */
 export const PollLoginResponseSchema: GenMessage<PollLoginResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  5,
+  6,
 );
 
 /**
@@ -207,7 +230,7 @@ export type ApproveLoginRequest = Message<"chunk.management.v1.ApproveLoginReque
  */
 export const ApproveLoginRequestSchema: GenMessage<ApproveLoginRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  6,
+  7,
 );
 
 /**
@@ -221,7 +244,7 @@ export type ApproveLoginResponse = Message<"chunk.management.v1.ApproveLoginResp
  */
 export const ApproveLoginResponseSchema: GenMessage<ApproveLoginResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  7,
+  8,
 );
 
 /**
@@ -235,7 +258,7 @@ export type GetCurrentPrincipalRequest = Message<"chunk.management.v1.GetCurrent
  */
 export const GetCurrentPrincipalRequestSchema: GenMessage<GetCurrentPrincipalRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  8,
+  9,
 );
 
 /**
@@ -253,6 +276,14 @@ export type GetCurrentPrincipalResponse = Message<"chunk.management.v1.GetCurren
    * @generated from field: chunk.management.v1.Token token = 2;
    */
   token?: Token | undefined;
+
+  /**
+   * The owners whose projects the caller may reach. Empty when the caller
+   * reaches every project, as on single-tenant installs.
+   *
+   * @generated from field: repeated chunk.management.v1.Owner owners = 3;
+   */
+  owners: Owner[];
 };
 
 /**
@@ -261,7 +292,7 @@ export type GetCurrentPrincipalResponse = Message<"chunk.management.v1.GetCurren
  */
 export const GetCurrentPrincipalResponseSchema: GenMessage<GetCurrentPrincipalResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  9,
+  10,
 );
 
 /**
@@ -299,7 +330,7 @@ export type CreateTokenRequest = Message<"chunk.management.v1.CreateTokenRequest
  */
 export const CreateTokenRequestSchema: GenMessage<CreateTokenRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  10,
+  11,
 );
 
 /**
@@ -323,7 +354,7 @@ export type CreateTokenResponse = Message<"chunk.management.v1.CreateTokenRespon
  */
 export const CreateTokenResponseSchema: GenMessage<CreateTokenResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  11,
+  12,
 );
 
 /**
@@ -347,7 +378,7 @@ export type ListTokensRequest = Message<"chunk.management.v1.ListTokensRequest">
  */
 export const ListTokensRequestSchema: GenMessage<ListTokensRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  12,
+  13,
 );
 
 /**
@@ -371,7 +402,7 @@ export type ListTokensResponse = Message<"chunk.management.v1.ListTokensResponse
  */
 export const ListTokensResponseSchema: GenMessage<ListTokensResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  13,
+  14,
 );
 
 /**
@@ -390,7 +421,7 @@ export type RevokeTokenRequest = Message<"chunk.management.v1.RevokeTokenRequest
  */
 export const RevokeTokenRequestSchema: GenMessage<RevokeTokenRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  14,
+  15,
 );
 
 /**
@@ -404,7 +435,70 @@ export type RevokeTokenResponse = Message<"chunk.management.v1.RevokeTokenRespon
  */
 export const RevokeTokenResponseSchema: GenMessage<RevokeTokenResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_auth,
-  15,
+  16,
+);
+
+/**
+ * @generated from message chunk.management.v1.GetSignInOptionsRequest
+ */
+export type GetSignInOptionsRequest = Message<"chunk.management.v1.GetSignInOptionsRequest"> & {};
+
+/**
+ * Describes the message chunk.management.v1.GetSignInOptionsRequest.
+ * Use `create(GetSignInOptionsRequestSchema)` to create a new message.
+ */
+export const GetSignInOptionsRequestSchema: GenMessage<GetSignInOptionsRequest> /*@__PURE__*/ = messageDesc(
+  file_chunk_management_v1_auth,
+  17,
+);
+
+/**
+ * @generated from message chunk.management.v1.GetSignInOptionsResponse
+ */
+export type GetSignInOptionsResponse = Message<"chunk.management.v1.GetSignInOptionsResponse"> & {
+  /**
+   * @generated from field: repeated chunk.management.v1.SignInOption options = 1;
+   */
+  options: SignInOption[];
+};
+
+/**
+ * Describes the message chunk.management.v1.GetSignInOptionsResponse.
+ * Use `create(GetSignInOptionsResponseSchema)` to create a new message.
+ */
+export const GetSignInOptionsResponseSchema: GenMessage<GetSignInOptionsResponse> /*@__PURE__*/ = messageDesc(
+  file_chunk_management_v1_auth,
+  18,
+);
+
+/**
+ * @generated from message chunk.management.v1.SignInOption
+ */
+export type SignInOption = Message<"chunk.management.v1.SignInOption"> & {
+  /**
+   * The button's text, such as "Continue with Example".
+   *
+   * @generated from field: string label = 1;
+   */
+  label: string;
+
+  /**
+   * Where the button leads. The dashboard adds `return` and `state` query
+   * parameters: the page to come back to, and a single-use value the flow
+   * must echo back to `/signed-in` with the token.
+   *
+   * @generated from field: string url = 2;
+   */
+  url: string;
+};
+
+/**
+ * Describes the message chunk.management.v1.SignInOption.
+ * Use `create(SignInOptionSchema)` to create a new message.
+ */
+export const SignInOptionSchema: GenMessage<SignInOption> /*@__PURE__*/ = messageDesc(
+  file_chunk_management_v1_auth,
+  19,
 );
 
 /**
@@ -524,5 +618,16 @@ export const AuthService: GenService<{
     methodKind: "unary";
     input: typeof RevokeTokenRequestSchema;
     output: typeof RevokeTokenResponseSchema;
+  };
+  /**
+   * Lists the ways to sign in to the dashboard besides an API token, which an
+   * install may offer. Needs no token.
+   *
+   * @generated from rpc chunk.management.v1.AuthService.GetSignInOptions
+   */
+  getSignInOptions: {
+    methodKind: "unary";
+    input: typeof GetSignInOptionsRequestSchema;
+    output: typeof GetSignInOptionsResponseSchema;
   };
 }> /*@__PURE__*/ = serviceDesc(file_chunk_management_v1_auth, 0);

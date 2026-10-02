@@ -92,7 +92,10 @@ export function forkHandlers({
         if (!row) throw new Error("environment insert returned no row");
         if (request.copySecrets) await copySecrets(tx, keys, source.id, id);
         await notify(tx, { kind: "environment", environmentId: id });
-        return create(ForkEnvironmentResponseSchema, { environment: toEnvironment(row, edge) });
+        return {
+          response: create(ForkEnvironmentResponseSchema, { environment: toEnvironment(row, edge) }),
+          projectId: row.project_id,
+        };
       });
     },
 

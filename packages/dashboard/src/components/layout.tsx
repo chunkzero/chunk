@@ -1,5 +1,5 @@
 import * as stylex from "@stylexjs/stylex";
-import { Outlet } from "@tanstack/react-router";
+import { Outlet, useLocation } from "@tanstack/react-router";
 
 import { useToken } from "../lib/session.ts";
 import { SignIn } from "../routes/sign-in.tsx";
@@ -16,6 +16,7 @@ const framed = window.self !== window.top;
 
 export function Layout() {
   const token = useToken();
+  const signingIn = useLocation({ select: (location) => location.pathname === "/signed-in" });
   if (framed) {
     return (
       <p {...stylex.props(styles.framed)}>
@@ -23,6 +24,8 @@ export function Layout() {
       </p>
     );
   }
+  // An install's sign-in flow returns to /signed-in, which stands alone.
+  if (signingIn) return <Outlet />;
   if (token === null) return <SignIn />;
   return (
     <div {...stylex.props(styles.shell)}>

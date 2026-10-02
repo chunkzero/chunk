@@ -47,6 +47,8 @@ export const idempotentRequests = pgTable(
     method: text().notNull(),
     fingerprint: bytea().notNull(),
     response: bytea(),
+    /** The project the response belongs to, which a replay's caller must still reach. */
+    project_id: text(),
     create_time: createTime(),
   },
   (t) => [primaryKey({ columns: [t.scope, t.request_id] })],

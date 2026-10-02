@@ -11,11 +11,13 @@ import {
   AuthService,
   CreateTokenResponseSchema,
   LoginState,
+  OwnerSchema,
   PollLoginResponseSchema,
   PrincipalSchema,
+  SignInOptionSchema,
 } from "../gen/chunk/management/v1/auth_pb.ts";
-import { findProject } from "../projects/store.ts";
-import { callerOf, checkProjectAccess } from "../rpc/caller.ts";
+import { loadProject } from "../projects/store.ts";
+import { callerOf } from "../rpc/caller.ts";
 import { idempotent } from "../rpc/idempotency.ts";
 import { failedPrecondition, invalid, notFound, page, pageOf, required, seqAfter } from "../rpc/validate.ts";
 import { apiTokens, logins } from "../schema.ts";
@@ -26,8 +28,21 @@ const pollIntervalMs = 5 * 1000;
 // Consonants only, so codes never spell words; 20^8 codes.
 const codeAlphabet = "BCDFGHJKLMNPQRSTVWXZ";
 
-export function authService({ db, keys, publicUrl }: Deps): Partial<ServiceImpl<typeof AuthService>> {
+/** A way to sign in to the dashboard that an install offers besides API tokens. */
+export interface SignInOption {
+  label: string;
+  url: string;
+}
+
+export function authService(
+  { db, keys, publicUrl }: Deps,
+  signInOptions: readonly SignInOption[] = [],
+): Partial<ServiceImpl<typeof AuthService>> {
   return {
+    getSignInOptions() {
+      return { options: signInOptions.map((option) => create(SignInOptionSchema, option)) };
+    },
+
     async startLogin(request) {
       const clientName = request.clientName.slice(0, 200) || "chunk CLI";
       const loginId = randomToken();
@@ -113,6 +128,7 @@ export function authService({ db, keys, publicUrl }: Deps): Partial<ServiceImpl<
       return {
         principal: create(PrincipalSchema, caller.principal),
         token: token && toToken(token),
+        owners: caller.owners?.map((owner) => create(OwnerSchema, owner)) ?? [],
       };
     },
 
@@ -129,14 +145,14 @@ export function authService({ db, keys, publicUrl }: Deps): Partial<ServiceImpl<
         async (tx) => {
           // Checked only when minting, so a retry after expire_time still returns the first result.
           if (expireTime && expireTime <= new Date()) throw invalid("expire_time must be in the future");
-          if (projectId !== undefined && !(await findProject(tx, projectId))) throw notFound("project");
+          if (projectId !== undefined) await loadProject(tx, caller, projectId);
           const { row, secret } = await issueToken(tx, {
             principalId: caller.principal.id,
             name,
             projectId,
             expireTime,
           });
-          return create(CreateTokenResponseSchema, { token: toToken(row), secret });
+          return { response: create(CreateTokenResponseSchema, { token: toToken(row), secret }), projectId };
         },
       );
     },
@@ -167,7 +183,10 @@ export function authService({ db, keys, publicUrl }: Deps): Partial<ServiceImpl<
       const caller = callerOf(context);
       const token = await findToken(db, required(request.tokenId, "token_id"));
       if (!token || token.principal_id !== caller.principal.id) throw notFound("token");
-      checkProjectAccess(caller, token.project_id ?? "");
+      // Owners aren't checked: people can always revoke their own tokens, whatever projects they can reach now.
+      if (caller.projectId !== undefined && token.project_id !== caller.projectId) {
+        throw new ConnectError("the token does not reach this project", Code.PermissionDenied);
+      }
       await db
         .update(apiTokens)
         .set({ revoke_time: sql`now()` })

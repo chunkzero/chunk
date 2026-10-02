@@ -10,13 +10,13 @@ use chunk_management::{
     Client, Code,
     v1::{
         CreateEnvironmentRequest, CreateProjectRequest, DeleteEnvironmentRequest, Environment, ForkEnvironmentRequest,
-        GetEnvironmentRequest, ListAppsRequest, ListDeploymentsRequest, ListEnvironmentsRequest, ListProjectsRequest,
-        ListSnapshotsRequest, LogEntry, ReadLogsRequest,
+        GetCurrentPrincipalRequest, GetEnvironmentRequest, ListAppsRequest, ListDeploymentsRequest,
+        ListEnvironmentsRequest, ListProjectsRequest, ListSnapshotsRequest, LogEntry, ReadLogsRequest,
     },
 };
 use clap::{Args, Subcommand};
 
-use super::{EnvironmentArgs, ProjectArg, Session, all, api_error};
+use super::{EnvironmentArgs, ProjectArg, Session, all, api_error, choose};
 
 const DELETE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -81,6 +81,9 @@ enum Create {
     Create {
         /// 1 to 63 lowercase letters, digits and hyphens, starting and ending with a letter or digit.
         name: String,
+        /// The team or account that owns it, by name or ID; needed only when you belong to several.
+        #[arg(long)]
+        owner: Option<String>,
     },
 }
 
@@ -117,8 +120,16 @@ pub(crate) struct Logs {
 pub(super) async fn projects(options: Projects) -> io::Result<()> {
     let session = Session::open()?;
     let client = &session.client;
-    if let Some(Create::Create { name }) = options.action {
-        let request = CreateProjectRequest { request_id: request_id(), name, owner_id: String::new() };
+    if let Some(Create::Create { name, owner }) = options.action {
+        let owner_id = match owner {
+            Some(owner) => {
+                let request = GetCurrentPrincipalRequest::default();
+                let owners = client.get_current_principal(&request).await.map_err(api_error)?.owners;
+                choose(owners, Some(&owner), "owner", |owner| [&owner.id, &owner.display_name])?.id
+            }
+            None => String::new(),
+        };
+        let request = CreateProjectRequest { request_id: request_id(), name, owner_id };
         let project = client.create_project(&request).await.map_err(api_error)?.project.unwrap_or_default();
         return cliclack::log::success(format!("Created project {} ({})", project.name, project.id));
     }
