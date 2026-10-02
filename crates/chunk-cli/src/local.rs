@@ -60,6 +60,11 @@ pub(crate) struct Options {
 
 struct Settings {
     state: PathBuf,
+    /// The asset store every version's revision is built into, which JVMs read from.
+    assets: PathBuf,
+    /// Where players' clients download resource packs: this prefix followed by a pack's SHA-256. Unset, players get
+    /// no packs.
+    pack_url_prefix: Option<String>,
     /// The Java executable every release's JVMs run with.
     java: PathBuf,
     bind: SocketAddr,
@@ -116,7 +121,7 @@ pub(crate) async fn run(options: Options) -> io::Result<()> {
                 Ok(())
             })
         };
-        let result = serve(options, interactive, reporter, requests, stop).await;
+        let result = Box::pin(serve(options, interactive, reporter, requests, stop)).await;
         finished.cancel();
         let shown = ui.await.map_err(io::Error::other)?;
         result.and(shown)
@@ -151,10 +156,15 @@ async fn serve(
     reporter.done("Build", format!("{} · release {}", report::seconds(started.elapsed()), short(&built.release.id)));
     let required = built.java.version;
     reporter.running("Java", format!("Checking Java {required}+"));
-    let staged = stage(&project, built, options.java.as_deref(), &stop).await?;
+    let assets = built.asset_store.clone();
+    // Dev serves no packs yet.
+    let pack_url_prefix = None;
+    let staged = stage(&project, built, options.java.as_deref(), pack_url_prefix.as_deref(), &stop).await?;
     reporter.done("Java", format!("{required}+ · {}", staged.java.display()));
     let settings = Settings {
         state,
+        assets,
+        pack_url_prefix,
         java: staged.java.clone(),
         bind: options.bind,
         control_bind: options.control_bind,
@@ -180,11 +190,13 @@ fn force_exit() -> ! {
     std::process::exit(130);
 }
 
-/// Checks the release's Java requirement and projects it into a control release.
+/// Checks the release's Java requirement and projects it into a control release, which pins the asset revision built
+/// with it and serves its packs from `pack_url_prefix`.
 async fn stage(
     project: &building::Project,
     built: building::Built,
     java: Option<&Path>,
+    pack_url_prefix: Option<&str>,
     stop: &CancellationToken,
 ) -> io::Result<Staged> {
     let java = java.map_or_else(|| Ok(built.java.executable), std::path::absolute)?;
@@ -212,7 +224,17 @@ async fn stage(
         session_configurations: contracts.session_configurations,
         destinations: contracts.destinations,
     };
+    let declared: Declared = chunk_service::read(&built.release.directory.join("release.json"))?;
+    let prefix = pack_url_prefix.map(str::to_owned);
+    control.assets = chunk_control::DeploymentAssets::new(built.assets, declared.assets, prefix);
     Ok(Staged { release: built.release, java, control, bundle, secrets })
+}
+
+/// What a published release declares of the asset revision deployed with it.
+#[derive(serde::Deserialize)]
+struct Declared {
+    #[serde(default)]
+    assets: chunk_contract::AssetContract,
 }
 
 fn project_summary(project: &building::Project) -> String {
@@ -263,6 +285,7 @@ fn control_config(
         .collect();
     Ok(chunk_control::Release {
         contracts: chunk_control::Contracts::default(),
+        assets: chunk_control::DeploymentAssets::default(),
         apps: apps.iter().map(|app| (app.id.clone(), app.clone())).collect(),
         deployment: chunk_proto::control::v1::DeploymentRef {
             environment: local.environment.clone(),

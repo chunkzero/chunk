@@ -16,9 +16,10 @@ fn release(id: &str, jar: &str) -> Release {
 #[test]
 fn identical_jars_make_a_backend_only_reload() {
     let current = release("a", "jar-1");
-    assert_eq!(classify(&current, &release("a", "jar-1")), Change::Unchanged);
-    assert_eq!(classify(&current, &release("b", "jar-1")), Change::Backend);
-    assert_eq!(classify(&current, &release("c", "jar-2")), Change::Jvm);
+    assert_eq!(classify((&current, "assets"), (&release("a", "jar-1"), "assets")), Change::Unchanged);
+    assert_eq!(classify((&current, "assets"), (&release("b", "jar-1"), "assets")), Change::Backend);
+    assert_eq!(classify((&current, "assets"), (&release("c", "jar-2"), "assets")), Change::Jvm);
+    assert_eq!(classify((&current, "assets"), (&release("a", "jar-1"), "changed")), Change::Jvm);
 }
 
 #[test]
