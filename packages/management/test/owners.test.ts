@@ -4,9 +4,11 @@ import { Code } from "@connectrpc/connect";
 
 import { tokenAuthenticator } from "../src/auth/tokens.ts";
 import { AuthService } from "../src/gen/chunk/management/v1/auth_pb.ts";
+import { DeploymentService } from "../src/gen/chunk/management/v1/deployments_pb.ts";
+import { DomainService } from "../src/gen/chunk/management/v1/domains_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import type { Identity, Owner } from "../src/rpc/caller.ts";
-import { codeOf, databaseUrl, type Harness, startHarness } from "./harness.ts";
+import { codeOf, databaseUrl, deployRelease, type Harness, startHarness } from "./harness.ts";
 
 const teamA: Owner = { id: "team-a", displayName: "Team A" };
 const teamB: Owner = { id: "team-b", displayName: "Team B" };
@@ -20,6 +22,7 @@ const person = (id: string, owners: Owner[]): Identity => ({
 const people = new Map([
   ["alice", person("alice", [teamA])],
   ["bob", person("bob", [teamA, teamB])],
+  ["nobody", person("nobody", [])],
 ]);
 
 describe.skipIf(!databaseUrl)("owners", () => {
@@ -61,6 +64,49 @@ describe.skipIf(!databaseUrl)("owners", () => {
 
     const principal = await h.client(AuthService, "alice").getCurrentPrincipal({});
     expect(principal.owners.map(({ id, displayName }) => ({ id, displayName }))).toEqual([teamA]);
+  });
+
+  test("lookups by deployment, domain or token project hide other owners' projects", async () => {
+    const projectId = (await createProject(h.operatorToken, "hidden", teamB.id)).project?.id ?? "";
+    const { environment } = await h
+      .client(ProjectService)
+      .createEnvironment({ requestId: crypto.randomUUID(), projectId, name: "main" });
+    const environmentId = environment?.id ?? "";
+    const deploymentId = await deployRelease(h, projectId, environmentId, "hidden-1");
+    const { domain } = await h.client(DomainService).addDomain({ environmentId, hostname: "play.hidden.example" });
+    const domainId = domain?.id ?? "";
+
+    // Alice reaches only another owner; nobody reaches none.
+    for (const token of ["alice", "nobody"]) {
+      expect(await codeOf(h.client(DeploymentService, token).getDeployment({ deploymentId }))).toBe(Code.NotFound);
+      const domains = h.client(DomainService, token);
+      expect(await codeOf(domains.verifyDomain({ domainId }))).toBe(Code.NotFound);
+      await domains.removeDomain({ domainId });
+      const created = h
+        .client(AuthService, token)
+        .createToken({ requestId: crypto.randomUUID(), name: "ci", projectId });
+      expect(await codeOf(created)).toBe(Code.NotFound);
+    }
+    expect((await h.client(DomainService).listDomains({ environmentId })).domains.map((d) => d.id)).toEqual([domainId]);
+  });
+
+  test("a replay answers only while the caller still reaches the project's owner", async () => {
+    people.set("carol", person("carol", [teamA]));
+    const projects = h.client(ProjectService, "carol");
+    const auth = h.client(AuthService, "carol");
+    const projectRequest = { requestId: crypto.randomUUID(), name: "replayed", ownerId: "" };
+    const project = (await projects.createProject(projectRequest)).project;
+    const tokenRequest = { requestId: crypto.randomUUID(), name: "ci", projectId: project?.id ?? "" };
+    const { secret } = await auth.createToken(tokenRequest);
+
+    // A second owner leaves the one the project defaulted to reachable.
+    people.set("carol", person("carol", [teamA, teamB]));
+    expect((await projects.createProject(projectRequest)).project?.id).toBe(project?.id ?? "");
+    expect((await auth.createToken(tokenRequest)).secret).toBe(secret);
+
+    people.set("carol", person("carol", [teamB]));
+    expect(await codeOf(projects.createProject(projectRequest))).toBe(Code.NotFound);
+    expect(await codeOf(auth.createToken(tokenRequest))).toBe(Code.NotFound);
   });
 
   test("a new project defaults to the caller's only owner and must be one of its owners", async () => {

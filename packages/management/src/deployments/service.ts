@@ -36,7 +36,7 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
           deps.jvmImage,
           request.stopPrevious,
         );
-        return create(DeployResponseSchema, { deployment });
+        return { response: create(DeployResponseSchema, { deployment }), projectId: environment.project_id };
       });
     },
 
@@ -66,7 +66,7 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
           DeploymentTrigger.PROMOTE,
           deps.jvmImage,
         );
-        return create(PromoteResponseSchema, { deployment });
+        return { response: create(PromoteResponseSchema, { deployment }), projectId: target.project_id };
       });
     },
 
@@ -99,7 +99,7 @@ export function deploymentService(deps: Deps): Partial<ServiceImpl<typeof Deploy
           DeploymentTrigger.ROLLBACK,
           deps.jvmImage,
         );
-        return create(RollbackResponseSchema, { deployment });
+        return { response: create(RollbackResponseSchema, { deployment }), projectId: environment.project_id };
       });
     },
 

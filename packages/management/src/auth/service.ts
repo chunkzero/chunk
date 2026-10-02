@@ -152,7 +152,7 @@ export function authService(
             projectId,
             expireTime,
           });
-          return create(CreateTokenResponseSchema, { token: toToken(row), secret });
+          return { response: create(CreateTokenResponseSchema, { token: toToken(row), secret }), projectId };
         },
       );
     },

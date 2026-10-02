@@ -15,6 +15,13 @@
       "when": 1790899767536,
       "tag": "0001_seed",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790901999022,
+      "tag": "0002_idempotent_project",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "idempotent_requests" ADD COLUMN "project_id" text;

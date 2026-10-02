@@ -41,9 +41,12 @@ export interface Extensions {
    */
   authenticator?: (tokens: Authenticator, deps: Deps) => Authenticator;
   /**
-   * Ways to sign in that the dashboard offers above its API token form, each a link to `url` with a `return` query
-   * parameter naming the dashboard path to come back to. The flow ends by redirecting to the dashboard's
-   * `/signed-in?return=<that path>#token=<API token>`, which checks the token, keeps it for the tab and goes back.
+   * Ways to sign in that the dashboard offers above its API token form, each a link to `url` with `return` and `state`
+   * query parameters: the dashboard path to come back to, and a single-use value binding the flow to the browser tab
+   * that started it. The flow ends by redirecting to the dashboard's
+   * `/signed-in?return=<return>#token=<API token>&state=<state>`, echoing `state` unchanged; the dashboard refuses a
+   * token whose `state` it didn't hand out, so no other site can sign a person in to someone else's account. It then
+   * checks the token, keeps it for the tab and goes back.
    */
   signInOptions?: readonly { label: string; url: string }[];
   /**

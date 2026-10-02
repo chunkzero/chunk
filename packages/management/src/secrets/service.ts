@@ -88,7 +88,10 @@ export function secretService({ db, keys }: Deps): Partial<ServiceImpl<typeof Se
           })
           .returning(secretColumns);
         await advanceRevision(tx, environment.id);
-        return create(SetSecretResponseSchema, { secret: row && toSecret(row) });
+        return {
+          response: create(SetSecretResponseSchema, { secret: row && toSecret(row) }),
+          projectId: environment.project_id,
+        };
       });
     },
 

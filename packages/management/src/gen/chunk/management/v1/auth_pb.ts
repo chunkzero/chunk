@@ -483,8 +483,9 @@ export type SignInOption = Message<"chunk.management.v1.SignInOption"> & {
   label: string;
 
   /**
-   * Where the button leads. The dashboard adds a `return` query parameter
-   * naming the page to come back to.
+   * Where the button leads. The dashboard adds `return` and `state` query
+   * parameters: the page to come back to, and a single-use value the flow
+   * must echo back to `/signed-in` with the token.
    *
    * @generated from field: string url = 2;
    */

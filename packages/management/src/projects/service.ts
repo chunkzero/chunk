@@ -31,15 +31,17 @@ export function projectService(deps: Deps): Partial<ServiceImpl<typeof ProjectSe
         throw new ConnectError("a project token cannot create projects", Code.PermissionDenied);
       }
       const name = slug(request.name, "name");
-      const ownerId = ownerFor(caller, request.ownerId);
       return idempotent({ db, keys, caller, method: ProjectService.method.createProject, request }, async (tx) => {
+        // Chosen only when creating, so a replay holds as long as the caller reaches the owner first chosen.
+        const ownerId = ownerFor(caller, request.ownerId);
         const [row] = await unique("a project with this name already exists", () =>
           tx
             .insert(projects)
             .values({ id: newId("prj"), owner_id: ownerId, name })
             .returning(),
         );
-        return create(CreateProjectResponseSchema, { project: row && toProject(row) });
+        if (!row) throw new Error("project insert returned no row");
+        return { response: create(CreateProjectResponseSchema, { project: toProject(row) }), projectId: row.id };
       });
     },
 
@@ -88,7 +90,10 @@ export function projectService(deps: Deps): Partial<ServiceImpl<typeof ProjectSe
             .returning(),
         );
         await notify(tx, { kind: "environment", environmentId: id });
-        return create(CreateEnvironmentResponseSchema, { environment: row && toEnvironment(row, edge) });
+        return {
+          response: create(CreateEnvironmentResponseSchema, { environment: row && toEnvironment(row, edge) }),
+          projectId: project.id,
+        };
       });
     },
 

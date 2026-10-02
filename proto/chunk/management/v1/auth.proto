@@ -148,7 +148,8 @@ message GetSignInOptionsResponse {
 message SignInOption {
   // The button's text, such as "Continue with Example".
   string label = 1;
-  // Where the button leads. The dashboard adds a `return` query parameter
-  // naming the page to come back to.
+  // Where the button leads. The dashboard adds `return` and `state` query
+  // parameters: the page to come back to, and a single-use value the flow
+  // must echo back to `/signed-in` with the token.
   string url = 2;
 }
