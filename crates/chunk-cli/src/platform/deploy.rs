@@ -19,7 +19,7 @@ use chunk_management::{
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 
-use super::{EnvironmentArgs, Session, api_error, resources::request_id, secrets};
+use super::{EnvironmentArgs, Session, api_error, assets, resources::request_id, secrets};
 use crate::building::{self, BuildMode, progress::Progress};
 
 #[derive(clap::Args)]
@@ -69,7 +69,8 @@ pub(super) async fn run(options: Options) -> io::Result<()> {
         let deployment = tokio::select! {
             deployment = async {
                 upload(client, &project.id, &release, archive).await?;
-                deploy(client, &environment, &release, options.stop_previous).await
+                assets::upload_revision(client, &project.id, &built.assets, &built.asset_store).await?;
+                deploy(client, &environment, &release, &built.assets.id(), options.stop_previous).await
             } => deployment?,
             () = stop.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "deploy stopped")),
         };
@@ -110,7 +111,7 @@ pub(super) async fn rollback(options: Rollback) -> io::Result<()> {
 }
 
 /// Follows the deployment until `stop`, which leaves it running.
-async fn follow_until_stopped(
+pub(super) async fn follow_until_stopped(
     client: &Client,
     environment: &Environment,
     deployment: Deployment,
@@ -181,10 +182,11 @@ async fn warn_missing_secrets(client: &Client, environment: &Environment, releas
 }
 
 /// Deploys once however often an unreachable platform makes it retry, by reusing one request ID.
-async fn deploy(
+pub(super) async fn deploy(
     client: &Client,
     environment: &Environment,
     release_id: &str,
+    asset_revision_id: &str,
     stop_previous: bool,
 ) -> io::Result<Deployment> {
     let request = DeployRequest {
@@ -192,7 +194,7 @@ async fn deploy(
         environment_id: environment.id.clone(),
         release_id: release_id.into(),
         stop_previous,
-        asset_revision_id: String::new(),
+        asset_revision_id: asset_revision_id.into(),
     };
     let response = retry(|| client.deploy(&request)).await?;
     response.deployment.ok_or_else(|| io::Error::other("Deploy returned no deployment"))
@@ -261,11 +263,11 @@ async fn follow(client: &Client, environment: &Environment, mut deployment: Depl
     }
 }
 
-fn short(release_id: &str) -> &str {
+pub(super) fn short(release_id: &str) -> &str {
     release_id.get(..12).unwrap_or(release_id)
 }
 
-fn mebibytes(bytes: u64) -> String {
+pub(super) fn mebibytes(bytes: u64) -> String {
     const MIB: u64 = 1024 * 1024;
     format!("{}.{} MiB", bytes / MIB, bytes % MIB * 10 / MIB)
 }
