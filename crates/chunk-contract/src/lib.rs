@@ -6,6 +6,12 @@
 mod app;
 pub use app::{AppArtifact, SessionDeclaration, class_name};
 
+mod assets;
+pub use assets::{
+    ASSET_REVISION_VERSION, AppAssets, AssetBlob, AssetContract, AssetRevision, MAX_ASSET_ENTRIES, MAX_FILE_BYTES,
+    MAX_PACK_BYTES, MAX_REVISION_BYTES, MAX_WORLD_BYTES, PackBlob, PackDeclaration, ResolvedPack, pack_id,
+};
+
 mod commands;
 mod connections;
 pub use commands::{

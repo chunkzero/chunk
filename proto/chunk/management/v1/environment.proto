@@ -123,6 +123,12 @@ message AttachResponse {
   DrainSettings drain = 11;
   // Stop the deployments that deployment_id replaces at once instead of draining them, as its deploy asked.
   bool stop_previous = 12;
+  // The asset revision deployment_id pins; unset with the release.
+  AssetArtifact assets = 13;
+  // Where players' clients download the environment's resource packs: this
+  // prefix followed by a pack's lowercase hex SHA-256. It stays valid while
+  // the environment exists, and needs no other credentials.
+  string pack_url_prefix = 14;
 }
 
 // A release archive (`dist/<id>.tar.gz` from `chunk build`) to download.
@@ -134,6 +140,19 @@ message ReleaseArtifact {
   // Hex SHA-256 of the archive bytes.
   string sha256 = 3;
   uint64 size_bytes = 4;
+}
+
+// An asset revision to download, blob by blob.
+message AssetArtifact {
+  // The lowercase hex SHA-256 of `manifest`.
+  string revision_id = 1;
+  // The revision's canonical JSON manifest.
+  bytes manifest = 2;
+  // Fetch a blob with HTTP GET at this prefix followed by its lowercase hex
+  // SHA-256, sending the environment's bearer token. Only blobs of revisions
+  // the environment's deployments pin are served; the response may redirect to
+  // a presigned URL.
+  string blob_url_prefix = 3;
 }
 
 message SecretValue {

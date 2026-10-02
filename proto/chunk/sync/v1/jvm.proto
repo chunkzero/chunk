@@ -268,6 +268,10 @@ message JvmHealth {
 //   changes nothing, and a chunk while another runs gets OVERLOADED. Core installs the cache once the last chunk
 //   matches the declared size and digest. Any other chunk fails with INVALID, and ends the recording as `abandon`
 //   does. Once the recording ended, or for a host core didn't tell to record, it fails with DENIED.
+// - `chunk:asset-read` takes JvmAssetRead and returns JvmArchiveChunk like `chunk:archive`, but reads one blob of the
+//   asset revision JvmLaunch's `assets` names, which must be one the host's app reads: its worlds and files and the
+//   shared files. Any other blob is DENIED. It shares `chunk:archive`'s one-read-at-a-time limit. The runner checks
+//   each whole blob against its size and digest, and fetches every one before it starts the JVM.
 
 // Arguments of `chunk:launch` and the runner's identity: a random ID the runner makes up once per boot, 1 to 128 bytes.
 message JvmBoot {
@@ -305,6 +309,26 @@ message JvmLaunch {
   // The environment's name, which selects the `[env.<name>.vars]` the app's generated `Vars` read. The runner passes it
   // to the JVM as `CHUNK_ENVIRONMENT_NAME`; empty when core serves no named environment.
   string environment_name = 11;
+  // The asset revision the deployment pins, whose app assets the runner fetches with `chunk:asset-read` and passes to
+  // the JVM as the directory `CHUNK_ASSETS`.
+  JvmAssets assets = 12;
+}
+
+message JvmAssets {
+  // The lowercase hex SHA-256 of `manifest`.
+  string revision_id = 1;
+  // The revision's canonical JSON manifest.
+  bytes manifest = 2;
+}
+
+// Arguments of `chunk:asset-read`.
+message JvmAssetRead {
+  // The boot bound to the host.
+  string boot = 1;
+  // The blob's lowercase hex SHA-256.
+  string sha256 = 2;
+  // Where the chunk starts in the blob.
+  uint64 offset = 3;
 }
 
 // The AOT cache core keeps for a host's release, app and runtime: its size and SHA-256 digest in lowercase hex.
