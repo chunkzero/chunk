@@ -3,64 +3,76 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as Tokens;
 use quote::quote;
-use syn::{Data, DeriveInput, Fields, Index, LitInt, Path, parse_macro_input, parse_quote};
+use syn::{Data, DataStruct, DeriveInput, Fields, Generics, Index, LitInt, Path, parse_macro_input, parse_quote};
 
 #[proc_macro_derive(Encode)]
 pub fn encode(input: TokenStream) -> TokenStream {
-    codec(&parse_macro_input!(input as DeriveInput), true).unwrap_or_else(syn::Error::into_compile_error).into()
+    encode_impl(&parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
 #[proc_macro_derive(Decode)]
 pub fn decode(input: TokenStream) -> TokenStream {
-    codec(&parse_macro_input!(input as DeriveInput), false).unwrap_or_else(syn::Error::into_compile_error).into()
+    decode_impl(&parse_macro_input!(input as DeriveInput)).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-fn codec(input: &DeriveInput, encoding: bool) -> syn::Result<Tokens> {
-    let Data::Struct(data) = &input.data else {
-        return Err(syn::Error::new_spanned(input, "codec derives support structs only"));
-    };
-    let name = &input.ident;
+fn struct_data(input: &DeriveInput) -> syn::Result<&DataStruct> {
+    match &input.data {
+        Data::Struct(data) => Ok(data),
+        _ => Err(syn::Error::new_spanned(input, "codec derives support structs only")),
+    }
+}
+
+/// The input's generics with every field type bounded by `bound`.
+fn bounded(input: &DeriveInput, data: &DataStruct, bound: &Path) -> Generics {
     let mut generics = input.generics.clone();
-    let bound: Path =
-        if encoding { parse_quote!(::chunk_protocol::Encode) } else { parse_quote!(::chunk_protocol::Decode) };
     for field in &data.fields {
         let ty = &field.ty;
         generics.make_where_clause().predicates.push(parse_quote!(#ty: #bound));
     }
+    generics
+}
+
+fn encode_impl(input: &DeriveInput) -> syn::Result<Tokens> {
+    let data = struct_data(input)?;
+    let name = &input.ident;
+    let generics = bounded(input, data, &parse_quote!(::chunk_protocol::Encode));
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-    if encoding {
-        let fields = data.fields.iter().enumerate().map(|(index, field)| {
-            let member =
-                field.ident.clone().map_or_else(|| syn::Member::Unnamed(Index::from(index)), syn::Member::Named);
-            quote!(::chunk_protocol::Encode::encode(&self.#member, output)?;)
-        });
-        Ok(quote! {
-            impl #impl_generics ::chunk_protocol::Encode for #name #ty_generics #where_clause {
-                fn encode(&self, output: &mut ::std::vec::Vec<u8>) -> ::chunk_protocol::Result<()> {
-                    #(#fields)*
-                    Ok(())
-                }
+    let fields = data.fields.iter().enumerate().map(|(index, field)| {
+        let member = field.ident.clone().map_or_else(|| syn::Member::Unnamed(Index::from(index)), syn::Member::Named);
+        quote!(::chunk_protocol::Encode::encode(&self.#member, output)?;)
+    });
+    Ok(quote! {
+        impl #impl_generics ::chunk_protocol::Encode for #name #ty_generics #where_clause {
+            fn encode(&self, output: &mut ::std::vec::Vec<u8>) -> ::chunk_protocol::Result<()> {
+                #(#fields)*
+                Ok(())
             }
-        })
-    } else {
-        let fields = data.fields.iter().map(|field| {
-            let ty = &field.ty;
-            let value = quote!(<#ty as ::chunk_protocol::Decode>::decode(input)?);
-            field.ident.as_ref().map_or_else(|| value.clone(), |name| quote!(#name: #value))
-        });
-        let value = match &data.fields {
-            Fields::Named(_) => quote!(Self { #(#fields),* }),
-            Fields::Unnamed(_) => quote!(Self(#(#fields),*)),
-            Fields::Unit => quote!(Self),
-        };
-        Ok(quote! {
-            impl #impl_generics ::chunk_protocol::Decode for #name #ty_generics #where_clause {
-                fn decode(input: &mut &[u8]) -> ::chunk_protocol::Result<Self> {
-                    Ok(#value)
-                }
+        }
+    })
+}
+
+fn decode_impl(input: &DeriveInput) -> syn::Result<Tokens> {
+    let data = struct_data(input)?;
+    let name = &input.ident;
+    let generics = bounded(input, data, &parse_quote!(::chunk_protocol::Decode));
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let fields = data.fields.iter().map(|field| {
+        let ty = &field.ty;
+        let value = quote!(<#ty as ::chunk_protocol::Decode>::decode(input)?);
+        field.ident.as_ref().map_or_else(|| value.clone(), |name| quote!(#name: #value))
+    });
+    let value = match &data.fields {
+        Fields::Named(_) => quote!(Self { #(#fields),* }),
+        Fields::Unnamed(_) => quote!(Self(#(#fields),*)),
+        Fields::Unit => quote!(Self),
+    };
+    Ok(quote! {
+        impl #impl_generics ::chunk_protocol::Decode for #name #ty_generics #where_clause {
+            fn decode(input: &mut &[u8]) -> ::chunk_protocol::Result<Self> {
+                Ok(#value)
             }
-        })
-    }
+        }
+    })
 }
 
 /// Declares `#[packet(id = 0x00, state = Status, direction = Serverbound)]`.

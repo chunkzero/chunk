@@ -3,12 +3,14 @@ use std::{collections::BTreeMap, fmt::Write, io};
 use chunk_contract::{DOMAIN_MANIFEST_VERSION, DomainManifest};
 
 use super::{error, sources::Source};
-use crate::project::Inventory;
+use crate::project::{Inventory, authoring::Module};
 use crate::quote;
 
 struct Descriptors {
     kind: &'static str,
     module: &'static str,
+    binding_prefix: &'static str,
+    names: fn(&Module) -> &[String],
     metadata: Vec<String>,
 }
 
@@ -30,11 +32,22 @@ impl DomainEntries {
         });
         Self {
             manifest,
-            descriptors: [("Hook", "hooks"), ("Command", "commands")].map(|(kind, module)| Descriptors {
-                kind,
-                module,
-                metadata: Vec::new(),
-            }),
+            descriptors: [
+                Descriptors {
+                    kind: "Hook",
+                    module: "hooks",
+                    binding_prefix: "h",
+                    names: |module| &module.hooks,
+                    metadata: Vec::new(),
+                },
+                Descriptors {
+                    kind: "Command",
+                    module: "commands",
+                    binding_prefix: "c",
+                    names: |module| &module.commands,
+                    metadata: Vec::new(),
+                },
+            ],
             bound: Vec::new(),
             unbound: Vec::new(),
         }
@@ -78,12 +91,7 @@ impl DomainEntries {
         Ok(())
     }
 
-    pub(super) fn add_authored(
-        &mut self,
-        module: &crate::project::authoring::Module,
-        value: &str,
-        source: &mut String,
-    ) -> io::Result<()> {
+    pub(super) fn add_authored(&mut self, module: &Module, value: &str, source: &mut String) -> io::Result<()> {
         let predicate = if module.app { "isApp" } else { "isScope" };
         writeln!(
             source,
@@ -92,14 +100,9 @@ impl DomainEntries {
         )
         .map_err(error)?;
         for descriptors in &mut self.descriptors {
-            let names = if descriptors.module == "hooks" { &module.hooks } else { &module.commands };
-            for name in names {
+            for name in (descriptors.names)(module) {
                 let id = format!("{}/{}/{}", module.namespace, descriptors.module, name);
-                let binding = format!(
-                    "a{}_{}",
-                    if descriptors.module == "hooks" { "h" } else { "c" },
-                    descriptors.metadata.len()
-                );
+                let binding = format!("a{}_{}", descriptors.binding_prefix, descriptors.metadata.len());
                 let descriptor = format!("{value}.{}[{}]", descriptors.module, quote(name));
                 let kind = descriptors.kind;
                 writeln!(

@@ -344,19 +344,19 @@ impl Actor {
             Command::Release { id, reply } => self.start_release(id, reply),
             Command::CheckDeployment { id, reply } => reply.finish(self.check_deployment(&id)),
             Command::Deployments { reply } => reply.finish(Ok(self.installed.clone())),
-            Command::Query { mut call, reply } => match self.normalize_call(&mut call) {
+            Command::Query { mut call, reply } => match self.normalize_scoped_call(&mut call, false) {
                 Ok(()) => self.query(call, reply),
                 Err(error) => reply.finish(Err(error)),
             },
             Command::Mutate { operation, mut call, reply } => {
                 reply.queued.stop(Phase::Queue);
-                match self.normalize_call(&mut call) {
+                match self.normalize_scoped_call(&mut call, false) {
                     Ok(()) => self.mutate(operation, call, reply),
                     Err(error) => reply.finish(Err(error)),
                 }
             }
             Command::Subscribe { mut calls, reply } => {
-                match calls.iter_mut().try_for_each(|call| self.normalize_call(call)) {
+                match calls.iter_mut().try_for_each(|call| self.normalize_scoped_call(call, false)) {
                     Ok(()) => self.subscribe(calls, reply),
                     Err(error) => reply.finish(Err(error)),
                 }
@@ -375,10 +375,6 @@ impl Actor {
             return Err(Error::NotReady);
         }
         self.versions.get(id).ok_or(Error::Unknown).map(|_| ())
-    }
-
-    fn normalize_call(&self, call: &mut Call) -> Result<()> {
-        self.normalize_scoped_call(call, false)
     }
 
     fn normalize_scoped_call(&self, call: &mut Call, internal: bool) -> Result<()> {

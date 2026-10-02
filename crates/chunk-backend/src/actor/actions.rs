@@ -592,7 +592,7 @@ impl Actor {
                 return;
             }
         }
-        if let Err(error) = call.validate().and_then(|()| self.normalize_scoped_call(&mut call, true)) {
+        if let Err(error) = call.validate_limit(256).and_then(|()| self.normalize_scoped_call(&mut call, true)) {
             reply.finish(Err(error));
             return;
         }

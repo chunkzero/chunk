@@ -2,17 +2,13 @@ use super::*;
 
 #[test]
 fn invalid_declarations_are_rejected() {
-    assert!(
-        codec(
-            &parse_quote!(
-                enum Invalid {
-                    A,
-                }
-            ),
-            true
-        )
-        .is_err()
+    let invalid = parse_quote!(
+        enum Invalid {
+            A,
+        }
     );
+    assert!(encode_impl(&invalid).is_err());
+    assert!(decode_impl(&invalid).is_err());
     for input in [
         parse_quote!(
             struct Missing;

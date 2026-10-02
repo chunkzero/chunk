@@ -40,10 +40,6 @@ pub struct Call {
 }
 
 impl Call {
-    pub(crate) fn validate(&self) -> Result<()> {
-        self.validate_limit(256)
-    }
-
     /// Input bytes a request for this call charges against admission.
     pub(crate) fn bytes(&self) -> usize {
         self.function.len() + self.arguments.as_str().len() + self.caller.as_str().len()
@@ -762,7 +758,7 @@ impl Backend {
     /// Rejects unknown identities, mismatched requests, inaccessible functions or
     /// exhausted capacity. Dropping an acceptance future cancels its scope.
     pub async fn start_action(&self, id: ActionId, call: Call) -> Result<ActionHandle> {
-        call.validate()?;
+        call.validate_limit(256)?;
         let bytes = id.incarnation.len() + call.bytes();
         self.submit_sized(bytes, |reply| Command::StartAction {
             purpose: crate::commands::Purpose::Function,
@@ -874,7 +870,7 @@ impl Backend {
     /// # Errors
     /// Reports admission, execution, cancellation and persistence failures.
     pub async fn query(&self, call: Call) -> Result<Update> {
-        call.validate()?;
+        call.validate_limit(256)?;
         self.submit_sized(call.bytes(), |reply| Command::Query { call, reply }).await
     }
 
@@ -884,7 +880,7 @@ impl Backend {
     /// Reports mismatched identities, admission, execution and commit failures.
     pub async fn mutate(&self, operation: String, call: Call) -> Result<Update> {
         validate_operation(&operation)?;
-        call.validate()?;
+        call.validate_limit(256)?;
         let bytes = operation.len() + call.bytes();
         self.submit_sized(bytes, |reply| Command::Mutate { operation, call, reply }).await
     }
@@ -907,7 +903,7 @@ impl Backend {
         }
         let mut input = 0;
         for call in &calls {
-            call.validate()?;
+            call.validate_limit(256)?;
             input += call.arguments.as_str().len() + call.caller.as_str().len();
         }
         if input > 1024 * 1024 {
