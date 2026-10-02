@@ -41,6 +41,10 @@ tokio = { version = "1", features = ["io-util", "net", "rt", "macros", "sync", "
 tracing = "0.1"
 ipnet = "2"
 
+# macOS and Windows have no system OpenSSL to link, so `chunk` builds there carry their own.
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+openssl = { version = "0.10", features = ["vendored"], optional = true }
+
 [dev-dependencies]
 chunk-backend = { path = "../chunk-backend" }
 chunk-store = { path = "../chunk-store" }

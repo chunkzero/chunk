@@ -76,6 +76,10 @@ jobs:
       - name: Install the pinned TypeScript compiler
         run: pnpm install --frozen-lockfile --filter chunk-monorepo
       - run: rustup toolchain install --no-self-update
+      - name: Configure the vendored OpenSSL with Strawberry Perl
+        if: runner.os == 'Windows'
+        # Git's MSYS Perl, first on the bash PATH, cannot configure OpenSSL for MSVC.
+        run: echo 'OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe' >> "$GITHUB_ENV"
       - run: cargo build --release --locked -p chunk-cli
       - run: python scripts/package-sdk.py --no-maven --output dist
       - name: Compile and type-check a project with the extracted CLI

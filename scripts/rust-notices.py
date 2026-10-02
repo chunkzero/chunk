@@ -50,7 +50,11 @@ EXCLUDED = {
     "self_cell": ["LICENSE-GPLv2"],
     "libsqlite3-sys": ["sqlcipher/*"],
     "v8": ["*/*"],  # licenses/v8.txt covers the bundled V8 sources.
+    # Vendored build tooling, tests and the openssl command, none of which libssl or libcrypto link.
+    "openssl-src": ["openssl/external/*", "openssl/test/*", "openssl/apps/*", "openssl/demos/*"],
 }
+# Build dependencies whose sources a build script compiles into `chunk`.
+LINKED_BUILD_CRATES = {"openssl-src"}
 RULE = "=" * 80
 
 RUSTY_V8 = "https://github.com/denoland/rusty_v8"
@@ -177,10 +181,13 @@ def cargo(*args):
 
 
 def shipped_crates(*targets):
-    """Registry packages compiled into `chunk` for any of the targets, excluding build and dev dependencies."""
-    tree = cargo("tree", "-p", "chunk-cli", "-e", "normal", *(f"--target={target}" for target in targets), "--prefix",
-                 "none", "-f", "{p}")
-    linked = {match.groups() for match in map(re.compile(r"(\S+) v(\S+)").match, tree.splitlines()) if match}
+    """Registry packages compiled into `chunk` for any of the targets, excluding build and dev dependencies other than
+    LINKED_BUILD_CRATES."""
+    def tree(edges):
+        output = cargo("tree", "-p", "chunk-cli", "-e", edges, *(f"--target={target}" for target in targets),
+                       "--prefix", "none", "-f", "{p}")
+        return {match.groups() for match in map(re.compile(r"(\S+) v(\S+)").match, output.splitlines()) if match}
+    linked = tree("normal") | {crate for crate in tree("normal,build") if crate[0] in LINKED_BUILD_CRATES}
     packages = json.loads(cargo("metadata", "--format-version", "1"))["packages"]
     return sorted((package for package in packages
                    if package["source"] and (package["name"], package["version"]) in linked),
