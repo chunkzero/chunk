@@ -1,7 +1,10 @@
 //! Shipping core's log lines and usage records to management: at least once, since management drops what it already
 //! holds, and before core may be suspended or once it stops.
 
-use super::{Lease, usage::Usage};
+use super::{
+    Lease,
+    usage::{TICK, Usage},
+};
 use crate::logs::Lines;
 use chunk_management::{Client, v1};
 use std::{
@@ -9,7 +12,10 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
     time::{Duration, SystemTime},
 };
-use tokio::sync::{Notify, watch};
+use tokio::{
+    sync::{Notify, watch},
+    time::MissedTickBehavior,
+};
 
 /// How often buffered lines and records are shipped.
 const INTERVAL: Duration = Duration::from_secs(1);
@@ -33,6 +39,8 @@ pub(crate) struct Telemetry {
     lease: watch::Receiver<Lease>,
     /// Notified to ship at once.
     ship: Notify,
+    /// Reads the wall clock awake time is counted by.
+    clock: Box<dyn Fn() -> SystemTime + Send + Sync>,
 }
 
 impl Telemetry {
@@ -43,7 +51,12 @@ impl Telemetry {
         lease: watch::Receiver<Lease>,
     ) -> Self {
         let usage = Mutex::new(Usage::new(instance_id.clone()));
-        Self { client, instance_id, lines, usage, lease, ship: Notify::new() }
+        Self { client, instance_id, lines, usage, lease, ship: Notify::new(), clock: Box::new(SystemTime::now) }
+    }
+
+    #[cfg(test)]
+    pub(super) fn with_clock(self, clock: impl Fn() -> SystemTime + Send + Sync + 'static) -> Self {
+        Self { clock: Box::new(clock), ..self }
     }
 
     pub(super) fn lines(&self) -> &'static Lines {
@@ -53,7 +66,20 @@ impl Telemetry {
     /// Counts awake time with `players` online while core holds the environment.
     pub(super) fn tick(&self, players: u32) {
         let lease = *self.lease.borrow();
-        self.usage().count(SystemTime::now(), players, lease);
+        self.usage().count((self.clock)(), players, lease);
+    }
+
+    /// Runs `work`, counting awake time with no players online meanwhile, as core stops once its gateway closed.
+    pub(crate) async fn counting<T>(&self, work: impl Future<Output = T>) -> T {
+        let mut tick = tokio::time::interval(TICK);
+        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                output = &mut work => return output,
+                _ = tick.tick() => self.tick(0),
+            }
+        }
     }
 
     /// Whether core may be suspended as far as telemetry goes: every usage record reached management, and no log line
@@ -91,7 +117,7 @@ impl Telemetry {
     /// Ends the usage span and ships what is buffered, within `bound`.
     pub(crate) async fn finish(&self, bound: Duration) {
         let lease = *self.lease.borrow();
-        self.usage().finish(SystemTime::now(), lease);
+        self.usage().finish((self.clock)(), lease);
         match tokio::time::timeout(bound, self.ship_all()).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => tracing::warn!(%error, "logs and usage not shipped before stopping"),

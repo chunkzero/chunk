@@ -6,6 +6,7 @@ use crate::{
     managed::{Lease, telemetry::Telemetry},
 };
 use chunk_management::v1::{LogEntry, LogSeverity, LogSource, ReportLogsRequest, ReportUsageRequest, UsageRecord};
+use std::time::SystemTime;
 
 /// What management holds of the environment's reports, deduplicated by the rules of `packages/management`.
 #[derive(Default)]
@@ -103,4 +104,31 @@ async fn lines_are_shipped_again_until_acknowledged_and_the_oldest_drop_once_the
     let sequences: Vec<_> = later.iter().flatten().map(|entry| entry.sequence).collect();
     let kept = 1_000 - dropped;
     assert_eq!(sequences, (1_004 - kept..1_004).collect::<Vec<_>>());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_slow_shutdown_is_counted_as_awake() {
+    let harness = Harness::new().await;
+    let lines: &'static Lines = Box::leak(Box::new(Lines::new()));
+    let (_lease, held) = watch::channel(Lease::Held(1));
+    let (wall, paused) = (SystemTime::now(), tokio::time::Instant::now());
+    let telemetry = Telemetry::new(harness.management_config().client(), "core-1".into(), lines, held)
+        .with_clock(move || wall + paused.elapsed());
+    telemetry.tick(1);
+    // Twice as long as a gap that would read as a suspend.
+    telemetry.counting(tokio::time::sleep(Duration::from_secs(20))).await;
+    tokio::time::resume();
+    telemetry.finish(Duration::from_secs(5)).await;
+
+    let reports = harness.management.telemetry.lock().unwrap();
+    let spans: Vec<_> = reports
+        .usage
+        .values()
+        .map(|record| {
+            let [start, end] =
+                [record.start_time, record.end_time].map(|time| SystemTime::try_from(time.unwrap()).unwrap());
+            end.duration_since(start).unwrap().as_secs()
+        })
+        .collect();
+    assert_eq!(spans, [20]);
 }
