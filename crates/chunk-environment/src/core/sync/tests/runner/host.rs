@@ -59,8 +59,9 @@ impl Launcher for Machines {
         cancel: &CancellationToken,
     ) -> io::Result<()> {
         let call = Call::Launch { host: id.into(), credential: credential.into(), spec: spec.clone() };
-        self.calls.send_modify(|calls| calls.push(call));
+        // Marked launching before the call is recorded, so a test that awaited the call sees it running.
         self.fleet.send_modify(|fleet| _ = fleet.launching.insert(id.into()));
+        self.calls.send_modify(|calls| calls.push(call));
         let (fleet, creations, host) = (self.fleet.clone(), self.creations.clone(), id.to_owned());
         tokio::spawn(async move {
             let _creating = creations.read().await;
