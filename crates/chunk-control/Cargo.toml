@@ -12,6 +12,7 @@ base64 = "0.22"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 chunk-backend = { path = "../chunk-backend" }
+chunk-build = { path = "../chunk-build", default-features = false }
 chunk-service = { path = "../chunk-service" }
 chunk-contract = { path = "../chunk-contract" }
 chunk-proto = { path = "../chunk-proto" }

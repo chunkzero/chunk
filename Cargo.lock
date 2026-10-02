@@ -662,6 +662,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chunk-backend",
+ "chunk-build",
  "chunk-contract",
  "chunk-proto",
  "chunk-service",
@@ -766,6 +767,7 @@ name = "chunk-jvm"
 version = "0.1.0"
 dependencies = [
  "chunk-build",
+ "chunk-contract",
  "chunk-proto",
  "chunk-service",
  "prost",

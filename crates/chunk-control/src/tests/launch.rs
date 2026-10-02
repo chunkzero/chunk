@@ -116,6 +116,7 @@ fn host_config(directory: &Path, java: PathBuf) -> crate::ProcessHostConfig {
     crate::ProcessHostConfig {
         directory: directory.join("nodes"),
         releases: directory.join("releases"),
+        assets: directory.join("assets"),
         java,
         environment: "test".into(),
         environment_name: None,
