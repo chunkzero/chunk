@@ -29,4 +29,3 @@ dependencyResolutionManagement {
 
 includeBuild("../..") { name = "chunk-platform" }
 rootProject.name = "arena"
-include(":shared")

@@ -34,19 +34,18 @@ In the arena, `/match` shows the score and `/lobby` leaves the match. Stats pers
 
 ## Project layout
 
-| Path                                                        | Contents                                                                                       |
-| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| [`chunk.toml`](chunk.toml)                                  | Local environment: up to four JVMs of 1 GiB, each hosting four sessions                        |
-| [`apps/scope.ts`](apps/scope.ts)                            | The server-list ping and routing every login to the lobby                                      |
-| [`apps/lobby/app.ts`](apps/lobby/app.ts)                    | The `lobby` app and its `main` destination, 50 players per session                             |
-| [`apps/arena/app.ts`](apps/arena/app.ts)                    | The `arena` app: the `koth` implementation with its rules as config, its destination, commands |
-| [`server/schema/index.ts`](server/schema/index.ts)          | The `fighters` table, indexed by player and by rank                                            |
-| [`server/stats.ts`](server/stats.ts)                        | The `recordMatch` mutation and the `leaderboard` and `mine` queries                            |
-| [`server/sessions.ts`](server/sessions.ts)                  | The arena's `status` session method, which `/match` calls                                      |
-| [`shared/`](shared)                                         | Polar world loading for both apps                                                              |
-| [`apps/lobby/src/`](apps/lobby/src/main/java/example/lobby) | The lobby: spawn, the gate, and the leaderboard                                                |
-| [`apps/arena/src/`](apps/arena/src/main/java/example/arena) | The arena: match rules, combat, the boss bar and titles, and recording results                 |
-| `apps/*/src/main/resources/worlds/`                         | The `lobby.polar` and `arena.polar` worlds                                                     |
+| Path                                                        | Contents                                                                                 |
+| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| [`chunk.toml`](chunk.toml)                                  | Local environment: up to four JVMs of 1 GiB, each hosting four sessions                  |
+| [`apps/scope.ts`](apps/scope.ts)                            | The server-list ping and routing every login to the lobby                                |
+| [`apps/lobby/app.ts`](apps/lobby/app.ts)                    | The `lobby` app, its world and its `main` destination, 50 players per session            |
+| [`apps/arena/app.ts`](apps/arena/app.ts)                    | The `arena` app: its world, the `koth` implementation with its rules as config, commands |
+| [`server/schema/index.ts`](server/schema/index.ts)          | The `fighters` table, indexed by player and by rank                                      |
+| [`server/stats.ts`](server/stats.ts)                        | The `recordMatch` mutation and the `leaderboard` and `mine` queries                      |
+| [`server/sessions.ts`](server/sessions.ts)                  | The arena's `status` session method, which `/match` calls                                |
+| [`apps/lobby/src/`](apps/lobby/src/main/java/example/lobby) | The lobby: spawn, the gate, and the leaderboard                                          |
+| [`apps/arena/src/`](apps/arena/src/main/java/example/arena) | The arena: match rules, combat, the boss bar and titles, and recording results           |
+| `apps/*/assets/worlds/`                                     | The `lobby.polar` and `arena.polar` worlds                                               |
 
 ### The Java API
 
@@ -56,8 +55,8 @@ In the arena, `/match` shows the score and `/lobby` leaves the match. Stats pers
   [`ArenaSession`](apps/arena/src/main/java/example/arena/ArenaSession.java) implements the generated
   `SessionMethods.Arena.Koth.Status`.
 - [`LobbyComponents`](apps/lobby/src/main/java/example/lobby/LobbyComponents.java) and
-  [`ArenaComponents`](apps/arena/src/main/java/example/arena/ArenaComponents.java) declare a `PROCESS` component that
-  parses the app's world once per JVM, and a `SESSION` component for the session's `BackendClient`.
+  [`ArenaComponents`](apps/arena/src/main/java/example/arena/ArenaComponents.java) declare a `SESSION` component for the
+  session's `BackendClient`.
 - [`Leaderboard`](apps/lobby/src/main/java/example/lobby/Leaderboard.java) watches `leaderboard` through the session's
   client. [`LobbySession`](apps/lobby/src/main/java/example/lobby/LobbySession.java) binds a client to each joining
   player with `forPlayer` and reads their record with the `mine` query.
@@ -69,11 +68,10 @@ In the arena, `/match` shows the score and `/lobby` leaves the match. Stats pers
 ### Worlds
 
 Both worlds are 100 by 100 blocks of medieval build, stored in [Polar](https://github.com/hollow-cube/polar)'s format.
-`shared/` reads them with Polar's reader and loads them through
-[`PolarLoader`](shared/src/main/java/example/world/PolarLoader.java). That class is Polar 1.16.0's loader, adapted to
-chunk's Minestom, which runs a `ServerProcess` instead of a global server, and trimmed to loading. It is MIT licensed;
-see [`POLAR-LICENSE`](shared/src/main/resources/META-INF/POLAR-LICENSE), which both app JARs carry under `META-INF/`.
-Every session loads its own copy of its app's world, which it discards when it ends.
+Each `app.ts` declares its world under `worlds`, so the world ships with the deployment's assets rather than in the app
+JAR, and the build generates a `Worlds.Lobby.LOBBY` and a `Worlds.Arena.ARENA` handle. Every arena session loads its own
+copy with `Assets.world(Worlds.Arena.ARENA).copy(scope)` and discards it when it ends. The lobby never changes its
+world, so its sessions share one read-only copy per JVM through `shared(scope)`, each with its own entities.
 
 ## Tests
 
