@@ -5,7 +5,7 @@ import type { LogStore } from "../src/config.ts";
 import { desiredState } from "../src/environments/desired.ts";
 import { logStoreIssuer } from "../src/logstore/issuer.ts";
 import { listSnapshots } from "../src/logstore/s3.ts";
-import { signV4 } from "../src/logstore/sigv4.ts";
+import { signV4 } from "../src/logstore/sts.ts";
 import { createEnvironment, databaseUrl, type Harness, startHarness } from "./harness.ts";
 
 test("signV4 matches AWS's documented example", () => {

@@ -1,7 +1,6 @@
 import type { LogStore } from "../config.ts";
 import { deletePrefix } from "./s3.ts";
-import { signV4 } from "./sigv4.ts";
-import { xmlElement } from "./xml.ts";
+import { assumeRole } from "./sts.ts";
 
 /** Object-store access for one environment's log prefix. */
 export interface LogStoreGrant {
@@ -34,8 +33,6 @@ export interface LogStoreIssuer {
 
 /** Credentials are replaced once less than a third of their lifetime, and at most this long, is left. */
 const maxRefreshBeforeMs = 15 * 60 * 1000;
-/** How long an AssumeRole request, its response body included, may take before it fails and is no longer cached. */
-const stsTimeoutMs = 30_000;
 
 export function logStoreIssuer(store: LogStore, fetchImpl: typeof fetch = fetch): LogStoreIssuer {
   return store.sharedCredentials ? sharedIssuer(store) : stsIssuer(store, fetchImpl);
@@ -72,33 +69,22 @@ function stsIssuer(store: LogStore, fetchImpl: typeof fetch): LogStoreIssuer {
   const assume = async (environmentId: string, access: Access) => {
     const issuedAt = Date.now();
     const target = location(store, environmentId);
-    const body = new URLSearchParams({
-      Action: "AssumeRole",
-      Version: "2011-06-15",
-      RoleArn: store.roleArn,
-      RoleSessionName: `chunk-${access === "read" ? "read-" : ""}${environmentId}`.slice(0, 64),
-      DurationSeconds: String(store.credentialSeconds),
-      Policy: JSON.stringify(prefixPolicy(store.bucket, target.prefix, access === "read" ? readActions : writeActions)),
-    }).toString();
-    const url = new URL(store.stsEndpoint);
-    const headers = signV4(
-      { method: "POST", url, headers: { "content-type": "application/x-www-form-urlencoded" }, body },
-      { accessKeyId: store.accessKeyId, secretAccessKey: store.secretAccessKey, region: store.region, service: "sts" },
+    const { expiration, ...credentials } = await assumeRole(
+      {
+        endpoint: store.stsEndpoint,
+        region: store.region,
+        accessKeyId: store.accessKeyId,
+        secretAccessKey: store.secretAccessKey,
+      },
+      {
+        roleArn: store.roleArn,
+        sessionName: `chunk-${access === "read" ? "read-" : ""}${environmentId}`.slice(0, 64),
+        durationSeconds: store.credentialSeconds,
+        policy: prefixPolicy(store.bucket, target.prefix, access === "read" ? readActions : writeActions),
+      },
+      fetchImpl,
     );
-    const response = await fetchImpl(url, { method: "POST", headers, body, signal: AbortSignal.timeout(stsTimeoutMs) });
-    const xml = await response.text();
-    // Only the error's code: a response can echo the request.
-    const code = /<Code>(\w+)<\/Code>/.exec(xml)?.[1];
-    if (!response.ok) throw new Error(`STS AssumeRole failed with HTTP ${response.status}${code ? `: ${code}` : ""}`);
-    const expiration = new Date(element(xml, "Expiration"));
-    if (Number.isNaN(expiration.getTime())) throw new Error("STS AssumeRole returned no expiration");
-    const grant: LogStoreGrant = {
-      ...target,
-      accessKeyId: element(xml, "AccessKeyId"),
-      secretAccessKey: element(xml, "SecretAccessKey"),
-      sessionToken: element(xml, "SessionToken"),
-      expireTime: expiration,
-    };
+    const grant: LogStoreGrant = { ...target, ...credentials, expireTime: expiration };
     const lifetime = expiration.getTime() - issuedAt;
     return { grant, refreshAt: expiration.getTime() - Math.min(maxRefreshBeforeMs, lifetime / 3) };
   };
@@ -161,10 +147,4 @@ export function prefixPolicy(bucket: string, prefix: string, actions = writeActi
       },
     ],
   };
-}
-
-function element(xml: string, name: string): string {
-  const value = xmlElement(xml, name);
-  if (value === undefined) throw new Error(`STS AssumeRole returned no ${name}`);
-  return value;
 }

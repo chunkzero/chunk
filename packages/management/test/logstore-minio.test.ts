@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 
 import { type LogStoreGrant, logStoreIssuer } from "../src/logstore/issuer.ts";
-import { signV4 } from "../src/logstore/sigv4.ts";
+import { signV4 } from "../src/logstore/sts.ts";
 
 /** A MinIO server to run against, for example `cgr.dev/chainguard/minio server /data` with the root user below. */
 const minioUrl = process.env.TEST_MINIO_URL;
