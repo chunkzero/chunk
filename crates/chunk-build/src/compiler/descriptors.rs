@@ -21,9 +21,30 @@ impl Descriptor {
 }
 
 /// Function, session method, destination and app configuration descriptors collected from entry exports.
-pub(super) struct Descriptors([Descriptor; 4]);
+pub(super) struct Descriptors {
+    functions: Descriptor,
+    methods: Descriptor,
+    destinations: Descriptor,
+    configurations: Descriptor,
+}
+
+/// Joined metadata entries for each descriptor kind.
+pub(super) struct Metadata {
+    pub functions: String,
+    pub methods: String,
+    pub destinations: String,
+    pub configurations: String,
+}
 
 impl Descriptors {
+    fn each(&self) -> [&Descriptor; 4] {
+        [&self.functions, &self.methods, &self.destinations, &self.configurations]
+    }
+
+    fn each_mut(&mut self) -> [&mut Descriptor; 4] {
+        [&mut self.functions, &mut self.methods, &mut self.destinations, &mut self.configurations]
+    }
+
     pub(super) fn new(sdk: &Path, source: &mut String) -> io::Result<Self> {
         let descriptor = |kind, sdk, module, export, app| Descriptor {
             kind,
@@ -34,8 +55,8 @@ impl Descriptors {
             metadata: Vec::new(),
             seen: false,
         };
-        let descriptors = Self([
-            descriptor(
+        let descriptors = Self {
+            functions: descriptor(
                 "Function",
                 Some("functions.ts"),
                 None,
@@ -44,14 +65,14 @@ impl Descriptors {
                 }),
                 None,
             ),
-            descriptor(
+            methods: descriptor(
                 "SessionMethod",
                 Some("sessions.ts"),
                 None,
                 Some(|_, value, _| format!("...(isSessionMethod({value}) ? [{value}.contract] : [])")),
                 None,
             ),
-            descriptor(
+            destinations: descriptor(
                 "Destination",
                 Some("destinations.ts"),
                 Some("destinations"),
@@ -64,9 +85,15 @@ impl Descriptors {
                     format!("...appDestinations({value},{defaults})")
                 }),
             ),
-            descriptor("Configuration", None, None, None, Some(|value, _| format!("...appConfigurations({value})"))),
-        ]);
-        for descriptor in &descriptors.0 {
+            configurations: descriptor(
+                "Configuration",
+                None,
+                None,
+                None,
+                Some(|value, _| format!("...appConfigurations({value})")),
+            ),
+        };
+        for descriptor in descriptors.each() {
             if let Some(module) = descriptor.sdk {
                 writeln!(
                     source,
@@ -81,7 +108,7 @@ impl Descriptors {
     }
 
     pub(super) fn add_module(&mut self, entry: &Source<'_>) -> io::Result<()> {
-        for descriptor in &mut self.0 {
+        for descriptor in self.each_mut() {
             if descriptor.owns(entry)
                 && std::mem::replace(&mut descriptor.seen, true)
                 && let Some(module) = descriptor.module
@@ -93,7 +120,7 @@ impl Descriptors {
     }
 
     pub(super) fn add_app(&mut self, value: &str, app: &AppMetadata) {
-        for descriptor in &mut self.0 {
+        for descriptor in self.each_mut() {
             if let Some(entry) = descriptor.app {
                 descriptor.metadata.push(entry(value, app));
             }
@@ -101,7 +128,7 @@ impl Descriptors {
     }
 
     pub(super) fn add_default(&self, entry: &Source<'_>, value: &str, source: &mut String) -> io::Result<()> {
-        for descriptor in self.0.iter().filter(|descriptor| descriptor.module.is_some()) {
+        for descriptor in self.each().into_iter().filter(|descriptor| descriptor.module.is_some()) {
             let kind = descriptor.kind;
             writeln!(
                 source,
@@ -122,7 +149,7 @@ impl Descriptors {
         source: &mut String,
     ) -> io::Result<()> {
         let name = quote(format!("{}/{exported}", entry.namespace));
-        for descriptor in &mut self.0 {
+        for descriptor in self.each_mut() {
             let Some(export) = descriptor.export else { continue };
             match descriptor.module {
                 Some(module) if !descriptor.owns(entry) => {
@@ -143,8 +170,13 @@ impl Descriptors {
         Ok(())
     }
 
-    /// Joined metadata entries in table order: functions, session methods, destinations, configurations.
-    pub(super) fn metadata(self) -> [String; 4] {
-        self.0.map(|descriptor| descriptor.metadata.join(","))
+    pub(super) fn metadata(self) -> Metadata {
+        let join = |descriptor: Descriptor| descriptor.metadata.join(",");
+        Metadata {
+            functions: join(self.functions),
+            methods: join(self.methods),
+            destinations: join(self.destinations),
+            configurations: join(self.configurations),
+        }
     }
 }
