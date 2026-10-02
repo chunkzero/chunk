@@ -1,4 +1,4 @@
-use chunk_proto::sync::v1::{ClaimPhase, Node, NodePhase, OperatorPlayer, SessionDemand};
+use chunk_proto::sync::v1::{ClaimPhase, JvmHealth, Node, NodePhase, OperatorPlayer, SessionDemand};
 use ratatui::{Terminal, backend::TestBackend};
 
 use super::*;
@@ -55,6 +55,36 @@ fn startup_shows_phases_and_output_then_nodes_belong_only_to_jvm() {
     assert!(backend.contains("backend output"));
     assert!(!backend.contains("All nodes"));
     assert!(!backend.contains("5a9e4aba"));
+}
+
+#[test]
+fn stopped_node_header_shows_its_phase_instead_of_its_last_health() {
+    let mut model = Model::new();
+    model.apply(Event::Step { name: "Ready", state: Step::Done("connect".into()) });
+    let health = JvmHealth { players: 3, heap_used_bytes: 512 << 20, heap_max_bytes: 1024 << 20, ..Default::default() };
+    let node = |phase: NodePhase| Node {
+        app: "lobby".into(),
+        phase: phase.into(),
+        health: Some(health),
+        ..Default::default()
+    };
+    let deployments = |phase| {
+        Event::Deployments(vec![Deployment {
+            id: "d87ec655".into(),
+            state: "current".into(),
+            nodes: vec![("5a9e4aba-1234".into(), node(phase))],
+            players: Vec::new(),
+            destinations: Vec::new(),
+        }])
+    };
+    model.apply(deployments(NodePhase::Online));
+    model.move_node(1);
+    assert!(draw(&model, 120, 30).contains("512/1024M heap"));
+
+    model.apply(deployments(NodePhase::Stopped));
+    let stopped = draw(&model, 120, 30);
+    assert!(stopped.contains("stopped"));
+    assert!(!stopped.contains("heap"), "{stopped}");
 }
 
 #[test]

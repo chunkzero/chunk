@@ -81,18 +81,18 @@ fn render_header(frame: &mut Frame, model: &Model, area: Rect) {
                 Span::raw(format!("{} · {}  ", node.app, short(host))).bold(),
                 Span::styled(label(phase), Style::new().fg(color(phase))),
             ]);
-            let health = node.health.as_ref().map_or_else(
-                || "health unavailable".into(),
-                |health| {
-                    format!(
-                        "{} · {}/{}M heap",
-                        count(health.players, "player"),
-                        health.heap_used_bytes >> 20,
-                        health.heap_max_bytes >> 20
-                    )
-                },
-            );
-            (title, format!("{health} · {} · {}", short(&deployment.id), deployment.state))
+            let deployment = format!("{} · {}", short(&deployment.id), deployment.state);
+            let detail = match (phase, &node.health) {
+                (NodePhase::Stopped, _) => deployment,
+                (_, None) => format!("health unavailable · {deployment}"),
+                (_, Some(health)) => format!(
+                    "{} · {}/{}M heap · {deployment}",
+                    count(health.players, "player"),
+                    health.heap_used_bytes >> 20,
+                    health.heap_max_bytes >> 20
+                ),
+            };
+            (title, detail)
         },
     );
     let [heading, metadata] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
