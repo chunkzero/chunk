@@ -60,6 +60,8 @@ pub struct PackBlob {
 
 impl AssetRevision {
     /// The canonical JSON the revision ID digests.
+    /// # Panics
+    /// Never: a revision holds only maps with string keys, which always serialize.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         serde_json::to_vec(self).expect("asset revisions serialize")
@@ -74,7 +76,8 @@ impl AssetRevision {
     /// # Errors
     /// Rejects malformed or invalid revisions and noncanonical JSON, whose digest would not be the revision's ID.
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let revision: Self = serde_json::from_slice(bytes).map_err(|error| format!("invalid asset revision: {error}"))?;
+        let revision: Self =
+            serde_json::from_slice(bytes).map_err(|error| format!("invalid asset revision: {error}"))?;
         revision.validate()?;
         if revision.encode() != bytes {
             return Err("asset revision JSON is not canonical".into());
@@ -199,7 +202,9 @@ impl AssetContract {
         }
         for (app, packs) in &self.app_packs {
             let unique: BTreeSet<_> = packs.iter().collect();
-            if !name_valid(app) || unique.len() != packs.len() || packs.iter().any(|pack| !self.packs.contains_key(pack))
+            if !name_valid(app)
+                || unique.len() != packs.len()
+                || packs.iter().any(|pack| !self.packs.contains_key(pack))
             {
                 return Err(format!("invalid packs of app {app}"));
             }
@@ -251,7 +256,8 @@ impl AssetContract {
 #[must_use]
 pub fn pack_id(name: &str) -> [u8; 16] {
     let digest = Sha256::digest(format!("chunk/pack/{name}"));
-    let mut id: [u8; 16] = digest[..16].try_into().expect("a SHA-256 digest has 16 bytes");
+    let mut id = [0; 16];
+    id.copy_from_slice(&digest[..16]);
     id[6] = (id[6] & 0x0f) | 0x80;
     id[8] = (id[8] & 0x3f) | 0x80;
     id
@@ -280,7 +286,11 @@ fn digest(value: &str, length: usize) -> bool {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    })
 }
 
 #[cfg(test)]
@@ -307,7 +317,8 @@ mod tests {
     #[test]
     fn contracts_check_declarations_and_resolve_packs_in_order() {
         let mut revision = AssetRevision { version: ASSET_REVISION_VERSION, ..AssetRevision::default() };
-        let pack = |byte: char| PackBlob { sha256: byte.to_string().repeat(64), sha1: byte.to_string().repeat(40), size: 1 };
+        let pack =
+            |byte: char| PackBlob { sha256: byte.to_string().repeat(64), sha1: byte.to_string().repeat(40), size: 1 };
         revision.packs.insert("base".into(), pack('a'));
         revision.packs.insert("ui".into(), pack('b'));
         let contract = AssetContract {
