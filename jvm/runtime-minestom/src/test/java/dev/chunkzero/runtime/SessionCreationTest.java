@@ -244,6 +244,7 @@ class SessionCreationTest {
         var process = ServerProcess.create();
         var ticks = new TickExecutor();
         var creation = new CompletableFuture<Void>();
+        var instances = new ArrayList<InstanceContainer>();
         var manager =
                 new SessionManager(
                         process,
@@ -257,7 +258,7 @@ class SessionCreationTest {
                                                     @Override
                                                     public CompletionStage<Void> onCreate(
                                                             SessionScope scope) {
-                                                        scope.createInstance();
+                                                        instances.add(scope.createInstance());
                                                         return creation;
                                                     }
                                                 })),
@@ -267,9 +268,14 @@ class SessionCreationTest {
             var created = manager.create("slow", session(16, "{}"));
             var deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
             while (!created.isDone() && System.nanoTime() < deadline) ticks.flush();
+            assertTrue(created.isDone());
             var failure = assertThrows(CompletionException.class, created::join);
             assertInstanceOf(TimeoutException.class, failure.getCause());
-            creation.complete(null);
+            flush(ticks);
+            assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_FAILED, manager.phase("slow"));
+            assertFalse(instances.getFirst().isRegistered());
+            assertFalse(creation.isDone());
+            assertTrue(creation.complete(null));
             flush(ticks);
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_FAILED, manager.phase("slow"));
         } finally {

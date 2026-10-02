@@ -338,13 +338,23 @@ public final class SessionManager {
         }
 
         void start() {
-            // The deadline applies to a copy, so a late completion of the session's own future is
-            // ignored.
+            // The deadline settles a copy of the session's own future, so a late completion of the
+            // latter is ignored and its failures pass through unchanged.
             var created = new CompletableFuture<Void>();
-            created.orTimeout(createDeadline.toMillis(), TimeUnit.MILLISECONDS);
+            var deadline =
+                    new CompletableFuture<Void>()
+                            .orTimeout(createDeadline.toMillis(), TimeUnit.MILLISECONDS);
+            deadline.whenComplete(
+                    (ignored, error) -> {
+                        if (error != null)
+                            created.completeExceptionally(
+                                    new TimeoutException(
+                                            "onCreate did not finish within " + createDeadline));
+                    });
             invoke(() -> behavior.onCreate(scope))
                     .whenComplete(
                             (ignored, error) -> {
+                                deadline.complete(null);
                                 if (error == null) created.complete(null);
                                 else created.completeExceptionally(error);
                             });
@@ -369,8 +379,6 @@ public final class SessionManager {
 
         private Throwable creationFailure(@Nullable Throwable error) {
             if (error == null) return new IllegalStateException("Session has no instances");
-            if (error instanceof TimeoutException)
-                return new TimeoutException("onCreate did not finish within " + createDeadline);
             return error;
         }
 
