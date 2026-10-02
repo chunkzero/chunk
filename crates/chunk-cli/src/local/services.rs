@@ -153,7 +153,6 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
             let config = GatewayConfig {
                 offline_logins: settings.offline_logins,
                 connection_timeout: settings.connection_timeout.unwrap_or(defaults.connection_timeout),
-                configuration_timeout: settings.configuration_timeout.unwrap_or(defaults.configuration_timeout),
                 ..defaults
             };
             Gateway::start(config, target).await

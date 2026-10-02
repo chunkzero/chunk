@@ -75,8 +75,7 @@ State lives in `PROJECT/.chunk/local`, or `--state DIR`: the backend's data, pub
 `control/nodes/`, and `control.json`, which `chunk players` and `chunk nodes` read to reach control. One `chunk dev`
 runs per project at a time. `--java PATH` overrides the Java executable Gradle selected; it must satisfy the release's
 Java version. `--offline-logins` admits players without Mojang authentication, under offline-mode UUIDs; use it only for
-local testing. `--connection-timeout-seconds` (default 10) and `--configuration-timeout-seconds` (default 300), each
-from 1 to 3600, set the gateway's login and configuration deadlines.
+local testing. `--connection-timeout-seconds` (default 10, from 1 to 3600) sets the gateway's login deadline.
 
 Backend functions and the apps' generated `Vars` read `chunk.toml`'s top-level `[vars]`, or with `--env NAME` its
 `[env.NAME.vars]` over them, key by key. Actions read their secrets from `.dev.vars` in the project root: `NAME=value`

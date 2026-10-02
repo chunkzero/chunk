@@ -7,7 +7,7 @@ use std::{
 };
 
 use chunk_build::project::ProjectMetadata;
-use chunk_environment::MAX_TIMEOUT_SECONDS;
+use chunk_environment::MAX_CONNECTION_TIMEOUT_SECONDS;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -51,11 +51,8 @@ pub(crate) struct Options {
     #[arg(long)]
     offline_logins: bool,
     /// Deadline for a player's login exchange, authentication included (default 10).
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=MAX_TIMEOUT_SECONDS))]
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=MAX_CONNECTION_TIMEOUT_SECONDS))]
     connection_timeout_seconds: Option<u64>,
-    /// Deadline for a player waiting in the configuration phase for a destination (default 300).
-    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=MAX_TIMEOUT_SECONDS))]
-    configuration_timeout_seconds: Option<u64>,
     /// Read the variables chunk.toml's `[env.NAME.vars]` overrides, rather than only its top-level `[vars]`.
     #[arg(long = "env", value_name = "NAME")]
     environment: Option<String>,
@@ -69,7 +66,6 @@ struct Settings {
     control_bind: SocketAddr,
     offline_logins: bool,
     connection_timeout: Option<Duration>,
-    configuration_timeout: Option<Duration>,
     /// Selects the `[env.<name>.vars]` deployments read.
     environment_name: Option<String>,
 }
@@ -164,7 +160,6 @@ async fn serve(
         control_bind: options.control_bind,
         offline_logins: options.offline_logins,
         connection_timeout: options.connection_timeout_seconds.map(Duration::from_secs),
-        configuration_timeout: options.configuration_timeout_seconds.map(Duration::from_secs),
         environment_name: options.environment.clone(),
     };
     let watched = if options.no_watch {
