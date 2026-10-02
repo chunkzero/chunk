@@ -1,5 +1,6 @@
 mod commands;
 mod moves;
+mod packs;
 mod relay;
 
 #[cfg(feature = "bench-support")]
@@ -13,8 +14,8 @@ use std::{io, time::Duration};
 
 use chunk_proto::sync::v1::{
     AbandonMoveArguments, ActivateResult, ClaimArguments, ClaimAssignment, ClaimPhase, ClaimRefusal, ClaimResult,
-    GatewayLogin, PlayerSetup, Position, ReconnectArguments, ReservationResult, SessionDemand, WithdrawResult,
-    claim_result::Outcome,
+    GatewayLogin, PlayerSetup, Position, ReconnectArguments, ReservationResult, ResourcePack, SessionDemand,
+    WithdrawResult, claim_result::Outcome,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -96,6 +97,8 @@ struct Assignment {
     /// The destination JVM's player listener.
     endpoint: String,
     setup: PlayerSetup,
+    /// The resource packs the session's app declares.
+    packs: Vec<ResourcePack>,
 }
 
 impl Assignment {
@@ -111,6 +114,7 @@ impl Assignment {
             destination: assigned.destination.unwrap_or_default(),
             endpoint: assigned.endpoint,
             setup: PlayerSetup { operation_id: claim.operation_id.clone(), capability: assigned.capability },
+            packs: assigned.packs,
         })
     }
 }
@@ -161,8 +165,10 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let mut platform = guard.platform.clone();
     let mut lifecycle = Lifecycle::new(platform.clone());
     let mut commands = commands::Commands::new(&platform).await?;
+    let mut packs = packs::Packs::default();
     loop {
         commands.bind(&guard.claim, &assignment.identity)?;
+        packs.apply(&mut authenticated.transport, &mut settings, &assignment.packs, deadline.min(WAIT_TIMEOUT)).await?;
         let mut internal = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
             .await
             .map_err(io::Error::other)??;
