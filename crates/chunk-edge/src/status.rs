@@ -171,11 +171,13 @@ mod tests {
             "version": { "name": "1.21", "protocol": 776 },
             "players": { "max": 20, "online": 3, "sample": [{ "name": "Alex", "id": "0" }] },
             "description": { "text": "Lobby" },
+            "enforcesSecureChat": false,
         });
         let route = Route { asleep: true, cached_status_json: reported.to_string(), ..Default::default() };
         let answered: Value = serde_json::from_str(&cached(&route, 5)).unwrap();
         assert_eq!(answered["players"], json!({ "max": 20, "online": 0 }));
         assert_eq!(answered["description"], reported["description"]);
+        assert_eq!(answered["enforcesSecureChat"], false);
 
         let unreported: Value =
             serde_json::from_str(&cached(&Route { asleep: true, ..Default::default() }, 5)).unwrap();

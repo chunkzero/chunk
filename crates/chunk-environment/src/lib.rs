@@ -11,7 +11,7 @@ pub use self::core::CommandLauncher;
 pub use self::core::{
     Core, CoreConfig, LaunchSpec, Launcher, READINESS, RELEASE_TIMEOUT, ReleaseArchive, RunnerConfig,
 };
-pub use gateway::{Gateway, GatewayConfig, PlatformTarget, RemoteCore};
+pub use gateway::{Gateway, GatewayConfig, MAX_CONNECTION_TIMEOUT_SECONDS, PlatformTarget, RemoteCore};
 pub use logs::logging;
 pub use managed::ManagementConfig;
 pub use services::{Service, Services};
@@ -46,7 +46,8 @@ pub enum Config {
 
 impl Config {
     /// Reads `CHUNK_SERVICES`, `CHUNK_ENVIRONMENT_ID` (or `CHUNK_ENVIRONMENT`), and the gateway's `CHUNK_BIND`,
-    /// `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS`, `CHUNK_TRUSTED_EDGES` (comma-separated edge IPs or CIDRs) and
+    /// `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS`, `CHUNK_CONNECTION_TIMEOUT_SECONDS` (1 to
+    /// 3600), `CHUNK_TRUSTED_EDGES` (comma-separated edge IPs or CIDRs) and
     /// `CHUNK_OFFLINE_LOGINS` (`1` admits unauthenticated players under any name; insecure, for tests only). With core,
     /// it also reads `CHUNK_STATE`, `CHUNK_CONTROL_BIND`, `CHUNK_CORE_BIND`, `CHUNK_PRIVATE_ADDRESS` and the
     /// `CHUNK_REPLICATION_*` variables. With `CHUNK_MANAGEMENT_URL`, it also reads `CHUNK_ENVIRONMENT_TOKEN` and
@@ -69,6 +70,9 @@ impl Config {
         gateway.motd = optional("CHUNK_MOTD")?.unwrap_or_else(|| "chunk".into());
         if let Some(max_connections) = optional("CHUNK_MAX_CONNECTIONS")? {
             gateway.max_connections = max_connections;
+        }
+        if let Some(timeout) = connection_timeout()? {
+            gateway.connection_timeout = timeout;
         }
         if let Some(trusted_edges) = optional("CHUNK_TRUSTED_EDGES")? {
             gateway.trusted_edges = trusted_edges;
@@ -111,6 +115,21 @@ impl Config {
         let gateway = services.contains(Service::Gateway).then_some(gateway);
         Ok(Self::Core { core: Box::new(core), gateway, management })
     }
+}
+
+/// Reads `CHUNK_CONNECTION_TIMEOUT_SECONDS`, from 1 to [`MAX_CONNECTION_TIMEOUT_SECONDS`].
+fn connection_timeout() -> io::Result<Option<Duration>> {
+    optional::<u64>("CHUNK_CONNECTION_TIMEOUT_SECONDS")?
+        .map(|seconds| {
+            if (1..=MAX_CONNECTION_TIMEOUT_SECONDS).contains(&seconds) {
+                Ok(Duration::from_secs(seconds))
+            } else {
+                Err(io::Error::other(format!(
+                    "CHUNK_CONNECTION_TIMEOUT_SECONDS must be between 1 and {MAX_CONNECTION_TIMEOUT_SECONDS}"
+                )))
+            }
+        })
+        .transpose()
 }
 
 /// Runs the configured services until `stop` or until one of them stops. With core, the gateway stops before core;

@@ -4,16 +4,21 @@ pub use remote::RemoteCore;
 pub(crate) use remote::run as run_remote;
 
 use crate::Running;
-use std::{io, net::SocketAddr, num::NonZeroUsize, sync::Arc};
+use std::{io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub use chunk_proxy::{PlatformTarget, Reports, TrustedEdges};
+
+/// The longest login deadline, in seconds; a larger one could overflow the deadline's `Instant`.
+pub const MAX_CONNECTION_TIMEOUT_SECONDS: u64 = 3600;
 
 #[derive(Clone)]
 pub struct GatewayConfig {
     pub bind: SocketAddr,
     pub motd: String,
     pub max_connections: NonZeroUsize,
+    /// Deadline for a player's whole login exchange, authentication included.
+    pub connection_timeout: Duration,
     /// Accepts unauthenticated logins, for local testing and smoke tests only.
     pub offline_logins: bool,
     /// Edges whose connections name the player with a PROXY protocol v2 header.
@@ -21,7 +26,7 @@ pub struct GatewayConfig {
 }
 
 impl GatewayConfig {
-    /// Listens on `bind` with the proxy's default status message and connection limit.
+    /// Listens on `bind` with the proxy's default status message, connection limit and login deadline.
     #[must_use]
     pub fn new(bind: SocketAddr) -> Self {
         let defaults = chunk_proxy::Config::default();
@@ -29,6 +34,7 @@ impl GatewayConfig {
             bind,
             motd: defaults.motd,
             max_connections: defaults.max_connections,
+            connection_timeout: defaults.connection_timeout,
             offline_logins: false,
             trusted_edges: defaults.trusted_edges,
         }
@@ -53,6 +59,7 @@ impl Gateway {
                 platform: Some(target),
                 motd: config.motd,
                 max_connections: config.max_connections,
+                connection_timeout: config.connection_timeout,
                 offline_logins: config.offline_logins,
                 trusted_edges: config.trusted_edges,
                 ..Default::default()

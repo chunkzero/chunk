@@ -74,6 +74,8 @@ fn status_json(motd: &str, online: u32, max: u32) -> io::Result<String> {
         "version": { "name": version.name, "protocol": version.protocol },
         "players": { "max": max, "online": online },
         "description": { "text": motd },
+        // Gameplay servers neither check nor re-sign chat signatures, so clients shouldn't expect them to.
+        "enforcesSecureChat": false,
     });
     Ok(json.to_string())
 }

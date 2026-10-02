@@ -170,6 +170,42 @@ fn offline_logins_reach_the_gateway_only_when_enabled() {
     }
 }
 
+#[test]
+fn gateway_connection_timeout_defaults_and_rejects_zero_or_excessive_values() {
+    // Reads the environment in a child process, since setting variables in this one needs `unsafe`.
+    const CHILD: &str = "CHUNK_CONNECTION_TIMEOUT_TEST_EXPECTED";
+    if let Ok(expected) = std::env::var(CHILD) {
+        let timeout = Config::from_env().map(|config| {
+            let Config::Gateway { gateway, .. } = config else { panic!("expected a gateway") };
+            gateway.connection_timeout.as_secs().to_string()
+        });
+        assert_eq!(timeout.ok().unwrap_or_else(|| "rejected".into()), expected);
+        return;
+    }
+    for (connection, expected) in [
+        (None, "10"),
+        (Some("3600"), "3600"),
+        (Some("0"), "rejected"),
+        (Some("3601"), "rejected"),
+        (Some("ten"), "rejected"),
+    ] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args(["--exact", "tests::gateway_connection_timeout_defaults_and_rejects_zero_or_excessive_values"])
+            .env(CHILD, expected)
+            .env("CHUNK_SERVICES", "gateway")
+            .env("CHUNK_ENVIRONMENT_ID", "test")
+            .env("CHUNK_CORE_ENDPOINT", "http://127.0.0.1:7070")
+            .env("CHUNK_GATEWAY_CREDENTIAL", "credential")
+            .env_remove("CHUNK_CONNECTION_TIMEOUT_SECONDS")
+            .stdout(std::process::Stdio::null());
+        if let Some(connection) = connection {
+            child.env("CHUNK_CONNECTION_TIMEOUT_SECONDS", connection);
+        }
+        assert!(child.status().unwrap().success(), "{connection:?}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn failed_gateway_bind_releases_core() {
     let directory = tempfile::tempdir().unwrap();

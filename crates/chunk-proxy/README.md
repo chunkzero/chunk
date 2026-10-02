@@ -7,9 +7,9 @@ Java Edition 26.2 (protocol 776), selected by the default `mc-26-2` feature; wit
 to start.
 
 The gateway runs in the [environment process](../chunk-environment/README.md), next to core or alone on a gateway
-machine, which configures it through `CHUNK_BIND`, `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS`, `CHUNK_TRUSTED_EDGES` and
-`CHUNK_OFFLINE_LOGINS`, and in `chunk dev`, which uses its own flags. It reaches core over the `chunk.sync.v1` `Core`
-service with the credential core minted for it.
+machine, which configures it through `CHUNK_BIND`, `CHUNK_MOTD`, `CHUNK_MAX_CONNECTIONS`,
+`CHUNK_CONNECTION_TIMEOUT_SECONDS`, `CHUNK_TRUSTED_EDGES` and `CHUNK_OFFLINE_LOGINS`, and in `chunk dev`, which uses its
+own flags. It reaches core over the `chunk.sync.v1` `Core` service with the credential core minted for it.
 
 ## Logins
 
@@ -40,10 +40,10 @@ packets or roll back.
 ## Limits and settings
 
 - `CHUNK_MAX_CONNECTIONS` (default 1024) caps live connections; further accepts are dropped.
-- Each login exchange, authentication included, has a ten-second deadline (`Config::connection_timeout`). Each
-  configuration phase has five minutes (`Config::configuration_timeout`), and clients must send their settings within
-  ten seconds. While a player waits there, keepalives go out ten seconds after the last answer, and each gets fifteen
-  seconds. Writes have a five-second deadline.
+- Each login exchange, authentication included, has a ten-second deadline (`Config::connection_timeout`,
+  `CHUNK_CONNECTION_TIMEOUT_SECONDS`). Each configuration phase has five minutes (`Config::configuration_timeout`), and
+  clients must send their settings within ten seconds. While a player waits there, keepalives go out ten seconds after
+  the last answer, and each gets fifteen seconds. Writes have a five-second deadline.
 - Compression starts at 256 bytes; `Config::compression_threshold = None` turns it off.
 - `CHUNK_TRUSTED_EDGES` lists edge IPs or CIDRs whose connections must open with a PROXY protocol v2 header; the
   header's source becomes the player's address. Connections from other addresses are never parsed for one.

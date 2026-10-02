@@ -30,6 +30,7 @@ The environment process. It runs an environment's core (the [backend](../chunk-b
 | `CHUNK_BIND`                          | `0.0.0.0:25565`                         | The gateway's player listener.                                                                     |
 | `CHUNK_MOTD`                          | `chunk`                                 | The gateway's server-list message.                                                                 |
 | `CHUNK_MAX_CONNECTIONS`               | `1024`                                  | The gateway's concurrent connection limit.                                                         |
+| `CHUNK_CONNECTION_TIMEOUT_SECONDS`    | `10`                                    | Seconds, 1 to 3600, a player's login exchange may take, authentication included.                   |
 | `CHUNK_TRUSTED_EDGES`                 | unset                                   | Edge IPs or CIDRs, comma-separated, whose connections must open with a PROXY protocol v2 header.   |
 | `CHUNK_OFFLINE_LOGINS`                | unset                                   | `1` admits players without Mojang authentication, under any name. Insecure; for tests only.        |
 | `CHUNK_REPLICATION_BUCKET`            | unset                                   | An S3-compatible bucket core replicates its store to. Unset turns replication off.                 |
