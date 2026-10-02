@@ -25,7 +25,10 @@ import tomllib
 import urllib.request
 
 REPOSITORY = Path(__file__).resolve().parent.parent
-TARGET = "x86_64-unknown-linux-gnu"
+RELEASE_TARGETS = (
+    "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+)
 LICENSE_FILE = re.compile(r"((third[-_]party[-_])?(licen[cs]es?|notices?)|copying|copyright|unlicense)([-_.][\w.-]*)?",
                           re.IGNORECASE)
 SOURCE_FILE = re.compile(r".*\.(rs|c|cc|h|hh|cpp|py|js|ts|json|toml)$", re.IGNORECASE)
@@ -173,9 +176,10 @@ def cargo(*args):
                           text=True).stdout
 
 
-def shipped_crates():
-    """Registry packages compiled into `chunk` for the release target, excluding build and dev dependencies."""
-    tree = cargo("tree", "-p", "chunk-cli", "-e", "normal", "--target", TARGET, "--prefix", "none", "-f", "{p}")
+def shipped_crates(*targets):
+    """Registry packages compiled into `chunk` for any of the targets, excluding build and dev dependencies."""
+    tree = cargo("tree", "-p", "chunk-cli", "-e", "normal", *(f"--target={target}" for target in targets), "--prefix",
+                 "none", "-f", "{p}")
     linked = {match.groups() for match in map(re.compile(r"(\S+) v(\S+)").match, tree.splitlines()) if match}
     packages = json.loads(cargo("metadata", "--format-version", "1"))["packages"]
     return sorted((package for package in packages
@@ -336,7 +340,7 @@ def vendored(package):
     return REPOSITORY / "licenses/crates" / f'{package["name"]}-{package["version"]}.txt'
 
 
-def notices():
+def notices(target):
     lock = tomllib.loads((REPOSITORY / "Cargo.lock").read_text())
     [v8] = [package["version"] for package in lock["package"] if package["name"] == "v8"]
     v8_notices = (REPOSITORY / "licenses/v8.txt").read_text()
@@ -345,7 +349,7 @@ def notices():
     crates = []
     texts = {}
     headers = []
-    packages = shipped_crates()
+    packages = shipped_crates(target)
     for package in packages:
         name = f'{package["name"]} {package["version"]}'
         source = f'https://crates.io/crates/{package["name"]}/{package["version"]}'
@@ -459,7 +463,7 @@ def vendor_crates(upstream):
     A crate whose upstream has no license file either keeps a text assembled by hand from its upstream's own license
     statement, starting with "Assembled by hand", or is reported.
     """
-    packages = shipped_crates()
+    packages = shipped_crates(*RELEASE_TARGETS)
     commits = {}
     for package in packages:
         info = Path(package["manifest_path"]).with_name(".cargo_vcs_info.json")
@@ -561,14 +565,17 @@ def vendor_v8(upstream):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--vendor", action="store_true", help="refresh the vendored upstream texts from git")
-    if parser.parse_args().vendor:
+    parser.add_argument("--target", help="Rust target triple of the shipped binary; defaults to the host")
+    args = parser.parse_args()
+    if args.vendor:
         with tempfile.TemporaryDirectory(prefix="rust-notices-") as repository:
             upstream = Upstream(repository)
             vendor_crates(upstream)
             vendor_referenced(upstream)
             vendor_v8(upstream)
     else:
-        print(notices(), end="")
+        host = re.search(r"^host: (\S+)$", subprocess.check_output(["rustc", "-vV"], text=True), re.MULTILINE)[1]
+        print(notices(args.target or host), end="")
 
 
 if __name__ == "__main__":
