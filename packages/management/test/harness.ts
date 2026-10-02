@@ -81,9 +81,9 @@ export async function startHarness(overrides: Partial<Deps> = {}): Promise<Harne
     keys,
     releases: {
       ...releases,
-      async read(key) {
+      async complete(key, expected, verify) {
         await harness.beforeRead?.();
-        return releases.read(key);
+        return releases.complete(key, expected, verify);
       },
     },
     archiveLimits: { maxExpandedBytes: 64 * 1024 * 1024, maxEntries: 1000 },

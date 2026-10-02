@@ -51,7 +51,8 @@ services:
       CHUNK_MACHINE_SUSPEND_AFTER_SECONDS: "600"
 ```
 
-Log storage (the `CHUNK_LOG_STORE_*` variables) is added the same way.
+An S3-compatible bucket for release archives (the `CHUNK_RELEASE_STORE_*` variables) and log storage (the
+`CHUNK_LOG_STORE_*` variables) are added the same way.
 
 ## Reaching management
 

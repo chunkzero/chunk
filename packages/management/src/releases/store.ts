@@ -12,14 +12,27 @@ export interface UploadTarget {
   headers: Record<string, string>;
 }
 
-/** Holds release archives, keyed by `releaseKey`. Objects are immutable once stored. */
+/**
+ * Holds release archives, keyed by `releaseKey`. Bytes that don't match an archive's declared size and digest are never
+ * stored under its key, and a stored archive is never replaced by other bytes.
+ */
 export interface ReleaseStore {
   /** Where a client sends an archive's bytes, such as a presigned URL. */
   uploadTarget(key: string, expected: ExpectedArchive, expireTime: Date): Promise<UploadTarget>;
   /** A URL environments GET the stored archive from without other credentials. */
   downloadUrl(key: string, expireTime: Date): Promise<string>;
-  /** The stored archive, or undefined when nothing was uploaded under the key. */
-  read(key: string): Promise<ReadableStream<Uint8Array> | undefined>;
+  /** Whether an archive is stored under the key. */
+  exists(key: string): Promise<boolean>;
+  /**
+   * Streams the archive uploaded under the key, or else the one stored there, through `verify`, and stores an uploaded
+   * one that matches `expected`. Resolves to what `verify` resolves to, or undefined when there is no archive; rejects
+   * when `verify` does, or when the archive does not match.
+   */
+  complete<T>(
+    key: string,
+    expected: ExpectedArchive,
+    verify: (archive: ReadableStream<Uint8Array>) => Promise<T>,
+  ): Promise<T | undefined>;
   /**
    * Serves requests to URLs the store handed out that point at this service. Returns undefined for requests that are
    * not the store's.

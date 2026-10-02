@@ -114,7 +114,7 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
     expect(written).toBeGreaterThan(0);
     expect(written).toBeLessThan(archive.bytes.byteLength);
     expect(accepted).toBe(false);
-    expect(await h.releases.read(releaseKey(projectId, id, archive.sha256))).toBeUndefined();
+    expect(await h.releases.exists(releaseKey(projectId, id, archive.sha256))).toBe(false);
     expect(await put(url, archive)).toBe(204);
     const completed = await h.client(DeploymentService).completeReleaseUpload({ projectId, releaseId: id });
     expect(completed.release?.state).toBe(ReleaseState.READY);
@@ -127,8 +127,9 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
     expect((await upload("r5", second)).release?.archiveSha256).toBe(second.sha256);
     expect(await put(stale, first)).toBe(204);
 
-    const stored = await h.releases.read(releaseKey(projectId, "r5", second.sha256));
-    const bytes = new Uint8Array(await new Response(stored).arrayBuffer());
+    const key = releaseKey(projectId, "r5", second.sha256);
+    const stored = await fetch(await h.releases.downloadUrl(key, new Date(Date.now() + 60_000)));
+    const bytes = new Uint8Array(await stored.arrayBuffer());
     expect(createHash("sha256").update(bytes).digest("hex")).toBe(second.sha256);
   });
 

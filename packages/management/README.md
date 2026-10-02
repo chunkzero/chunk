@@ -25,7 +25,7 @@ bun src/main.ts
 | `CHUNK_OPERATOR_TOKEN`                 | unset                         | An API token for the operator, at least 32 characters, recorded on start.                                   |
 | `CHUNK_PUBLIC_URL`                     | `http://localhost:$PORT`      | How clients reach this service; used in upload and login URLs.                                              |
 | `HOST` / `PORT`                        | `0.0.0.0` / `8080`            | The listen address.                                                                                         |
-| `CHUNK_DATA_DIR`                       | `data`                        | Release archives are stored under `releases/` here.                                                         |
+| `CHUNK_DATA_DIR`                       | `data`                        | Release archives are stored under `releases/` here, unless a release bucket is set.                         |
 | `CHUNK_DASHBOARD_DIR`                  | unset                         | The dashboard's build (`pnpm build:dashboard` writes `packages/dashboard/dist`), served at `/`.             |
 | `CHUNK_MAX_RELEASE_EXPANDED_BYTES`     | `8589934592`                  | How far a release archive may expand while it is verified.                                                  |
 | `CHUNK_MAX_RELEASE_ENTRIES`            | `100000`                      | How many entries a release archive may hold.                                                                |
@@ -46,6 +46,7 @@ bun src/main.ts
 | `CHUNK_PROVIDER_START_TIMEOUT_SECONDS` | `120`                         | How long the reconciler waits for a machine's create or start.                                              |
 | `CHUNK_PROVIDER_TIMEOUT_SECONDS`       | `60`                          | How long it waits for every other provider call.                                                            |
 | `CHUNK_CAPACITY_RETRY_SECONDS`         | `300`                         | How long a JVM or gateway request keeps retrying a provider with no room, or timing out, before it fails.   |
+| `CHUNK_RELEASE_STORE_*`                | unset                         | A bucket for release archives; see [Release storage](#release-storage).                                     |
 | `CHUNK_LOG_STORE_*`                    | unset                         | Log storage; see [Log storage](#log-storage).                                                               |
 
 The machine and reconciler variables apply only when `CHUNK_ENVIRONMENT_IMAGE` is set.
@@ -70,17 +71,40 @@ operator approves in the dashboard, and `PollLogin` then hands the new token to 
 ## Releases
 
 A release is uploaded in three steps. `DeploymentService.UploadRelease` declares its ID, SHA-256 and size and returns an
-`upload` target: a `PUT` URL under `/releases/upload/`, signed with `CHUNK_SECRET_KEY` and valid for an hour, with its
-headers. When the project already holds the release intact, it returns no `upload`. After the `PUT`,
-`CompleteReleaseUpload` verifies the archive and marks the release `RELEASE_STATE_READY`: it matches the declared size
-and digest, it is a well-formed gzip tar within the expansion and entry limits, and its `release.json` names the release
-and declares its apps, sessions and machine profiles. Management doesn't check the backend contract; the environment
-decides whether it can serve a release when it loads it.
+`upload` target: a `PUT` URL valid for an hour, with its headers. Management serves it under `/releases/upload/`, signed
+with `CHUNK_SECRET_KEY`, or presigns it for the release bucket (see [Release storage](#release-storage)). When the
+project already holds the release intact, it returns no `upload`. After the `PUT`, `CompleteReleaseUpload` verifies the
+archive and marks the release `RELEASE_STATE_READY`: it matches the declared size and digest, it is a well-formed gzip
+tar within the expansion and entry limits, and its `release.json` names the release and declares its apps, sessions and
+machine profiles. Management doesn't check the backend contract; the environment decides whether it can serve a release
+when it loads it.
 
 `Deploy` makes a ready release an environment's desired deployment, which the environment's core loads and reports as
 `DEPLOYMENT_STATE_ACTIVE` or `DEPLOYMENT_STATE_FAILED`. `Deploy`, `Promote`, `Rollback` and JVM capacity requests refuse
 a release with `FAILED_PRECONDITION` when there is no JVM image for it: `CHUNK_JVM_IMAGE` is unset, or `release.json`
 has no integer `java_version` from 1 to 1000.
+
+## Release storage
+
+Release archives stay on management's disk under `CHUNK_DATA_DIR` unless `CHUNK_RELEASE_STORE_BUCKET` names an
+S3-compatible bucket, such as AWS S3, MinIO or Cloudflare R2. Clients then upload to presigned URLs below
+`<prefix>uploads/`, and machines download from presigned URLs below `<prefix>archives/`. A presigned URL can't bind an
+upload to its digest, so `CompleteReleaseUpload` verifies the upload where it landed, then copies it to
+`<prefix>archives/` through a second check of its size and digest, which refuses bytes replaced in between. Completing
+reads the archive twice and writes it once, streaming. An upload that is never completed stays; a lifecycle rule can
+expire `<prefix>uploads/`.
+
+The connection settings fall back to the log store's, so one bucket can hold both; keep the two prefixes apart.
+
+| Variable                                | Default                      | Meaning                                                                                     |
+| --------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------- |
+| `CHUNK_RELEASE_STORE_BUCKET`            | unset                        | The S3-compatible bucket. Unset keeps archives on management's disk.                        |
+| `CHUNK_RELEASE_STORE_ENDPOINT`          | the log store's              | The bucket's endpoint URL, as management and machines reach it; required without either.    |
+| `CHUNK_RELEASE_STORE_PUBLIC_ENDPOINT`   | the endpoint                 | The endpoint clients upload to, when they reach the bucket at another address.              |
+| `CHUNK_RELEASE_STORE_REGION`            | the log store's, `us-east-1` | The bucket's region.                                                                        |
+| `CHUNK_RELEASE_STORE_PREFIX`            | `releases/`                  | The prefix uploads and archives go under.                                                   |
+| `CHUNK_RELEASE_STORE_ACCESS_KEY_ID`     | the log store's              | Credentials that read, write and delete below the prefix; required without the log store's. |
+| `CHUNK_RELEASE_STORE_SECRET_ACCESS_KEY` | the log store's              | The secret for the access key.                                                              |
 
 ## Machines
 
@@ -165,6 +189,6 @@ TEST_DATABASE_URL=postgres://postgres:test@127.0.0.1:55432/postgres pnpm --filte
 `src/schema.ts` defines the tables, and `migrations/` holds the drizzle-kit migrations generated from it; review each
 generated migration before committing it. Tests that need Postgres skip when `TEST_DATABASE_URL` is unset; each test
 file uses its own database. The provider tests use `DOCKER_HOST`, or rootless Podman's socket, and skip when neither
-exists. The STS test runs against MinIO when `TEST_MINIO_URL` is set, for example
+exists. The STS and S3 release store tests run against MinIO when `TEST_MINIO_URL` is set, for example
 `podman run --rm -p 127.0.0.1:59000:9000 -e MINIO_ROOT_USER=chunkroot -e MINIO_ROOT_PASSWORD=chunkrootsecret cgr.dev/chainguard/minio server /data`
 with `TEST_MINIO_URL=http://127.0.0.1:59000`. `just managed-smoke` runs the whole self-hosted path end to end.

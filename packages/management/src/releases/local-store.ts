@@ -46,6 +46,15 @@ export async function localReleaseStore({
   const signed = (key: string, sha256: string, size: string, expires: string) =>
     ["upload", key, sha256, size, expires].join("\n");
 
+  async function stored(key: string) {
+    const path = join(root, key);
+    const file = Bun.file(path);
+    if (!(await file.exists())) return undefined;
+    // A concurrent upload may have linked the archive without syncing its directories yet.
+    await syncDirectories(dirname(path), root);
+    return file;
+  }
+
   async function download(request: Request, url: URL): Promise<Response> {
     if (request.method !== "GET" && request.method !== "HEAD") {
       return new Response("method not allowed\n", { status: 405 });
@@ -84,13 +93,12 @@ export async function localReleaseStore({
       return `${machineUrl}${downloadPath}${key}?${new URLSearchParams({ expires, signature })}`;
     },
 
-    async read(key) {
-      const path = join(root, key);
-      const file = Bun.file(path);
-      if (!(await file.exists())) return undefined;
-      // A concurrent upload may have linked the archive without syncing its directories yet.
-      await syncDirectories(dirname(path), root);
-      return file.stream();
+    exists: async (key) => (await stored(key)) !== undefined,
+
+    async complete(key, _expected, verify) {
+      // Uploads were checked against the key's digest as they were stored, so the stored archive is the upload.
+      const file = await stored(key);
+      return file && verify(file.stream());
     },
 
     async fetch(request) {
