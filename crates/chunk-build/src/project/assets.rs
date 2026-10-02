@@ -30,7 +30,7 @@ pub struct World {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorldFormat {
-    /// A save directory with `region/`, converted to Polar by the Gradle build.
+    /// A save directory with `level.dat`, converted to Polar by the Gradle build.
     Anvil,
     Polar,
 }
@@ -67,7 +67,7 @@ pub(super) fn worlds(file: &Path, expression: &Expression<'_>, root: &Root<'_>) 
         let (source, path, metadata) = source(file, fields.get("source").copied(), root)?;
         let format = if metadata.is_file() && extension(&source, "polar") {
             WorldFormat::Polar
-        } else if metadata.is_dir() && fs::symlink_metadata(path.join("region")).is_ok_and(|region| region.is_dir()) {
+        } else if metadata.is_dir() && fs::symlink_metadata(path.join("level.dat")).is_ok_and(|level| level.is_file()) {
             WorldFormat::Anvil
         } else {
             return Err(invalid(file, format!("world {name} requires a .polar file or an Anvil save directory")));

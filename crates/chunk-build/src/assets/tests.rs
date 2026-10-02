@@ -21,7 +21,7 @@ fn project(root: &Path) {
     );
     write(root, "apps/arena/build.gradle.kts", b"");
     write(root, "apps/arena/assets/worlds/lobby.polar", POLAR);
-    write(root, "apps/arena/assets/worlds/koth/region/r.0.0.mca", b"anvil");
+    write(root, "apps/arena/assets/worlds/koth/level.dat", b"anvil");
     write(root, "apps/arena/assets/packs/ui/pack.mcmeta", b"{}");
     write(root, "apps/arena/assets/packs/ui/assets/minecraft/lang/en_us.json", b"{}");
     write(root, "apps/arena/assets/kits/default.json", b"kit");

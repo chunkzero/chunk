@@ -227,7 +227,7 @@ fn asset_declarations_resolve_sources_inside_assets_and_order_packs_by_scope() {
     }
     write("assets/games.zip", "");
     write("apps/games/arena/assets/lobby.polar", "");
-    write("apps/games/arena/assets/worlds/koth/region/r.0.0.mca", "");
+    write("apps/games/arena/assets/worlds/koth/level.dat", "");
     let metadata = serde_json::to_value(inspect(root).unwrap()).unwrap();
     assert_eq!(
         metadata["apps"][0]["worlds"],
