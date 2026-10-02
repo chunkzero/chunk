@@ -30,7 +30,17 @@ dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "1", default-features = false, features = ["std", "parse", "serde"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process", "time", "io-util", "sync"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "signal",
+  "process",
+  "time",
+  "io-util",
+  "sync",
+  "net",
+  "fs",
+] }
 process-wrap = { version = "10", default-features = false, features = [
   "tokio1",
   "process-group",
@@ -48,6 +58,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
 cliclack = "0.5.6"
 notify = "8"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]

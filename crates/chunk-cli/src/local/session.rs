@@ -209,6 +209,7 @@ impl<'a> Session<'a> {
             Ok((staged, elapsed)) => {
                 // Unchanged releases still pick up an edited `.dev.vars`.
                 self.shared.set_secrets(staged.secrets.clone());
+                self.settings.packs.serve(&staged.control.assets);
                 let release = short(&staged.release.id).to_owned();
                 let deployed = if forced { self.restart(staged).await } else { self.deploy(staged).await };
                 deployed.map(|summary| {

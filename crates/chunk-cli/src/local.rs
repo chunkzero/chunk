@@ -16,6 +16,7 @@ use report::Reporter;
 
 mod dev_vars;
 mod logs;
+mod packs;
 mod plain;
 mod reload;
 mod report;
@@ -65,6 +66,8 @@ struct Settings {
     /// Where players' clients download resource packs: this prefix followed by a pack's SHA-256. Unset, players get
     /// no packs.
     pack_url_prefix: Option<String>,
+    /// The server behind `pack_url_prefix`, which serves the packs of every staged release.
+    packs: packs::Packs,
     /// The Java executable every release's JVMs run with.
     java: PathBuf,
     bind: SocketAddr,
@@ -157,14 +160,16 @@ async fn serve(
     let required = built.java.version;
     reporter.running("Java", format!("Checking Java {required}+"));
     let assets = built.asset_store.clone();
-    // Dev serves no packs yet.
-    let pack_url_prefix = None;
+    let packs = packs::Packs::start(assets.clone()).await?;
+    let pack_url_prefix = Some(packs.url_prefix().to_owned());
     let staged = stage(&project, built, options.java.as_deref(), pack_url_prefix.as_deref(), &stop).await?;
+    packs.serve(&staged.control.assets);
     reporter.done("Java", format!("{required}+ · {}", staged.java.display()));
     let settings = Settings {
         state,
         assets,
         pack_url_prefix,
+        packs,
         java: staged.java.clone(),
         bind: options.bind,
         control_bind: options.control_bind,
@@ -225,8 +230,9 @@ async fn stage(
         destinations: contracts.destinations,
     };
     let declared: Declared = chunk_service::read(&built.release.directory.join("release.json"))?;
+    declared.assets.check(&built.assets).map_err(io::Error::other)?;
     let prefix = pack_url_prefix.map(str::to_owned);
-    control.assets = chunk_control::DeploymentAssets::new(built.assets, declared.assets, prefix);
+    control.assets = chunk_control::DeploymentAssets::new(&built.assets, declared.assets, prefix);
     Ok(Staged { release: built.release, java, control, bundle, secrets })
 }
 
