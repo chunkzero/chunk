@@ -12,13 +12,14 @@ use super::{
 };
 use crate::core::{Archives, ReleaseArchive};
 use chunk_build::assets::Store;
+use chunk_contract::AssetRevision;
 use chunk_proto::sync::v1::{
     CallRequest, Error, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmAssetRead, JvmAssets, JvmBoot, JvmLaunch,
     Position, error::Code,
 };
 use prost::Message;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -27,6 +28,8 @@ use std::{
 /// The most one archive chunk carries, leaving room for the response's framing under tonic's default 4 MiB limit.
 const CHUNK_BYTES: usize = 4 * 1024 * 1024 - 1024;
 const BOOT_BYTES: usize = 128;
+/// The most asset revisions core keeps decoded at once.
+const REVISIONS: usize = 16;
 
 #[derive(Clone, Copy)]
 pub(super) enum Method {
@@ -78,7 +81,8 @@ pub(super) async fn call(
             let launch = service.control.boot_launch(host, &boot).map_err(|failure| errors::control(&failure))?;
             let archive = service.archives.archive(&launch.release)?;
             let assets = &release(service, &launch.deployment)?.assets;
-            let assets = JvmAssets { revision_id: assets.revision_id.clone(), manifest: assets.revision.encode() };
+            let manifest = service.archives.revision(assets)?.encode();
+            let assets = JvmAssets { revision_id: assets.revision_id.clone(), manifest };
             let aot = service.aot.plan(host, &boot, &launch.release, &launch.app, &runtime).await;
             JvmLaunch {
                 deployment: launch.deployment,
@@ -104,8 +108,8 @@ pub(super) async fn call(
         Method::AssetRead => {
             let read: JvmAssetRead = decode(&request.arguments)?;
             let launch = bound(&read.boot)?;
-            let release = release(service, &launch.deployment)?;
-            let size = release.assets.revision.app_blobs(&launch.app).get(read.sha256.as_str()).copied();
+            let revision = service.archives.revision(&release(service, &launch.deployment)?.assets)?;
+            let size = revision.app_blobs(&launch.app).get(read.sha256.as_str()).copied();
             let size = size.ok_or_else(|| errors::denied("the blob is not one the host's app reads"))?;
             let blob = service.archives.blob(read.sha256, size)?;
             JvmArchiveChunk { data: service.archives.read(host, blob, read.offset).await? }.encode_to_vec()
@@ -134,16 +138,35 @@ fn release(service: &SyncService, deployment: &str) -> Result<Arc<chunk_control:
     release.ok_or_else(|| errors::error(Code::Contract, "core knows no release of the host's deployment"))
 }
 
-/// Core's kept release archives and asset store, and the hosts reading a chunk of one of their files now.
+/// Core's kept release archives and asset store, the asset revisions it read last, and the hosts reading a chunk of
+/// one of their files now.
 pub(in super::super) struct ArchiveReads {
     archives: Arc<Archives>,
     assets: Store,
+    revisions: Mutex<BTreeMap<String, Arc<AssetRevision>>>,
     reading: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl ArchiveReads {
     pub fn new(archives: Arc<Archives>, assets: Store) -> Self {
-        Self { archives, assets, reading: Arc::default() }
+        Self { archives, assets, revisions: Mutex::default(), reading: Arc::default() }
+    }
+
+    /// The asset revision a deployment pins, which core wrote to its store before activating it.
+    fn revision(&self, assets: &chunk_control::DeploymentAssets) -> Result<Arc<AssetRevision>, Error> {
+        if let Some(revision) = lock(&self.revisions).get(&assets.revision_id) {
+            return Ok(revision.clone());
+        }
+        let revision = assets.revision(&self.assets).map_err(|error| {
+            errors::error(Code::Contract, format!("core cannot read the host's asset revision: {error}"))
+        })?;
+        let revision = Arc::new(revision);
+        let mut revisions = lock(&self.revisions);
+        if revisions.len() >= REVISIONS {
+            revisions.clear();
+        }
+        revisions.insert(assets.revision_id.clone(), revision.clone());
+        Ok(revision)
     }
 
     fn archive(&self, release: &str) -> Result<ReleaseArchive, Error> {
@@ -207,6 +230,6 @@ impl Drop for Reading {
     }
 }
 
-fn lock(hosts: &Mutex<BTreeSet<String>>) -> MutexGuard<'_, BTreeSet<String>> {
-    hosts.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

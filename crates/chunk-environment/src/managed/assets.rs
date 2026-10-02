@@ -8,8 +8,8 @@ use std::{collections::BTreeMap, fs, io};
 use tokio_util::sync::CancellationToken;
 
 /// Checks the revision `artifact` names against the release's declarations in `contract`, then downloads into `store`
-/// each blob of it that JVMs read and `store` lacks, verified. Without an artifact, the deployment pins the empty
-/// revision. Returns `None` once `cancel` stops it before its downloads finish.
+/// each blob of it that JVMs read and `store` lacks, verified, and the revision itself. Without an artifact, the
+/// deployment pins the empty revision. Returns `None` once `cancel` stops it before its downloads finish.
 pub(super) async fn load(
     client: &Client,
     store: &Store,
@@ -43,6 +43,7 @@ pub(super) async fn load(
             .await
             .map_err(io::Error::other)??;
     }
+    store.write_revision(&revision)?;
     Ok(Some(revision))
 }
 

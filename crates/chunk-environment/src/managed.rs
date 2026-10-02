@@ -553,7 +553,7 @@ impl<'a> Managed<'a> {
         let earlier = deployments.unacknowledged.clone();
         Records { committed: earlier.as_ref(), pending: Some(&pending) }.store(&self.activation)?;
         let packs = Some(desired.pack_url_prefix.clone()).filter(|prefix| !prefix.is_empty());
-        let release = loaded.control(&self.environment, deployment, revision, packs);
+        let release = loaded.control(&self.environment, deployment, &revision, packs);
         if let Err(error) = self.core.activate_stopping(release, deployments.drain, &stop) {
             _ = Records { committed: earlier.as_ref(), pending: None }.store(&self.activation);
             return Err(error);

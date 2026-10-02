@@ -110,7 +110,8 @@ pub struct ProcessHostConfig {
     pub directory: std::path::PathBuf,
     /// Holds each release this host launches unpacked at `<releases>/<release ID>`.
     pub releases: std::path::PathBuf,
-    /// The asset store each JVM's app directory is materialized from, which the JVM reads at `CHUNK_ASSETS`.
+    /// The asset store holding each release's asset revision, which each JVM's app directory is materialized from and
+    /// the JVM reads at `CHUNK_ASSETS`.
     pub assets: std::path::PathBuf,
     /// The Java executable that runs every release's apps.
     pub java: std::path::PathBuf,

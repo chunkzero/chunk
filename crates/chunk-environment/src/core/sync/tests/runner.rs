@@ -98,7 +98,8 @@ async fn runner() -> (Fixture, String, Vec<u8>) {
     for bytes in blobs {
         store.insert(&auth::hex(&Sha256::digest(bytes)), bytes).unwrap();
     }
-    let assets = chunk_control::DeploymentAssets::new(revision, chunk_contract::AssetContract::default(), None);
+    store.write_revision(&revision).unwrap();
+    let assets = chunk_control::DeploymentAssets::new(&revision, chunk_contract::AssetContract::default(), None);
     let release = chunk_control::Release { release_id: RELEASE.into(), assets, ..runtime::release() };
     fixture.control.activate_release(release, chunk_control::DrainPolicy::default()).unwrap();
     fixture.control.record_launch(HOST, launch()).unwrap();

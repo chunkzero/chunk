@@ -316,7 +316,7 @@ impl Loaded {
         &self,
         environment: &str,
         deployment: &str,
-        assets: chunk_contract::AssetRevision,
+        assets: &chunk_contract::AssetRevision,
         pack_url_prefix: Option<String>,
     ) -> chunk_control::Release {
         let release = &self.release;

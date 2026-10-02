@@ -131,8 +131,7 @@ impl ProcessHost {
             return Err(Error::Invalid("app artifact digest mismatch"));
         }
         classpath::verify(&root, &jar, &bytes)?;
-        let store = chunk_build::assets::Store::new(&self.config.assets);
-        let assets = chunk_build::assets::materialize(&store, &release.assets.revision, app)?;
+        let assets = release.assets.materialize(&self.config.assets, app)?;
         std::fs::create_dir_all(&self.config.directory)?;
         let log_path = self.path(id, "jvm.log")?;
         let exit = self.path(id, "exit")?;

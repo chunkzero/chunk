@@ -98,11 +98,13 @@ async fn jvms_learn_the_machines_private_address_the_environments_name_and_their
     std::fs::write(unpacked(&directory).join(&artifact.jar), &jar).unwrap();
     artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
     let mut release = release(artifact);
-    let mut revision = release.assets.revision.clone();
+    let store = chunk_build::assets::Store::new(directory.path().join("assets"));
     let sha256 = format!("{:x}", Sha256::digest(b"{}\n"));
-    chunk_build::assets::Store::new(directory.path().join("assets")).insert(&sha256, b"{}\n").unwrap();
+    store.insert(&sha256, b"{}\n").unwrap();
+    let mut revision = release.assets.revision(&store).unwrap();
     revision.shared.insert("game.json".into(), chunk_contract::AssetBlob { sha256, size: 3 });
-    release.assets = crate::DeploymentAssets::new(revision, chunk_contract::AssetContract::default(), None);
+    store.write_revision(&revision).unwrap();
+    release.assets = crate::DeploymentAssets::new(&revision, chunk_contract::AssetContract::default(), None);
     let host = ProcessHost::new(ProcessHostConfig {
         environment_name: Some("prod".into()),
         ..config(directory.path(), java, Some("fdaa::2".parse().unwrap()))

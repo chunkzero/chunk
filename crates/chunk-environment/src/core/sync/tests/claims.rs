@@ -131,7 +131,7 @@ async fn a_claim_carries_the_resource_packs_of_its_sessions_app() {
         app_packs: [("bridge".into(), vec!["base".into(), "ui".into()]), ("arena".into(), vec!["arena".into()])].into(),
         ..AssetContract::default()
     };
-    let assets = chunk_control::DeploymentAssets::new(revision, contract, Some("https://packs.test/p/".into()));
+    let assets = chunk_control::DeploymentAssets::new(&revision, contract, Some("https://packs.test/p/".into()));
     let (mut fixture, jvm) = with_release(chunk_control::Release { assets, ..runtime::release() }).await;
     let gateway = fixture.gateway.clone();
     let (_updates, first) = fixture.follow(&gateway, "proxy").await;
