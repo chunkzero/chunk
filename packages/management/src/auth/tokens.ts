@@ -1,22 +1,26 @@
 import { create } from "@bufbuild/protobuf";
+import { and, eq, isNull, sql } from "drizzle-orm";
 
 import { newId, randomToken, sha256 } from "../crypto.ts";
-import type { Db } from "../db.ts";
+import { type Db, fetchRows } from "../db.ts";
 import { type Token, TokenSchema } from "../gen/chunk/management/v1/auth_pb.ts";
 import type { Authenticator, Principal } from "../rpc/caller.ts";
 import { timestamp } from "../rpc/validate.ts";
+import { apiTokens } from "../schema.ts";
 
 /** The single-tenant install's one person. */
 export const operator: Principal = { id: "operator", displayName: "Operator" };
 
-export interface TokenRow {
-  id: string;
-  principal_id: string;
-  name: string;
-  project_id: string | null;
-  create_time: Date;
-  expire_time: Date | null;
-}
+export const tokenColumns = {
+  id: apiTokens.id,
+  principal_id: apiTokens.principal_id,
+  name: apiTokens.name,
+  project_id: apiTokens.project_id,
+  create_time: apiTokens.create_time,
+  expire_time: apiTokens.expire_time,
+};
+
+export type TokenRow = Pick<typeof apiTokens.$inferSelect, keyof typeof tokenColumns>;
 
 const secretPrefix = "chunk_";
 
@@ -45,56 +49,80 @@ export async function issueToken(
   },
 ): Promise<{ row: TokenRow; secret: string }> {
   const secret = `${secretPrefix}${randomToken()}`;
-  const [row] = await db<TokenRow[]>`
-    insert into api_tokens (id, principal_id, name, project_id, secret_hash, expire_time, renews)
-    values (${newId("tok")}, ${token.principalId}, ${token.name}, ${token.projectId ?? null}, ${sha256(secret)},
-      ${token.expireTime ?? null}, ${token.renews ?? false})
-    returning id, principal_id, name, project_id, create_time, expire_time`;
+  const [row] = await db
+    .insert(apiTokens)
+    .values({
+      id: newId("tok"),
+      principal_id: token.principalId,
+      name: token.name,
+      project_id: token.projectId ?? null,
+      secret_hash: sha256(secret),
+      expire_time: token.expireTime ?? null,
+      renews: token.renews ?? false,
+    })
+    .returning(tokenColumns);
   if (!row) throw new Error("token insert returned no row");
   return { row, secret };
 }
 
 export async function findToken(db: Db, id: string): Promise<TokenRow | undefined> {
-  const [row] = await db<TokenRow[]>`
-    select id, principal_id, name, project_id, create_time, expire_time from api_tokens where id = ${id}`;
+  const [row] = await db.select(tokenColumns).from(apiTokens).where(eq(apiTokens.id, id));
   return row;
 }
 
 /** Records the operator's configured token once; revoking it sticks until the configured value changes. */
 export async function ensureOperatorToken(db: Db, secret: string): Promise<void> {
-  await db`
-    insert into api_tokens (id, principal_id, name, secret_hash)
-    values (${newId("tok")}, ${operator.id}, 'CHUNK_OPERATOR_TOKEN', ${sha256(secret)})
-    on conflict (secret_hash) do nothing`;
+  await db
+    .insert(apiTokens)
+    .values({ id: newId("tok"), principal_id: operator.id, name: "CHUNK_OPERATOR_TOKEN", secret_hash: sha256(secret) })
+    .onConflictDoNothing({ target: apiTokens.secret_hash });
 }
 
 /** Issues the token an environment's core uses, revoking the environment's earlier ones. */
 export async function issueEnvironmentToken(db: Db, environmentId: string): Promise<string> {
-  await db`
-    update api_tokens set revoke_time = now()
-    where environment_id = ${environmentId} and kind = 'environment' and revoke_time is null`;
+  await db
+    .update(apiTokens)
+    .set({ revoke_time: sql`now()` })
+    .where(
+      and(
+        eq(apiTokens.environment_id, environmentId),
+        eq(apiTokens.kind, "environment"),
+        isNull(apiTokens.revoke_time),
+      ),
+    );
   const secret = `${secretPrefix}${randomToken()}`;
-  await db`
-    insert into api_tokens (id, principal_id, name, kind, environment_id, secret_hash)
-    values (${newId("tok")}, '', 'environment', 'environment', ${environmentId}, ${sha256(secret)})`;
+  await db.insert(apiTokens).values({
+    id: newId("tok"),
+    principal_id: "",
+    name: "environment",
+    kind: "environment",
+    environment_id: environmentId,
+    secret_hash: sha256(secret),
+  });
   return secret;
 }
 
 /** Records the configured edge token once, like `ensureOperatorToken`. */
 export async function ensureEdgeToken(db: Db, secret: string): Promise<void> {
-  await db`
-    insert into api_tokens (id, principal_id, name, kind, secret_hash)
-    values (${newId("tok")}, '', 'CHUNK_EDGE_TOKEN', 'edge', ${sha256(secret)})
-    on conflict (secret_hash) do nothing`;
+  await db
+    .insert(apiTokens)
+    .values({ id: newId("tok"), principal_id: "", name: "CHUNK_EDGE_TOKEN", kind: "edge", secret_hash: sha256(secret) })
+    .onConflictDoNothing({ target: apiTokens.secret_hash });
 }
 
 export function tokenAuthenticator(db: Db): Authenticator {
   return {
     async authenticate(bearer) {
       // A renewing token is written at most about once per `renewalGraceMs`.
-      const [row] = await db<
-        { id: string; kind: string; principal_id: string; project_id: string | null; environment_id: string | null }[]
-      >`
+      const [row] = await fetchRows<{
+        id: string;
+        kind: string;
+        principal_id: string;
+        project_id: string | null;
+        environment_id: string | null;
+      }>(
+        db,
+        sql`
         with found as (
           select id, kind, principal_id, project_id, environment_id from api_tokens
           where secret_hash = ${sha256(bearer)} and revoke_time is null and (expire_time is null or expire_time > now())
@@ -104,7 +132,8 @@ export function tokenAuthenticator(db: Db): Authenticator {
           where id in (select id from found) and renews
             and expire_time < now() + ${renewingLifetimeMs - renewalGraceMs} * interval '1 millisecond'
         )
-        select id, kind, principal_id, project_id, environment_id from found`;
+        select id, kind, principal_id, project_id, environment_id from found`,
+      );
       if (!row) return undefined;
       if (row.kind === "environment" && row.environment_id) {
         return { kind: "environment", environmentId: row.environment_id, tokenId: row.id };

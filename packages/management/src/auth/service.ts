@@ -3,6 +3,7 @@ import { randomInt } from "node:crypto";
 import { create } from "@bufbuild/protobuf";
 import { durationFromMs, timestampDate, timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
+import { and, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
 
 import { randomToken, sha256 } from "../crypto.ts";
 import type { Deps } from "../deps.ts";
@@ -17,24 +18,25 @@ import { findProject } from "../projects/store.ts";
 import { callerOf, checkProjectAccess } from "../rpc/caller.ts";
 import { idempotent } from "../rpc/idempotency.ts";
 import { failedPrecondition, invalid, notFound, page, pageOf, required, seqAfter } from "../rpc/validate.ts";
-import { findToken, issueToken, renewingLifetimeMs, type TokenRow, toToken } from "./tokens.ts";
+import { apiTokens, logins } from "../schema.ts";
+import { findToken, issueToken, renewingLifetimeMs, tokenColumns, toToken } from "./tokens.ts";
 
 const loginLifetimeMs = 10 * 60 * 1000;
 const pollIntervalMs = 5 * 1000;
 // Consonants only, so codes never spell words; 20^8 codes.
 const codeAlphabet = "BCDFGHJKLMNPQRSTVWXZ";
 
-export function authService({ sql, keys, publicUrl }: Deps): Partial<ServiceImpl<typeof AuthService>> {
+export function authService({ db, keys, publicUrl }: Deps): Partial<ServiceImpl<typeof AuthService>> {
   return {
     async startLogin(request) {
       const clientName = request.clientName.slice(0, 200) || "chunk CLI";
       const loginId = randomToken();
       const userCode = newUserCode();
       const expireTime = new Date(Date.now() + loginLifetimeMs);
-      await sql`delete from logins where expire_time < now() - interval '1 day'`;
-      await sql`
-        insert into logins (id_hash, user_code, client_name, expire_time)
-        values (${sha256(loginId)}, ${userCode}, ${clientName}, ${expireTime})`;
+      await db.delete(logins).where(lt(logins.expire_time, sql`now() - interval '1 day'`));
+      await db
+        .insert(logins)
+        .values({ id_hash: sha256(loginId), user_code: userCode, client_name: clientName, expire_time: expireTime });
       return {
         loginId,
         userCode,
@@ -46,8 +48,10 @@ export function authService({ sql, keys, publicUrl }: Deps): Partial<ServiceImpl
 
     async pollLogin(request) {
       const idHash = sha256(required(request.loginId, "login_id"));
-      const [login] = await sql<{ expire_time: Date; token_id: string | null; token_secret: Uint8Array | null }[]>`
-        select expire_time, token_id, token_secret from logins where id_hash = ${idHash}`;
+      const [login] = await db
+        .select({ expire_time: logins.expire_time, token_id: logins.token_id, token_secret: logins.token_secret })
+        .from(logins)
+        .where(eq(logins.id_hash, idHash));
       if (!login) throw notFound("login");
       const expired = login.expire_time <= new Date();
       if (!login.token_id || !login.token_secret) {
@@ -55,7 +59,7 @@ export function authService({ sql, keys, publicUrl }: Deps): Partial<ServiceImpl
       }
       // An approved login answers with its token until it expires, then is gone.
       if (expired) throw notFound("login");
-      const token = await findToken(sql, login.token_id);
+      const token = await findToken(db, login.token_id);
       const secret = await keys.cipher.open(login.token_secret, loginContext(idHash));
       return create(PollLoginResponseSchema, {
         state: LoginState.APPROVED,
@@ -70,11 +74,17 @@ export function authService({ sql, keys, publicUrl }: Deps): Partial<ServiceImpl
         throw new ConnectError("a project token cannot approve logins", Code.PermissionDenied);
       }
       const userCode = formatUserCode(request.userCode.toUpperCase().replace(/[^A-Z]/g, ""));
-      await sql.begin(async (tx) => {
-        const [login] = await tx<
-          { id_hash: Uint8Array; client_name: string; expire_time: Date; principal_id: string | null }[]
-        >`
-          select id_hash, client_name, expire_time, principal_id from logins where user_code = ${userCode} for update`;
+      await db.transaction(async (tx) => {
+        const [login] = await tx
+          .select({
+            id_hash: logins.id_hash,
+            client_name: logins.client_name,
+            expire_time: logins.expire_time,
+            principal_id: logins.principal_id,
+          })
+          .from(logins)
+          .where(eq(logins.user_code, userCode))
+          .for("update");
         if (!login) throw notFound("login");
         if (login.principal_id !== null) {
           if (login.principal_id === caller.principal.id) return;
@@ -89,16 +99,17 @@ export function authService({ sql, keys, publicUrl }: Deps): Partial<ServiceImpl
           renews: true,
         });
         const sealed = await keys.cipher.seal(new TextEncoder().encode(secret), loginContext(login.id_hash));
-        await tx`
-          update logins set principal_id = ${caller.principal.id}, token_id = ${row.id}, token_secret = ${sealed}
-          where id_hash = ${login.id_hash}`;
+        await tx
+          .update(logins)
+          .set({ principal_id: caller.principal.id, token_id: row.id, token_secret: sealed })
+          .where(eq(logins.id_hash, login.id_hash));
       });
       return {};
     },
 
     async getCurrentPrincipal(_request, context) {
       const caller = callerOf(context);
-      const token = await findToken(sql, caller.tokenId);
+      const token = await findToken(db, caller.tokenId);
       return {
         principal: create(PrincipalSchema, caller.principal),
         token: token && toToken(token),
@@ -114,7 +125,7 @@ export function authService({ sql, keys, publicUrl }: Deps): Partial<ServiceImpl
       }
       const expireTime = request.expireTime && timestampDate(request.expireTime);
       return idempotent(
-        { sql, keys, caller, method: AuthService.method.createToken, request, sealed: true },
+        { db, keys, caller, method: AuthService.method.createToken, request, sealed: true },
         async (tx) => {
           // Checked only when minting, so a retry after expire_time still returns the first result.
           if (expireTime && expireTime <= new Date()) throw invalid("expire_time must be in the future");
@@ -134,25 +145,33 @@ export function authService({ sql, keys, publicUrl }: Deps): Partial<ServiceImpl
       const caller = callerOf(context);
       const p = page(request);
       const after = seqAfter(p);
-      const rows = await sql<(TokenRow & { seq: bigint })[]>`
-        select seq, id, principal_id, name, project_id, create_time, expire_time from api_tokens
-        where principal_id = ${caller.principal.id}
-          and revoke_time is null
-          and (expire_time is null or expire_time > now())
-          ${caller.projectId === undefined ? sql`` : sql`and project_id = ${caller.projectId}`}
-          ${after === undefined ? sql`` : sql`and seq > ${after}`}
-        order by seq
-        limit ${p.size + 1}`;
+      const rows = await db
+        .select({ seq: apiTokens.seq, ...tokenColumns })
+        .from(apiTokens)
+        .where(
+          and(
+            eq(apiTokens.principal_id, caller.principal.id),
+            isNull(apiTokens.revoke_time),
+            or(isNull(apiTokens.expire_time), gt(apiTokens.expire_time, sql`now()`)),
+            caller.projectId === undefined ? undefined : eq(apiTokens.project_id, caller.projectId),
+            after === undefined ? undefined : gt(apiTokens.seq, after),
+          ),
+        )
+        .orderBy(apiTokens.seq)
+        .limit(p.size + 1);
       const { items, nextPageToken } = pageOf(rows, p, (row) => row.seq.toString());
       return { tokens: items.map(toToken), nextPageToken };
     },
 
     async revokeToken(request, context) {
       const caller = callerOf(context);
-      const token = await findToken(sql, required(request.tokenId, "token_id"));
+      const token = await findToken(db, required(request.tokenId, "token_id"));
       if (!token || token.principal_id !== caller.principal.id) throw notFound("token");
       checkProjectAccess(caller, token.project_id ?? "");
-      await sql`update api_tokens set revoke_time = now() where id = ${token.id} and revoke_time is null`;
+      await db
+        .update(apiTokens)
+        .set({ revoke_time: sql`now()` })
+        .where(and(eq(apiTokens.id, token.id), isNull(apiTokens.revoke_time)));
       return {};
     },
   };

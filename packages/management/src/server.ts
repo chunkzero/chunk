@@ -65,7 +65,7 @@ export function createHandler(
   deps: Deps,
   options: HandlerOptions = {},
 ): (request: Request, server?: Server) => Promise<Response> {
-  const authenticator = options.authenticator ?? tokenAuthenticator(deps.sql);
+  const authenticator = options.authenticator ?? tokenAuthenticator(deps.db);
   const router = createConnectRouter({ interceptors: [logUnexpectedErrors, refuseNul], readMaxBytes: maxRpcBytes });
   router
     .service(AuthService, authService(deps))

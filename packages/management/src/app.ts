@@ -17,13 +17,18 @@ import type { Provider } from "./providers/provider.ts";
 import { localReleaseStore } from "./releases/local-store.ts";
 import { maxArchiveBytes } from "./releases/store.ts";
 import type { Authenticator } from "./rpc/caller.ts";
+import { installation } from "./schema.ts";
 import { createHandler, type HandlerOptions } from "./server.ts";
 
 /** What an install built on this service adds to it. */
 export interface Extensions {
   /** Runs environments' machines instead of the Docker provider when `config.machines` is set. */
   provider?: (deps: Deps, installId: string) => Provider;
-  /** A directory of `*.sql` migrations applied after chunk's; see `migrate`. */
+  /**
+   * A drizzle-kit migrations folder for the install's own tables (`out` in its drizzle-kit config), applied after
+   * chunk's on start and recorded in `drizzle.extension_migrations`; see `migrate`. Its schema may reference chunk's
+   * tables, which the package exports.
+   */
   migrations?: string;
   /** Registers more services; a service registered again here replaces the default one. */
   extend?: (router: ConnectRouter, deps: Deps) => void;
@@ -42,7 +47,7 @@ export interface Extensions {
  * startup fails, whatever it had started is stopped again before the error is rethrown.
  */
 export async function start(config: Config, extensions: Extensions = {}) {
-  const sql = connect(config.databaseUrl);
+  const db = connect(config.databaseUrl);
   const shutdown = new AbortController();
   let server: ReturnType<typeof Bun.serve> | undefined;
   let stopExtensions: (() => Promise<void>) | undefined;
@@ -54,16 +59,16 @@ export async function start(config: Config, extensions: Extensions = {}) {
       () => server?.stop(),
       () => stopExtensions?.(),
       () => reconciler?.stop(),
-      () => sql.end({ timeout: 5 }),
+      () => db.$client.close({ timeout: 5 }),
     ]);
   };
   try {
-    await migrate(sql, extensions.migrations);
-    if (config.operatorToken) await ensureOperatorToken(sql, config.operatorToken);
-    if (config.edgeToken) await ensureEdgeToken(sql, config.edgeToken);
+    await migrate(db, extensions.migrations);
+    if (config.operatorToken) await ensureOperatorToken(db, config.operatorToken);
+    if (config.edgeToken) await ensureEdgeToken(db, config.edgeToken);
     const keys = deriveKeys(config.secretKey);
     const deps: Deps = {
-      sql,
+      db,
       keys,
       releases: await localReleaseStore({
         directory: join(config.dataDir, "releases"),
@@ -77,19 +82,19 @@ export async function start(config: Config, extensions: Extensions = {}) {
       edge: config.edge,
       logStore: extensions.logStore ?? (config.logStore && logStoreIssuer(config.logStore)),
       jvmImage: config.machines?.jvmImage,
-      changes: await listenForChanges(sql),
+      changes: await listenForChanges(db),
       shutdown: shutdown.signal,
     };
     const { extend, authenticator, publicMethods } = extensions;
     const options: HandlerOptions = { dashboardDir: config.dashboardDir };
     if (extend) options.extend = (router) => extend(router, deps);
     if (publicMethods) options.publicMethods = publicMethods;
-    if (authenticator) options.authenticator = authenticator(tokenAuthenticator(sql), deps);
+    if (authenticator) options.authenticator = authenticator(tokenAuthenticator(db), deps);
     const handler = createHandler(deps, options);
     const { machines } = config;
     if (machines) {
-      const [installation] = await sql<{ id: string }[]>`select id from installation`;
-      const installId = installation?.id ?? "";
+      const [installed] = await db.select({ id: installation.id }).from(installation);
+      const installId = installed?.id ?? "";
       const provider =
         extensions.provider?.(deps, installId) ??
         dockerProvider({ socketPath: socketPathFrom(machines.dockerHost), network: machines.network, installId });

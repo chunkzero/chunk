@@ -1,13 +1,24 @@
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+
 import { notify } from "../changes.ts";
-import type { Db, Sql } from "../db.ts";
+import type { Database, Db } from "../db.ts";
 import { CapacityState } from "../gen/chunk/management/v1/environment_pb.ts";
 import { EnvironmentState } from "../gen/chunk/management/v1/projects_pb.ts";
 import { failedPrecondition, notFound } from "../rpc/validate.ts";
+import { apiTokens, capacityRequests, environments, supersededInstances } from "../schema.ts";
 import { endUsage } from "./reports.ts";
+
+/** The capacity requests a release, or the takeover that supersedes their core instance, releases. */
+export const releasable = [CapacityState.PROVISIONING, CapacityState.READY, CapacityState.FAILED];
+/** A released request's state: RELEASED once its machine is torn down, RELEASING until the reconciler removes it. */
+export const releasedState = sql<CapacityState>`case when ${capacityRequests.torn_down} then ${CapacityState.RELEASED}::smallint else ${CapacityState.RELEASING}::smallint end`;
 
 /** Advances the environment's desired-state revision, so attached processes receive a new message. */
 export async function advanceRevision(db: Db, environmentId: string): Promise<void> {
-  await db`update environments set revision = revision + 1 where id = ${environmentId}`;
+  await db
+    .update(environments)
+    .set({ revision: sql`${environments.revision} + 1` })
+    .where(eq(environments.id, environmentId));
   await notify(db, { kind: "environment", environmentId });
 }
 
@@ -22,52 +33,73 @@ export async function advanceRevision(db: Db, environmentId: string): Promise<vo
  * transaction when no core attached with an epoch before, as a fork's core does once it has restored.
  */
 export async function claimLease(
-  sql: Sql,
+  db: Database,
   environmentId: string,
   instanceId: string,
   epoch: bigint,
   firstClaim?: (tx: Db) => Promise<void>,
 ) {
-  const { lease } = await sql.begin(async (tx) => {
-    const [environment] = await tx<{ epoch: bigint; owner_instance_id: string }[]>`
-      select epoch, owner_instance_id from environments where id = ${environmentId} for update`;
+  return db.transaction(async (tx) => {
+    const thisEnvironment = eq(environments.id, environmentId);
+    const [environment] = await tx
+      .select({ epoch: environments.epoch, owner_instance_id: environments.owner_instance_id })
+      .from(environments)
+      .where(thisEnvironment)
+      .for("update");
     if (!environment) throw notFound("environment");
     // As text, which keeps the microseconds a Date would drop.
-    const [{ takeover }] = await tx<[{ takeover: string }]>`
-      select greatest(clock_timestamp(), owner_since)::text as takeover from environments where id = ${environmentId}`;
-    const [superseded] = await tx`
-      select 1 from superseded_instances where environment_id = ${environmentId} and instance_id = ${instanceId}`;
+    const [{ takeover } = { takeover: "" }] = await tx
+      .select({ takeover: sql<string>`greatest(clock_timestamp(), ${environments.owner_since})::text` })
+      .from(environments)
+      .where(thisEnvironment);
+    const [superseded] = await tx
+      .select({ one: sql`1` })
+      .from(supersededInstances)
+      .where(
+        and(eq(supersededInstances.environment_id, environmentId), eq(supersededInstances.instance_id, instanceId)),
+      );
     if (superseded) throw failedPrecondition("another core's attach superseded this instance");
     if (epoch < environment.epoch) {
       throw failedPrecondition(`epoch ${epoch} is lower than the environment's epoch ${environment.epoch}`);
     }
     if (environment.epoch === 0n && epoch > 0n) await firstClaim?.(tx);
     if (environment.owner_instance_id && environment.owner_instance_id !== instanceId) {
-      await tx`
+      await tx.execute(sql`
         insert into superseded_instances (environment_id, instance_id, owned_since, superseded_time)
         select ${environmentId}, ${environment.owner_instance_id}, owner_since, ${takeover}::timestamptz
         from environments where id = ${environmentId}
-        on conflict do nothing`;
+        on conflict do nothing`);
       await endUsage(tx, environmentId, environment.owner_instance_id, takeover);
-      await tx`
-        update capacity_requests
-        set state = case when torn_down then ${CapacityState.RELEASED}::smallint else ${CapacityState.RELEASING}::smallint end
-        where environment_id = ${environmentId} and owner_instance_id = ${environment.owner_instance_id}
-          and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY}, ${CapacityState.FAILED})`;
+      await tx
+        .update(capacityRequests)
+        .set({ state: releasedState })
+        .where(
+          and(
+            eq(capacityRequests.environment_id, environmentId),
+            eq(capacityRequests.owner_instance_id, environment.owner_instance_id),
+            inArray(capacityRequests.state, releasable),
+          ),
+        );
     }
-    const [claimed] = await tx<{ lease: bigint }[]>`
-      update environments
-      set lease = lease + 1, epoch = ${epoch}, owner_instance_id = ${instanceId},
-        owner_since = case when owner_instance_id = ${instanceId} then owner_since else ${takeover}::timestamptz end,
-        report_sequence = 0, report_desired_revision = 0, ready_to_suspend = false,
-        report_logins = case when owner_instance_id = ${instanceId} then report_logins else 0 end,
-        gateway_addresses = case when owner_instance_id = ${instanceId} then gateway_addresses else '{}' end
-      where id = ${environmentId}
-      returning lease`;
+    const sameOwner = sql`owner_instance_id = ${instanceId}`;
+    const [claimed] = await tx
+      .update(environments)
+      .set({
+        lease: sql`lease + 1`,
+        epoch,
+        owner_instance_id: instanceId,
+        owner_since: sql`case when ${sameOwner} then owner_since else ${takeover}::timestamptz end`,
+        report_sequence: 0n,
+        report_desired_revision: 0n,
+        ready_to_suspend: false,
+        report_logins: sql`case when ${sameOwner} then report_logins else 0 end`,
+        gateway_addresses: sql`case when ${sameOwner} then gateway_addresses else '{}' end`,
+      })
+      .where(thisEnvironment)
+      .returning({ lease: environments.lease });
     await notify(tx, { kind: "environment", environmentId });
-    return { lease: claimed?.lease ?? 0n };
+    return claimed?.lease ?? 0n;
   });
-  return lease;
 }
 
 /** Fails calls made under any lease but the current one. */
@@ -84,16 +116,23 @@ export function fenceLease(current: bigint, lease: bigint): void {
  * leaves removing the machines, then its log objects, then the row, to the reconciler. Core's token is saved before any
  * machine is created, so an environment without one has none, even ones whose create reply was lost.
  */
-export async function deleteEnvironment(sql: Sql, environmentId: string): Promise<void> {
-  await sql.begin(async (tx) => {
-    const [environment] = await tx<{ provisioned: boolean }[]>`
-      select machine_token is not null as provisioned from environments where id = ${environmentId} for update`;
+export async function deleteEnvironment(db: Database, environmentId: string): Promise<void> {
+  await db.transaction(async (tx) => {
+    const thisEnvironment = eq(environments.id, environmentId);
+    const [environment] = await tx
+      .select({ provisioned: sql<boolean>`${environments.machine_token} is not null` })
+      .from(environments)
+      .where(thisEnvironment)
+      .for("update");
     if (!environment) return;
     if (!environment.provisioned) {
-      await tx`delete from environments where id = ${environmentId}`;
+      await tx.delete(environments).where(thisEnvironment);
     } else {
-      await tx`update environments set state = ${EnvironmentState.DELETING} where id = ${environmentId}`;
-      await tx`update api_tokens set revoke_time = now() where environment_id = ${environmentId} and revoke_time is null`;
+      await tx.update(environments).set({ state: EnvironmentState.DELETING }).where(thisEnvironment);
+      await tx
+        .update(apiTokens)
+        .set({ revoke_time: sql`now()` })
+        .where(and(eq(apiTokens.environment_id, environmentId), isNull(apiTokens.revoke_time)));
     }
     await notify(tx, { kind: "environment", environmentId });
   });

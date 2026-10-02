@@ -1,58 +1,47 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampDate } from "@bufbuild/protobuf/wkt";
 import type { ServiceImpl } from "@connectrpc/connect";
+import { and, asc, desc, eq, gt, gte, lte, sql } from "drizzle-orm";
 
 import type { Deps } from "../deps.ts";
-import type { LogSeverity, LogSource } from "../gen/chunk/management/v1/common_pb.ts";
 import { type LogService, ReadLogsResponseSchema } from "../gen/chunk/management/v1/logs_pb.ts";
 import { loadEnvironment } from "../projects/store.ts";
 import { callerOf } from "../rpc/caller.ts";
 import { endIfShuttingDown, streamSignal, timestamp } from "../rpc/validate.ts";
+import { logEntries } from "../schema.ts";
 
-interface LogRow {
-  seq: bigint;
-  instance_id: string;
-  sequence: bigint;
-  time: Date;
-  source: LogSource;
-  severity: LogSeverity;
-  message: string;
-  app_id: string;
-  deployment_id: string;
-}
+type LogRow = typeof logEntries.$inferSelect;
 
 const defaultLimit = 1000;
 const maxLimit = 10_000;
 const batchSize = 500;
 const keepaliveMs = 30_000;
 
-export function logService({ sql, changes, shutdown }: Deps): Partial<ServiceImpl<typeof LogService>> {
+export function logService({ db, changes, shutdown }: Deps): Partial<ServiceImpl<typeof LogService>> {
   return {
     /** Entries come in the order the service stored them. */
     async *readLogs(request, context) {
-      const environment = await loadEnvironment(sql, callerOf(context), request.environmentId);
+      const environment = await loadEnvironment(db, callerOf(context), request.environmentId);
       const limit = Math.min(request.limit || defaultLimit, maxLimit);
       const subscription = request.follow
         ? changes.subscribe((change) => change.kind === "logs" && change.environmentId === environment.id)
         : undefined;
       try {
-        const matching = sql`
-          environment_id = ${environment.id}
-          ${request.deploymentId ? sql`and deployment_id = ${request.deploymentId}` : sql``}
-          ${request.appId ? sql`and app_id = ${request.appId}` : sql``}
-          ${request.startTime ? sql`and time >= ${timestampDate(request.startTime)}` : sql``}`;
+        const matching = and(
+          eq(logEntries.environment_id, environment.id),
+          request.deploymentId ? eq(logEntries.deployment_id, request.deploymentId) : undefined,
+          request.appId ? eq(logEntries.app_id, request.appId) : undefined,
+          request.startTime ? gte(logEntries.time, timestampDate(request.startTime)) : undefined,
+        );
         // Following resumes after the newest entry that existed when the stored ones were read, so none repeats.
-        const [{ last } = { last: 0n }] = await sql<{ last: bigint }[]>`
-          select coalesce(max(seq), 0) as last from log_entries where environment_id = ${environment.id}`;
+        const [{ last } = { last: 0n }] = await db
+          .select({ last: sql`coalesce(max(${logEntries.seq}), 0)`.mapWith(logEntries.seq) })
+          .from(logEntries)
+          .where(eq(logEntries.environment_id, environment.id));
+        const upToLast = and(matching, lte(logEntries.seq, last));
         const stored = request.startTime
-          ? await sql<LogRow[]>`
-              select * from log_entries
-              where ${matching} and seq <= ${last}
-              order by seq limit ${limit}`
-          : (
-              await sql<LogRow[]>`
-                select * from log_entries where ${matching} and seq <= ${last} order by seq desc limit ${limit}`
-            ).reverse();
+          ? await db.select().from(logEntries).where(upToLast).orderBy(asc(logEntries.seq)).limit(limit)
+          : (await db.select().from(logEntries).where(upToLast).orderBy(desc(logEntries.seq)).limit(limit)).reverse();
         for (let start = 0; start < stored.length; start += batchSize) {
           yield response(stored.slice(start, start + batchSize));
         }
@@ -66,8 +55,12 @@ export function logService({ sql, changes, shutdown }: Deps): Partial<ServiceImp
           if (signal.aborted) break;
           let rows: LogRow[];
           do {
-            rows = await sql<LogRow[]>`
-              select * from log_entries where ${matching} and seq > ${after} order by seq limit ${batchSize}`;
+            rows = await db
+              .select()
+              .from(logEntries)
+              .where(and(matching, gt(logEntries.seq, after)))
+              .orderBy(asc(logEntries.seq))
+              .limit(batchSize);
             after = rows.at(-1)?.seq ?? after;
             // An empty batch is the keepalive.
             if (rows.length > 0 || Date.now() - sentAt >= keepaliveMs) {

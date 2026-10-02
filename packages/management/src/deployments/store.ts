@@ -1,7 +1,8 @@
 import { create } from "@bufbuild/protobuf";
+import { and, eq, inArray, ne, sql } from "drizzle-orm";
 
 import { newId } from "../crypto.ts";
-import type { Db } from "../db.ts";
+import { type Db, fetchRows } from "../db.ts";
 import { jvmImage } from "../environments/machines.ts";
 import { advanceRevision } from "../environments/store.ts";
 import { DeploymentState } from "../gen/chunk/management/v1/common_pb.ts";
@@ -16,29 +17,10 @@ import {
 import type { EnvironmentRow } from "../projects/store.ts";
 import type { ReleaseManifest } from "../releases/manifest.ts";
 import { failedPrecondition, notFound, timestamp } from "../rpc/validate.ts";
+import { deployments, environments, releases } from "../schema.ts";
 
-export interface ReleaseRow {
-  project_id: string;
-  id: string;
-  state: ReleaseState;
-  archive_sha256: string;
-  archive_size_bytes: bigint;
-  manifest: ReleaseManifest | null;
-  create_time: Date;
-}
-
-export interface DeploymentRow {
-  seq: bigint;
-  id: string;
-  environment_id: string;
-  release_id: string;
-  state: DeploymentState;
-  trigger: DeploymentTrigger;
-  message: string;
-  create_time: Date;
-  update_time: Date;
-  activate_time: Date | null;
-}
+export type ReleaseRow = typeof releases.$inferSelect;
+export type DeploymentRow = typeof deployments.$inferSelect;
 
 export function toRelease(row: ReleaseRow): Release {
   return create(ReleaseSchema, {
@@ -65,7 +47,10 @@ export function toDeployment(row: DeploymentRow): Deployment {
 }
 
 export async function findRelease(db: Db, projectId: string, id: string): Promise<ReleaseRow | undefined> {
-  const [row] = await db<ReleaseRow[]>`select * from releases where project_id = ${projectId} and id = ${id}`;
+  const [row] = await db
+    .select()
+    .from(releases)
+    .where(and(eq(releases.project_id, projectId), eq(releases.id, id)));
   return row;
 }
 
@@ -98,13 +83,21 @@ export async function createDeployment(
     throw failedPrecondition("the release has not finished uploading");
   }
   requireJvmImage(release.manifest, jvmImageTemplate);
-  await db`
-    update deployments set state = ${DeploymentState.SUPERSEDED}, update_time = now()
-    where environment_id = ${environment.id} and state in ${db(unfinished)}`;
-  const [row] = await db<DeploymentRow[]>`
-    insert into deployments (id, environment_id, release_id, state, trigger, stop_previous)
-    values (${newId("dep")}, ${environment.id}, ${release.id}, ${DeploymentState.PENDING}, ${trigger}, ${stopPrevious})
-    returning *`;
+  await db
+    .update(deployments)
+    .set({ state: DeploymentState.SUPERSEDED, update_time: sql`now()` })
+    .where(and(eq(deployments.environment_id, environment.id), inArray(deployments.state, unfinished)));
+  const [row] = await db
+    .insert(deployments)
+    .values({
+      id: newId("dep"),
+      environment_id: environment.id,
+      release_id: release.id,
+      state: DeploymentState.PENDING,
+      trigger,
+      stop_previous: stopPrevious,
+    })
+    .returning();
   if (!row) throw new Error("deployment insert returned no row");
   await advanceRevision(db, environment.id);
   return toDeployment(row);
@@ -121,14 +114,22 @@ export async function deployRestored(
   deploymentId: string,
   jvmImageTemplate: string | undefined,
 ): Promise<void> {
-  const [fork] = await db<EnvironmentRow[]>`
-    select * from environments where id = ${forkId} and forked_from_environment_id <> ''`;
+  const [fork] = await db
+    .select()
+    .from(environments)
+    .where(and(eq(environments.id, forkId), ne(environments.forked_from_environment_id, "")));
   if (!fork) return;
-  const [deployed] = await db`select 1 from deployments where environment_id = ${forkId} limit 1`;
+  const [deployed] = await db
+    .select({ one: sql`1` })
+    .from(deployments)
+    .where(eq(deployments.environment_id, forkId))
+    .limit(1);
   if (deployed) return;
-  const [restored] = await db<{ release_id: string }[]>`
-    select d.release_id from deployments d join environments e on e.id = d.environment_id
-    where d.id = ${deploymentId} and e.project_id = ${fork.project_id}`;
+  const [restored] = await db
+    .select({ release_id: deployments.release_id })
+    .from(deployments)
+    .innerJoin(environments, eq(environments.id, deployments.environment_id))
+    .where(and(eq(deployments.id, deploymentId), eq(environments.project_id, fork.project_id)));
   const release = restored && (await findRelease(db, fork.project_id, restored.release_id));
   const java = release?.manifest?.java_version;
   if (release?.state !== ReleaseState.READY || !release.manifest || !jvmImage(jvmImageTemplate, java)) {
@@ -145,35 +146,47 @@ export async function deployRestored(
  * environment activated anyway counts when it is newer than the active one; newer unfinished deployments stay desired.
  */
 export async function activateDeployment(db: Db, id: string): Promise<void> {
-  const [row] = await db<{ environment_id: string }[]>`
+  const [row] = await fetchRows<{ environment_id: string }>(
+    db,
+    sql`
     update deployments d set state = ${DeploymentState.ACTIVE}, activate_time = now(), update_time = now()
     where d.id = ${id} and (
-      d.state in ${db(unfinished)}
+      d.state in ${unfinished}
       or (d.state = ${DeploymentState.SUPERSEDED} and d.seq > coalesce((
         select max(a.seq) from deployments a
         where a.environment_id = d.environment_id and a.state = ${DeploymentState.ACTIVE}
       ), 0))
     )
-    returning environment_id`;
+    returning environment_id`,
+  );
   if (!row) return;
-  await db`
-    update deployments set state = ${DeploymentState.SUPERSEDED}, update_time = now()
-    where environment_id = ${row.environment_id} and state = ${DeploymentState.ACTIVE} and id <> ${id}`;
-  await db`update environments set active_deployment_id = ${id} where id = ${row.environment_id}`;
+  await db
+    .update(deployments)
+    .set({ state: DeploymentState.SUPERSEDED, update_time: sql`now()` })
+    .where(
+      and(
+        eq(deployments.environment_id, row.environment_id),
+        eq(deployments.state, DeploymentState.ACTIVE),
+        ne(deployments.id, id),
+      ),
+    );
+  await db.update(environments).set({ active_deployment_id: id }).where(eq(environments.id, row.environment_id));
 }
 
 /** Records that the environment could not start a deployment; the previous one keeps serving. */
 export async function failDeployment(db: Db, id: string, message: string): Promise<void> {
-  const [row] = await db<{ environment_id: string }[]>`
-    update deployments set state = ${DeploymentState.FAILED}, message = ${message}, update_time = now()
-    where id = ${id} and state in ${db(unfinished)}
-    returning environment_id`;
+  const [row] = await db
+    .update(deployments)
+    .set({ state: DeploymentState.FAILED, message, update_time: sql`now()` })
+    .where(and(eq(deployments.id, id), inArray(deployments.state, unfinished)))
+    .returning({ environment_id: deployments.environment_id });
   if (row) await advanceRevision(db, row.environment_id);
 }
 
 /** Records that the environment started a deployment. */
 export async function progressDeployment(db: Db, id: string): Promise<void> {
-  await db`
-    update deployments set state = ${DeploymentState.IN_PROGRESS}, update_time = now()
-    where id = ${id} and state = ${DeploymentState.PENDING}`;
+  await db
+    .update(deployments)
+    .set({ state: DeploymentState.IN_PROGRESS, update_time: sql`now()` })
+    .where(and(eq(deployments.id, id), eq(deployments.state, DeploymentState.PENDING)));
 }

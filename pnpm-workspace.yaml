@@ -1,2 +1,7 @@
 packages:
   - packages/*
+
+overrides:
+  # An optional peer pnpm would otherwise resolve from management's dev dependencies and ship with it; the types come
+  # from @types/bun.
+  drizzle-orm>bun-types: "-"

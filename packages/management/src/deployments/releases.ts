@@ -1,6 +1,7 @@
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
+import { and, eq, sql } from "drizzle-orm";
 
 import type { Deps } from "../deps.ts";
 import { type DeploymentService, ReleaseState, UploadTargetSchema } from "../gen/chunk/management/v1/deployments_pb.ts";
@@ -9,13 +10,14 @@ import { type ReleaseManifest, verifyRelease } from "../releases/manifest.ts";
 import { maxArchiveBytes, releaseKey } from "../releases/store.ts";
 import { callerOf } from "../rpc/caller.ts";
 import { failedPrecondition, invalid, notFound } from "../rpc/validate.ts";
-import { findRelease, type ReleaseRow, toRelease } from "./store.ts";
+import { deployments, releases as releaseRows } from "../schema.ts";
+import { findRelease, toRelease } from "./store.ts";
 
 const uploadLifetimeMs = 60 * 60 * 1000;
 const releaseIdPattern = /^[A-Za-z0-9_-]{1,128}$/;
 
 export function releaseHandlers({
-  sql,
+  db,
   releases,
   archiveLimits,
 }: Deps): Pick<ServiceImpl<typeof DeploymentService>, "uploadRelease" | "completeReleaseUpload" | "listApps"> {
@@ -27,7 +29,7 @@ export function releaseHandlers({
 
   return {
     async uploadRelease(request, context) {
-      const project = await loadProject(sql, callerOf(context), request.projectId);
+      const project = await loadProject(db, callerOf(context), request.projectId);
       if (!releaseIdPattern.test(request.releaseId)) {
         throw invalid("release_id must be 1-128 letters, digits, underscores or hyphens");
       }
@@ -36,15 +38,25 @@ export function releaseHandlers({
         throw invalid(`archive_size_bytes must be between 1 and ${maxArchiveBytes}`);
       }
       // An unfinished upload takes the latest declared digest; a READY release never changes.
-      const [declared] = await sql<ReleaseRow[]>`
-        insert into releases (project_id, id, state, archive_sha256, archive_size_bytes)
-        values (${project.id}, ${request.releaseId}, ${ReleaseState.UPLOADING}, ${request.archiveSha256},
-          ${request.archiveSizeBytes})
-        on conflict (project_id, id) do update
-          set archive_sha256 = excluded.archive_sha256, archive_size_bytes = excluded.archive_size_bytes
-          where releases.state = ${ReleaseState.UPLOADING}
-        returning *`;
-      const release = declared ?? (await findRelease(sql, project.id, request.releaseId));
+      const [declared] = await db
+        .insert(releaseRows)
+        .values({
+          project_id: project.id,
+          id: request.releaseId,
+          state: ReleaseState.UPLOADING,
+          archive_sha256: request.archiveSha256,
+          archive_size_bytes: request.archiveSizeBytes,
+        })
+        .onConflictDoUpdate({
+          target: [releaseRows.project_id, releaseRows.id],
+          set: {
+            archive_sha256: sql`excluded.archive_sha256`,
+            archive_size_bytes: sql`excluded.archive_size_bytes`,
+          },
+          setWhere: eq(releaseRows.state, ReleaseState.UPLOADING),
+        })
+        .returning();
+      const release = declared ?? (await findRelease(db, project.id, request.releaseId));
       if (!release) throw notFound("release");
       const key = releaseKey(project.id, release.id, release.archive_sha256);
       if (release.state === ReleaseState.READY) {
@@ -70,8 +82,8 @@ export function releaseHandlers({
     },
 
     async completeReleaseUpload(request, context) {
-      const project = await loadProject(sql, callerOf(context), request.projectId);
-      const release = await findRelease(sql, project.id, request.releaseId);
+      const project = await loadProject(db, callerOf(context), request.projectId);
+      const release = await findRelease(db, project.id, request.releaseId);
       if (!release) throw notFound("release");
       if (release.state === ReleaseState.READY) {
         if (!(await isStored(releaseKey(project.id, release.id, release.archive_sha256)))) {
@@ -90,13 +102,21 @@ export function releaseHandlers({
       } catch (error) {
         throw failedPrecondition(`the archive is not a valid release: ${(error as Error).message}`);
       }
-      const [ready] = await sql<ReleaseRow[]>`
-        update releases set state = ${ReleaseState.READY}, manifest = ${JSON.stringify(manifest)}::text::jsonb
-        where project_id = ${project.id} and id = ${release.id} and state = ${ReleaseState.UPLOADING}
-          and archive_sha256 = ${sha256} and archive_size_bytes = ${sizeBytes}
-        returning *`;
+      const [ready] = await db
+        .update(releaseRows)
+        .set({ state: ReleaseState.READY, manifest })
+        .where(
+          and(
+            eq(releaseRows.project_id, project.id),
+            eq(releaseRows.id, release.id),
+            eq(releaseRows.state, ReleaseState.UPLOADING),
+            eq(releaseRows.archive_sha256, sha256),
+            eq(releaseRows.archive_size_bytes, sizeBytes),
+          ),
+        )
+        .returning();
       if (ready) return { release: toRelease(ready) };
-      const current = await findRelease(sql, project.id, release.id);
+      const current = await findRelease(db, project.id, release.id);
       if (
         current?.state === ReleaseState.READY &&
         current.archive_sha256 === sha256 &&
@@ -108,15 +128,17 @@ export function releaseHandlers({
     },
 
     async listApps(request, context) {
-      const environment = await loadEnvironment(sql, callerOf(context), request.environmentId);
+      const environment = await loadEnvironment(db, callerOf(context), request.environmentId);
       let releaseId = request.releaseId;
       if (!releaseId) {
-        const [active] = await sql<{ release_id: string }[]>`
-          select release_id from deployments where id = ${environment.active_deployment_id}`;
+        const [active] = await db
+          .select({ release_id: deployments.release_id })
+          .from(deployments)
+          .where(eq(deployments.id, environment.active_deployment_id));
         if (!active) throw failedPrecondition("the environment has no active deployment");
         releaseId = active.release_id;
       }
-      const release = await findRelease(sql, environment.project_id, releaseId);
+      const release = await findRelease(db, environment.project_id, releaseId);
       if (!release) throw notFound("release");
       if (!release.manifest) throw failedPrecondition("the release has not finished uploading");
       return {

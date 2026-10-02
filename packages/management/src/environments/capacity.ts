@@ -1,5 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
+import { and, eq, inArray } from "drizzle-orm";
 
 import { notify } from "../changes.ts";
 import { findRelease, requireJvmImage } from "../deployments/store.ts";
@@ -14,34 +15,10 @@ import {
 } from "../gen/chunk/management/v1/environment_pb.ts";
 import { environmentOf } from "../rpc/caller.ts";
 import { failedPrecondition, invalid, notFound, required } from "../rpc/validate.ts";
-import { fenceLease } from "./store.ts";
+import { capacityRequests, environments } from "../schema.ts";
+import { fenceLease, releasable, releasedState } from "./store.ts";
 
-export interface CapacityRow {
-  environment_id: string;
-  request_id: string;
-  workload: Workload;
-  machine_profile: string;
-  release_id: string;
-  app_id: string;
-  memory_mib: number;
-  /** The release's Java version for JVM requests; null for gateways. */
-  java_version: number | null;
-  state: CapacityState;
-  message: string;
-  machine_id: string;
-  machine_addresses: string[];
-  torn_down: boolean;
-  /** Whether the reconciler ever started the request's JVM machine. */
-  started: boolean;
-  /** Whether the reconciler asked the request's suspended JVM machine to resume and has not seen it running since. */
-  resuming: boolean;
-  /** Sealed under `capacityCredentialContext`. */
-  credential: Uint8Array;
-  /** `keys.fingerprint` of the plaintext credential. */
-  credential_digest: Uint8Array;
-  /** The core instance that owned the environment when the request was recorded. */
-  owner_instance_id: string;
-}
+export type CapacityRow = typeof capacityRequests.$inferSelect;
 
 type CapacityServices = Pick<ServiceImpl<typeof EnvironmentService>, "ensureCapacity" | "releaseCapacity">;
 
@@ -60,7 +37,7 @@ export function capacityCredentialContext(environmentId: string, requestId: stri
  * finds its ID gone. A released request ID, even one released before it was ever ensured, stays released. Superseding a
  * core instance releases its requests.
  */
-export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityServices {
+export function capacityServices({ db, keys, jvmImage }: Deps): CapacityServices {
   return {
     async ensureCapacity(request, context) {
       const environmentId = environmentOf(context);
@@ -74,15 +51,21 @@ export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityService
       const plaintext = new TextEncoder().encode(credential);
       const digest = keys.fingerprint(plaintext);
 
-      const { row } = await sql.begin(async (tx) => {
-        const [environment] = await tx<{ lease: bigint; project_id: string; owner_instance_id: string }[]>`
-          select lease, project_id, owner_instance_id from environments where id = ${environmentId} for update`;
+      const row = await db.transaction(async (tx) => {
+        const [environment] = await tx
+          .select({
+            lease: environments.lease,
+            project_id: environments.project_id,
+            owner_instance_id: environments.owner_instance_id,
+          })
+          .from(environments)
+          .where(eq(environments.id, environmentId))
+          .for("update");
         if (!environment) throw notFound("environment");
         fenceLease(environment.lease, request.lease);
-        const [existing] = await tx<CapacityRow[]>`
-          select * from capacity_requests where environment_id = ${environmentId} and request_id = ${requestId}`;
+        const [existing] = await tx.select().from(capacityRequests).where(thisRequest(environmentId, requestId));
         if (existing) {
-          if (existing.workload === Workload.UNSPECIFIED) return { row: existing };
+          if (existing.workload === Workload.UNSPECIFIED) return existing;
           const same =
             existing.workload === workload &&
             existing.machine_profile === machineProfile &&
@@ -90,7 +73,7 @@ export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityService
             existing.app_id === appId &&
             Buffer.from(existing.credential_digest).equals(digest);
           if (!same) throw new ConnectError("request_id was already used with different arguments", Code.AlreadyExists);
-          return { row: existing };
+          return existing;
         }
 
         const release = await findRelease(tx, environment.project_id, releaseId);
@@ -107,16 +90,25 @@ export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityService
         }
         if (jvm) requireJvmImage(release.manifest, jvmImage);
         const sealed = await keys.cipher.seal(plaintext, capacityCredentialContext(environmentId, requestId));
-        const [inserted] = await tx<CapacityRow[]>`
-          insert into capacity_requests
-            (environment_id, request_id, workload, machine_profile, release_id, app_id, memory_mib, java_version, state,
-              credential, credential_digest, owner_instance_id)
-          values (${environmentId}, ${requestId}, ${workload}, ${machineProfile}, ${releaseId}, ${appId},
-            ${profile.memory_mib}, ${jvm ? (release.manifest.java_version ?? null) : null}, ${CapacityState.PROVISIONING},
-            ${sealed}, ${digest}, ${environment.owner_instance_id})
-          returning *`;
+        const [inserted] = await tx
+          .insert(capacityRequests)
+          .values({
+            environment_id: environmentId,
+            request_id: requestId,
+            workload,
+            machine_profile: machineProfile,
+            release_id: releaseId,
+            app_id: appId,
+            memory_mib: profile.memory_mib,
+            java_version: jvm ? (release.manifest.java_version ?? null) : null,
+            state: CapacityState.PROVISIONING,
+            credential: sealed,
+            credential_digest: digest,
+            owner_instance_id: environment.owner_instance_id,
+          })
+          .returning();
         await notify(tx, { kind: "environment", environmentId });
-        return { row: inserted };
+        return inserted;
       });
       return { capacity: row && toCapacity(row) };
     },
@@ -124,40 +116,55 @@ export function capacityServices({ sql, keys, jvmImage }: Deps): CapacityService
     async releaseCapacity(request, context) {
       const environmentId = environmentOf(context);
       const requestId = required(request.requestId, "request_id");
-      const { row } = await sql.begin(async (tx) => {
-        const [environment] = await tx<{ lease: bigint; owner_instance_id: string }[]>`
-          select lease, owner_instance_id from environments where id = ${environmentId} for update`;
+      const row = await db.transaction(async (tx) => {
+        const [environment] = await tx
+          .select({ lease: environments.lease, owner_instance_id: environments.owner_instance_id })
+          .from(environments)
+          .where(eq(environments.id, environmentId))
+          .for("update");
         if (!environment) throw notFound("environment");
         fenceLease(environment.lease, request.lease);
         // RELEASED once the machine is gone: a failed request's machine may already be torn down, otherwise the
         // reconciler sets it when it removes the machine.
-        const [released] = await tx<CapacityRow[]>`
-          update capacity_requests
-          set state = case when torn_down then ${CapacityState.RELEASED}::smallint else ${CapacityState.RELEASING}::smallint end
-          where environment_id = ${environmentId} and request_id = ${requestId}
-            and state in (${CapacityState.PROVISIONING}, ${CapacityState.READY}, ${CapacityState.FAILED})
-          returning *`;
+        const [released] = await tx
+          .update(capacityRequests)
+          .set({ state: releasedState })
+          .where(and(thisRequest(environmentId, requestId), inArray(capacityRequests.state, releasable)))
+          .returning();
         if (released) {
           await notify(tx, { kind: "environment", environmentId });
-          return { row: released };
+          return released;
         }
-        const [existing] = await tx<CapacityRow[]>`
-          select * from capacity_requests where environment_id = ${environmentId} and request_id = ${requestId}`;
-        if (existing) return { row: existing };
+        const [existing] = await tx.select().from(capacityRequests).where(thisRequest(environmentId, requestId));
+        if (existing) return existing;
         // A tombstone, so an ensure arriving after this release finds the ID released. It has no workload, which is
         // how ensures recognize it, and no machine or credential.
-        const [tombstone] = await tx<CapacityRow[]>`
-          insert into capacity_requests
-            (environment_id, request_id, workload, machine_profile, release_id, app_id, memory_mib, state, torn_down,
-              credential, credential_digest, owner_instance_id)
-          values (${environmentId}, ${requestId}, ${Workload.UNSPECIFIED}, '', '', '', 0, ${CapacityState.RELEASED}, true,
-            '', '', ${environment.owner_instance_id})
-          returning *`;
-        return { row: tombstone };
+        const [tombstone] = await tx
+          .insert(capacityRequests)
+          .values({
+            environment_id: environmentId,
+            request_id: requestId,
+            workload: Workload.UNSPECIFIED,
+            machine_profile: "",
+            release_id: "",
+            app_id: "",
+            memory_mib: 0,
+            state: CapacityState.RELEASED,
+            torn_down: true,
+            credential: new Uint8Array(),
+            credential_digest: new Uint8Array(),
+            owner_instance_id: environment.owner_instance_id,
+          })
+          .returning();
+        return tombstone;
       });
       return { capacity: row && toCapacity(row) };
     },
   };
+}
+
+function thisRequest(environmentId: string, requestId: string) {
+  return and(eq(capacityRequests.environment_id, environmentId), eq(capacityRequests.request_id, requestId));
 }
 
 function toCapacity(row: CapacityRow): Capacity {

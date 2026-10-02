@@ -1,5 +1,6 @@
 import { create } from "@bufbuild/protobuf";
 import { Code, ConnectError, type HandlerContext, type ServiceImpl } from "@connectrpc/connect";
+import { and, eq, getTableColumns, gt, ne, sql } from "drizzle-orm";
 
 import { notify } from "../changes.ts";
 import { newId, randomToken } from "../crypto.ts";
@@ -14,23 +15,14 @@ import {
 import { loadEnvironment } from "../projects/store.ts";
 import { callerOf, checkProjectAccess } from "../rpc/caller.ts";
 import { invalid, notFound, page, pageOf, required, seqAfter, timestamp, unique } from "../rpc/validate.ts";
+import { domains, environments } from "../schema.ts";
 
-interface DomainRow {
-  seq: bigint;
-  id: string;
-  environment_id: string;
-  hostname: string;
-  state: DomainState;
-  challenge: string;
-  create_time: Date;
-  project_id: string;
-  environment_hostname: string;
-}
+type DomainRow = typeof domains.$inferSelect & { project_id: string; environment_hostname: string };
 
 const labelPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const challengePrefix = "chunk-domain-verification=";
 
-export function domainService({ sql, resolveTxt, edge }: Deps): Partial<ServiceImpl<typeof DomainService>> {
+export function domainService({ db, resolveTxt, edge }: Deps): Partial<ServiceImpl<typeof DomainService>> {
   // The SRV target is the environment's own hostname, which the edge routes whatever hostname a client sends.
   const toDomain = (row: DomainRow): Domain =>
     create(DomainSchema, {
@@ -57,30 +49,50 @@ export function domainService({ sql, resolveTxt, edge }: Deps): Partial<ServiceI
       createTime: timestamp(row.create_time),
     });
 
-  const selectDomains = () => sql`
-    select d.*, e.project_id, e.hostname as environment_hostname
-    from domains d join environments e on e.id = d.environment_id`;
+  const selectDomains = () =>
+    db
+      .select({
+        ...getTableColumns(domains),
+        project_id: environments.project_id,
+        environment_hostname: environments.hostname,
+      })
+      .from(domains)
+      .innerJoin(environments, eq(environments.id, domains.environment_id));
 
   const loadDomain = async (id: string, context: HandlerContext) => {
-    const [row] = await sql<DomainRow[]>`${selectDomains()} where d.id = ${required(id, "domain_id")}`;
+    const [row] = await selectDomains().where(eq(domains.id, required(id, "domain_id")));
     if (row) checkProjectAccess(callerOf(context), row.project_id);
     return row;
   };
 
   return {
     async addDomain(request, context) {
-      const environment = await loadEnvironment(sql, callerOf(context), request.environmentId);
+      const environment = await loadEnvironment(db, callerOf(context), request.environmentId);
       const hostname = normalizeHostname(request.hostname);
-      const [taken] = await sql`
-        select 1 from domains
-        where hostname = ${hostname} and state = ${DomainState.VERIFIED} and environment_id <> ${environment.id}`;
+      const [taken] = await db
+        .select({ one: sql`1` })
+        .from(domains)
+        .where(
+          and(
+            eq(domains.hostname, hostname),
+            eq(domains.state, DomainState.VERIFIED),
+            ne(domains.environment_id, environment.id),
+          ),
+        );
       if (taken) throw new ConnectError("another environment already verified this hostname", Code.AlreadyExists);
-      await sql`
-        insert into domains (id, environment_id, hostname, state, challenge)
-        values (${newId("dom")}, ${environment.id}, ${hostname}, ${DomainState.PENDING_VERIFICATION}, ${randomToken(24)})
-        on conflict (environment_id, hostname) do nothing`;
-      const [row] = await sql<DomainRow[]>`
-        ${selectDomains()} where d.environment_id = ${environment.id} and d.hostname = ${hostname}`;
+      await db
+        .insert(domains)
+        .values({
+          id: newId("dom"),
+          environment_id: environment.id,
+          hostname,
+          state: DomainState.PENDING_VERIFICATION,
+          challenge: randomToken(24),
+        })
+        .onConflictDoNothing({ target: [domains.environment_id, domains.hostname] });
+      const [row] = await selectDomains().where(
+        and(eq(domains.environment_id, environment.id), eq(domains.hostname, hostname)),
+      );
       if (!row) throw notFound("domain");
       return { domain: toDomain(row) };
     },
@@ -93,23 +105,23 @@ export function domainService({ sql, resolveTxt, edge }: Deps): Partial<ServiceI
       if (!(await lookupTxt(resolveTxt, challengeName(domain.hostname))).includes(expected)) {
         return { domain: toDomain(domain) };
       }
-      await unique(
-        "another environment already verified this hostname",
-        () => sql`update domains set state = ${DomainState.VERIFIED} where id = ${domain.id}`,
+      await unique("another environment already verified this hostname", () =>
+        db.update(domains).set({ state: DomainState.VERIFIED }).where(eq(domains.id, domain.id)),
       );
-      await notify(sql, { kind: "environment", environmentId: domain.environment_id });
+      await notify(db, { kind: "environment", environmentId: domain.environment_id });
       return { domain: toDomain({ ...domain, state: DomainState.VERIFIED }) };
     },
 
     async listDomains(request, context) {
-      const environment = await loadEnvironment(sql, callerOf(context), request.environmentId);
+      const environment = await loadEnvironment(db, callerOf(context), request.environmentId);
       const p = page(request);
       const after = seqAfter(p);
-      const rows = await sql<DomainRow[]>`
-        ${selectDomains()}
-        where d.environment_id = ${environment.id} ${after === undefined ? sql`` : sql`and d.seq > ${after}`}
-        order by d.seq
-        limit ${p.size + 1}`;
+      const rows = await selectDomains()
+        .where(
+          and(eq(domains.environment_id, environment.id), after === undefined ? undefined : gt(domains.seq, after)),
+        )
+        .orderBy(domains.seq)
+        .limit(p.size + 1);
       const { items, nextPageToken } = pageOf(rows, p, (row) => row.seq.toString());
       return { domains: items.map(toDomain), nextPageToken };
     },
@@ -117,8 +129,8 @@ export function domainService({ sql, resolveTxt, edge }: Deps): Partial<ServiceI
     async removeDomain(request, context) {
       const domain = await loadDomain(request.domainId, context);
       if (domain) {
-        await sql`delete from domains where id = ${domain.id}`;
-        await notify(sql, { kind: "environment", environmentId: domain.environment_id });
+        await db.delete(domains).where(eq(domains.id, domain.id));
+        await notify(db, { kind: "environment", environmentId: domain.environment_id });
       }
       return {};
     },

@@ -140,7 +140,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
   let epoch = 0n;
   beforeAll(async () => {
     h = await startHarness();
-    epoch = await takeLeadership(h.sql);
+    epoch = await takeLeadership(h.db);
     options = {
       provider,
       image: "chunk/environment:test",
@@ -223,7 +223,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
     await expect(reconcile(h.deps, options, stale)).rejects.toThrow(Superseded);
   }
   async function takeOver() {
-    epoch = await takeLeadership(h.sql);
+    epoch = await takeLeadership(h.db);
     await pass();
   }
 
@@ -508,7 +508,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       expect(acted().filter(Boolean)).toHaveLength(1);
 
       await reconcilers[acted().indexOf(true)]?.stop();
-      await notify(other.sql, { kind: "environment", environmentId });
+      await notify(other.db, { kind: "environment", environmentId });
       await until(() => acted().every(Boolean));
       expect(acted()).toEqual([true, true]);
     } finally {
@@ -661,7 +661,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
         if (id !== name) return;
         hooks.creating = undefined;
         await release(requestId);
-        if (newLeader) epoch = await takeLeadership(h.sql);
+        if (newLeader) epoch = await takeLeadership(h.db);
         await pass();
       };
       return name;
@@ -707,7 +707,7 @@ describe.skipIf(!databaseUrl)("reconciler", () => {
       if (id !== name) return;
       hooks.creating = undefined;
       await h.client(ProjectService).deleteEnvironment({ environmentId });
-      epoch = await takeLeadership(h.sql);
+      epoch = await takeLeadership(h.db);
       await pass();
     };
     const stale = epoch;
