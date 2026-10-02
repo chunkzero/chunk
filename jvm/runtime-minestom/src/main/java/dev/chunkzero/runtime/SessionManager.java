@@ -341,20 +341,16 @@ public final class SessionManager {
             // The deadline settles a copy of the session's own future, so a late completion of the
             // latter is ignored and its failures pass through unchanged.
             var created = new CompletableFuture<Void>();
-            var deadline =
-                    new CompletableFuture<Void>()
-                            .orTimeout(createDeadline.toMillis(), TimeUnit.MILLISECONDS);
-            deadline.whenComplete(
-                    (ignored, error) -> {
-                        if (error != null)
-                            created.completeExceptionally(
-                                    new TimeoutException(
-                                            "onCreate did not finish within " + createDeadline));
-                    });
+            CompletableFuture.delayedExecutor(createDeadline.toMillis(), TimeUnit.MILLISECONDS)
+                    .execute(
+                            () ->
+                                    created.completeExceptionally(
+                                            new TimeoutException(
+                                                    "onCreate did not finish within "
+                                                            + createDeadline)));
             invoke(() -> behavior.onCreate(scope))
                     .whenComplete(
                             (ignored, error) -> {
-                                deadline.complete(null);
                                 if (error == null) created.complete(null);
                                 else created.completeExceptionally(error);
                             });
@@ -369,17 +365,16 @@ public final class SessionManager {
                                                     .call(new SessionCreateEvent(scope));
                                             ready.complete(null);
                                         } else {
-                                            creationFailure = creationFailure(error);
+                                            creationFailure =
+                                                    error == null
+                                                            ? new IllegalStateException(
+                                                                    "Session has no instances")
+                                                            : error;
                                             ready.completeExceptionally(creationFailure);
                                             finish();
                                         }
                                         return null;
                                     }));
-        }
-
-        private Throwable creationFailure(@Nullable Throwable error) {
-            if (error == null) return new IllegalStateException("Session has no instances");
-            return error;
         }
 
         public CompletableFuture<Void> join(Player player) {
