@@ -49,6 +49,9 @@ pub struct CoreConfig {
     pub private_address: Option<IpAddr>,
     /// The Java executable local JVMs run with.
     pub java: PathBuf,
+    /// The asset store JVMs read their deployment's assets from: local JVMs through the app directories materialized
+    /// there, and remote runners blob by blob. Under management, core downloads each deployment's revision into it.
+    pub assets: PathBuf,
     /// The token management issued the environment, whose SHA-256 keys machine and operator credentials. Without one,
     /// control's credential keys them.
     pub environment_token: Option<String>,
@@ -92,6 +95,8 @@ pub struct Core {
     archives: Arc<Archives>,
     /// The AOT caches remote runners make, under `aot/` in the state directory.
     aot: Option<Arc<AotCaches>>,
+    /// Where the asset store is.
+    assets: PathBuf,
     private_address: Option<IpAddr>,
 }
 
@@ -127,7 +132,7 @@ impl Core {
             return Err(io::Error::other(format!("{address} is not a private address")));
         }
         let aot = Some(Arc::new(AotCaches::new(config.state.join("aot"))));
-        let mut core = Self { private_address: config.private_address, aot, ..self };
+        let mut core = Self { private_address: config.private_address, aot, assets: config.assets.clone(), ..self };
         let id = gateway_id(&config.state)?;
         core.gateway = Some(GatewayCredential { credential: core.gateways.mint(&id), id });
         let mut started = core.start_backend(&config).await;
@@ -289,6 +294,7 @@ impl Core {
                 self.gateways.clone(),
                 self.archives.clone(),
                 aot,
+                chunk_build::assets::Store::new(&config.assets),
                 config.environment.clone(),
                 config.environment_name.clone(),
                 config.environment_token.clone(),
@@ -371,6 +377,11 @@ impl Core {
 
     pub(crate) fn archives(&self) -> &Arc<Archives> {
         &self.archives
+    }
+
+    /// The asset store JVMs read from.
+    pub(crate) fn asset_store(&self) -> chunk_build::assets::Store {
+        chunk_build::assets::Store::new(&self.assets)
     }
 
     /// Where the network listener serves, if `core_bind` configured one.
@@ -611,6 +622,7 @@ fn host_config(config: &CoreConfig) -> chunk_control::ProcessHostConfig {
     chunk_control::ProcessHostConfig {
         directory: config.state.join("control").join("nodes"),
         releases: config.state.join("releases"),
+        assets: config.assets.clone(),
         java: config.java.clone(),
         environment: config.environment.clone(),
         environment_name: config.environment_name.clone(),

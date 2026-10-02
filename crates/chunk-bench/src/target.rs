@@ -183,6 +183,7 @@ pub async fn core(init: &Init) -> Result<chunk_environment::Core> {
         environment_name: None,
         secrets: chunk_backend::Secrets::default(),
         control_record: state.join("control.json"),
+        assets: state.join("assets"),
         state,
         control_bind: "127.0.0.1:0".parse()?,
         core_bind: None,

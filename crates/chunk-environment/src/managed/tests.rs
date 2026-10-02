@@ -454,6 +454,7 @@ impl Harness {
             environment_name: None,
             secrets: chunk_backend::Secrets::default(),
             control_record: state.join("control.json"),
+            assets: state.join("assets"),
             state,
             control_bind: "127.0.0.1:0".parse().unwrap(),
             core_bind: None,
@@ -840,6 +841,7 @@ async fn a_restart_resumes_the_current_deployment_unchecked_unless_its_archive_i
     tokio::time::timeout(Duration::from_secs(30), running).await.unwrap().unwrap().unwrap();
 }
 
+mod assets;
 mod launcher;
 mod replication;
 mod retirement;

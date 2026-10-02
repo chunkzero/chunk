@@ -42,14 +42,15 @@ pub(crate) use auth::{Gateways, Issuer};
 /// the credential `gateways` minted for it, and gateway machines theirs, which an [`Issuer`] for `environment` and
 /// `environment_token` derives. The CLI presents control's credential from a loopback peer, management the operator
 /// credential, and each JVM its process or machine credential. Remote runners download release archives from
-/// `archives`, use and upload the AOT caches in `aot`, and launch JVMs with `environment_name`. JVMs on this machine
-/// may serve players at `private_address`.
+/// `archives` and asset blobs from `assets`, use and upload the AOT caches in `aot`, and launch JVMs with
+/// `environment_name`. JVMs on this machine may serve players at `private_address`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn services(
     backend: Backend,
     gateways: Arc<Gateways>,
     archives: Arc<super::Archives>,
     aot: Arc<super::AotCaches>,
+    assets: chunk_build::assets::Store,
     environment: String,
     environment_name: Option<String>,
     environment_token: Option<String>,
@@ -70,7 +71,7 @@ pub(crate) fn services(
             streams: streams::StreamKey::new(),
             fences: streams::Fences::default(),
             runs: Arc::default(),
-            archives: platform::ArchiveReads::new(archives),
+            archives: platform::ArchiveReads::new(archives, assets.clone()),
             aot: aot.clone(),
             environment_name: environment_name.clone().unwrap_or_default(),
             private_address,
@@ -92,7 +93,7 @@ pub(crate) struct SyncService {
     streams: streams::StreamKey,
     fences: streams::Fences,
     runs: Arc<runs::Runs>,
-    /// The release archives remote runners download.
+    /// The release archives and asset blobs remote runners download.
     archives: platform::ArchiveReads,
     /// The AOT caches remote runners use and upload.
     aot: Arc<super::AotCaches>,

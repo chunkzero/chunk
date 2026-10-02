@@ -186,7 +186,10 @@ fn service(fixture: &Fixture) -> SyncService {
         streams: streams::StreamKey::new(),
         fences: streams::Fences::default(),
         runs: Arc::default(),
-        archives: platform::ArchiveReads::new(fixture.archives.clone()),
+        archives: platform::ArchiveReads::new(
+            fixture.archives.clone(),
+            chunk_build::assets::Store::new(fixture.directory.path().join("assets")),
+        ),
         aot: fixture.aot.clone(),
         environment_name: String::new(),
         epoch: fixture.backend.system().epoch().0,
