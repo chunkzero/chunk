@@ -1,7 +1,8 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = "../../proto";
-    let files = ["common", "auth", "projects", "deployments", "assets", "secrets", "domains", "environment", "edge", "logs"]
-        .map(|name| format!("{root}/chunk/management/v1/{name}.proto"));
+    let files =
+        ["common", "auth", "projects", "deployments", "assets", "secrets", "domains", "environment", "edge", "logs"]
+            .map(|name| format!("{root}/chunk/management/v1/{name}.proto"));
     println!("cargo:rerun-if-changed={root}/chunk/management");
     let mut prost = tonic_prost_build::Config::new();
     prost.protoc_executable(protoc_bin_vendored::protoc_bin_path()?);

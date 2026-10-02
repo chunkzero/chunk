@@ -192,6 +192,7 @@ async fn deploy(
         environment_id: environment.id.clone(),
         release_id: release_id.into(),
         stop_previous,
+        asset_revision_id: String::new(),
     };
     let response = retry(|| client.deploy(&request)).await?;
     response.deployment.ok_or_else(|| io::Error::other("Deploy returned no deployment"))

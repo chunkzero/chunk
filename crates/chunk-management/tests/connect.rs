@@ -83,6 +83,10 @@ async fn handle(request: Request<Incoming>) -> Result<Response<Body>, Infallible
         }
         return Ok(full(200, "application/octet-stream", "archive"));
     }
+    if path == "/blob" {
+        let status = if credentialed { 403 } else { 200 };
+        return Ok(full(status, "application/octet-stream", "blob"));
+    }
     if path == "/upload" {
         let status = if credentialed || body.as_ref() != b"archive" { 403 } else { 200 };
         return Ok(full(status, "text/plain", ""));
@@ -200,6 +204,7 @@ async fn unary_calls_round_trip_binary_protobuf() {
             environment_id: "env_1".into(),
             release_id: "r1".into(),
             stop_previous: false,
+            asset_revision_id: "a".repeat(64),
         })
         .await
         .expect("deploy");
@@ -376,4 +381,13 @@ async fn the_token_follows_a_redirect_only_within_the_origin() {
         assert!(matches!(&error, Error::Status(status) if status.message.contains("307")), "{target}: {error}");
     }
     assert_eq!(CREDENTIALED_LANDINGS.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn blob_downloads_follow_a_redirect_elsewhere_without_the_token() {
+    let (address, other) = (serve().await, serve().await);
+    let client = Client::new(format!("http://{address}")).with_token("secret");
+    let url = format!("http://{address}/redirect?http://127.0.0.1:{}/blob", other.port());
+    let mut download = client.download_blob(&url).await.expect("the presigned blob");
+    assert_eq!(download.chunk().await.expect("a chunk").expect("bytes").as_ref(), b"blob");
 }
