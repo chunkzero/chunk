@@ -142,10 +142,8 @@ fn release_is_complete_and_reproducible_after_moving_all_local_inputs() {
         archived.insert(name, bytes);
     }
     assert_eq!(ordering, archived.keys().cloned().collect::<Vec<_>>());
-    assert!(archived.contains_key("assets/terrain 世界.txt"));
-    assert!(archived.contains_key(&format!("assets/{}.txt", "long".repeat(40))));
-    assert!(archived.contains_key("apps/arena/assets/map.txt"));
-    assert!(archived.contains_key("apps/lobby/assets/map.txt"));
+    // Assets ship in asset revisions, deployed alongside the release.
+    assert!(archived.keys().all(|name| !name.contains("assets/")));
     for name in ["source.mjs", "source.mjs.map", "contract.json", "backend.json", "release.json"] {
         assert!(archived.contains_key(name));
     }
@@ -157,6 +155,7 @@ fn release_is_complete_and_reproducible_after_moving_all_local_inputs() {
     let manifest: Value = serde_json::from_slice(&archived["release.json"]).unwrap();
     let backend: Value = serde_json::from_slice(&archived["backend.json"]).unwrap();
     assert_eq!(manifest["id"], a.id);
+    assert_eq!(manifest["version"], 4);
     assert_eq!(backend["id"], a.id);
     assert_eq!(manifest["apps"][0]["id"], "arena");
     assert_eq!(manifest["apps"][0]["sessions"]["default"]["capacity"], 8);
@@ -346,20 +345,6 @@ fn class_conflicts_use_the_effective_multi_release_definition() {
             .to_string()
             .contains("conflicting class")
     );
-}
-
-#[cfg(unix)]
-#[test]
-fn assets_reject_symlinks_and_nonportable_paths() {
-    let fixture = Fixture::new();
-    let path = fixture.inputs.project.join("assets/drive:escape.txt");
-    fs::write(&path, b"ambiguous name").unwrap();
-    assert!(fixture.publish().err().unwrap().to_string().contains("not portable"));
-    fs::remove_file(path).unwrap();
-    std::os::unix::fs::symlink(fixture.inputs.project.join(".env"), fixture.inputs.project.join("assets/link"))
-        .unwrap();
-    assert!(fixture.publish().is_err());
-    assert!(!fixture.root.path().join("dist").exists());
 }
 
 #[test]

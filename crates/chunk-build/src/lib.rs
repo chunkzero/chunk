@@ -1,5 +1,6 @@
 //! Backend compilation, generated clients and immutable application releases.
 
+pub mod assets;
 mod codegen;
 pub use codegen::{GenerationTarget, generate};
 #[cfg(feature = "compiler")]
@@ -25,7 +26,7 @@ pub use sdk::generate_sdk;
 
 use std::collections::BTreeMap;
 
-use chunk_contract::{Contracts, DatabaseSchema, Function, RuntimeProfile};
+use chunk_contract::{AssetContract, Contracts, DatabaseSchema, Function, RuntimeProfile};
 use publication::read_limited;
 use serde::{Deserialize, Serialize};
 
@@ -36,8 +37,15 @@ struct BackendMetadata {
     runtime_profile: RuntimeProfile,
     tables: DatabaseSchema,
     functions: BTreeMap<String, Function>,
+    /// The project's world and pack declarations, which generated clients name and releases pin.
+    #[serde(default, skip_serializing_if = "is_default")]
+    assets: AssetContract,
     #[serde(flatten)]
     contracts: Contracts,
+}
+
+fn is_default(assets: &AssetContract) -> bool {
+    *assets == AssetContract::default()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

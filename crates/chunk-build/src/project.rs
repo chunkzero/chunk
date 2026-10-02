@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{MachineProfile, valid_id};
 
+pub(crate) mod assets;
 pub(crate) mod authoring;
+
+pub use assets::{ChunkRange, Pack, World, WorldFormat};
 
 /// Apps, domain scopes and authored modules found in one pass over the project tree.
 #[derive(Default)]
@@ -19,6 +22,8 @@ pub(crate) struct Inventory {
     pub apps: Vec<AppMetadata>,
     pub scopes: BTreeMap<String, DomainScope>,
     pub modules: Vec<authoring::Module>,
+    /// Each scope's packs, by scope path.
+    pub packs: BTreeMap<String, BTreeMap<String, Pack>>,
     pub local: Option<LocalConfig>,
     pub env: chunk_contract::EnvManifest,
 }
@@ -42,6 +47,11 @@ pub struct AppMetadata {
     pub runtime: RuntimeRequirements,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub sessions: BTreeMap<String, RuntimeRequirements>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub worlds: BTreeMap<String, World>,
+    /// The app's own packs; its scopes' packs apply too.
+    #[serde(skip)]
+    pub packs: BTreeMap<String, Pack>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -167,6 +177,7 @@ pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
     }
     let mut inventory = authoring::discover(root)?;
     legacy_apps(root, &mut inventory)?;
+    assets::check_unique_packs(root, &inventory)?;
     Ok(inventory)
 }
 
@@ -224,6 +235,8 @@ fn legacy_apps(root: &Path, inventory: &mut Inventory) -> io::Result<()> {
             domain: String::new(),
             runtime: manifest.runtime,
             sessions: manifest.sessions,
+            worlds: BTreeMap::new(),
+            packs: BTreeMap::new(),
         });
     }
     inventory.apps.sort_by(|left, right| left.id.cmp(&right.id));

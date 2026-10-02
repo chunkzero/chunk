@@ -7,9 +7,25 @@ import { freeze, v } from "./validators.ts";
 import type { Infer, ObjectValidator, Shape } from "./validators.ts";
 
 type AnyHook = { [E in HookEvent]: HookDefinition<E> }[HookEvent];
+/** A resource pack players of the apps below hold: a directory with `pack.mcmeta`, or a `.zip`. */
+export interface PackOptions {
+  /** Relative to the project's `assets/` in a scope, and to the app's `assets/` in an app. */
+  readonly source: string;
+  /** Disconnects players who decline or fail to load the pack. */
+  readonly required?: boolean;
+  /** Plain text the client shows when it asks the player to accept the pack. */
+  readonly prompt?: string;
+}
+/** A world in the app's `assets/`: a `.polar` file, or an Anvil save directory the build converts to Polar. */
+export interface WorldOptions {
+  readonly source: string;
+  /** The inclusive chunk coordinates an Anvil save is cropped to. */
+  readonly chunks?: { readonly from: readonly [number, number]; readonly to: readonly [number, number] };
+}
 export interface ScopeOptions {
   readonly hooks?: Readonly<Record<string, AnyHook>>;
   readonly commands?: Readonly<Record<string, CommandDefinition>>;
+  readonly packs?: Readonly<Record<string, PackOptions>>;
 }
 export interface AppRuntime {
   readonly machineProfile?: string;
@@ -50,15 +66,27 @@ export interface AppDefinition extends ScopeOptions {
   readonly runtime?: AppRuntime;
   readonly implementations?: Implementations;
   readonly destinations?: Readonly<Record<string, AppDestination<Implementations>>>;
+  readonly worlds?: Readonly<Record<string, WorldOptions>>;
+}
+
+const identifier = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+
+function sources(entries: Readonly<Record<string, { readonly source: string }>> | undefined): void {
+  for (const [name, value] of Object.entries(entries ?? {})) {
+    if (!identifier.test(name) || typeof value?.source !== "string") {
+      throw new Error("Worlds and packs require identifier names and a source path");
+    }
+  }
 }
 
 function behavior(options: ScopeOptions): void {
+  sources(options.packs);
   for (const [entries, accepts] of [
     [options.hooks, isHook],
     [options.commands, isCommand],
   ] as const) {
     for (const [name, value] of Object.entries(entries ?? {})) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || !accepts(value)) {
+      if (!identifier.test(name) || !accepts(value)) {
         throw new Error("Scope hooks and commands require named descriptors");
       }
     }
@@ -78,10 +106,12 @@ export function defineApp<const I extends Implementations = { readonly default: 
     readonly runtime?: AppRuntime;
     readonly implementations?: I;
     readonly destinations?: Readonly<Record<string, AppDestination<NoInfer<I>>>>;
+    readonly worlds?: Readonly<Record<string, WorldOptions>>;
   },
 ): AppDefinition {
   behavior(options);
-  if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(options.id)) throw new Error("Invalid app id");
+  sources(options.worlds);
+  if (!identifier.test(options.id)) throw new Error("Invalid app id");
   for (const implementation of Object.values(options.implementations ?? { default: {} })) {
     if (implementation.config && implementation.config.schema.type !== "object") {
       throw new Error("Implementation config requires an object validator");
