@@ -309,7 +309,8 @@ async fn a_retirement_completes_though_its_caller_stops_waiting() {
     let backend = backend(&directory);
     backend.deploy(deployment("old", 1)).await.unwrap();
     let old = DeploymentId::new("old").unwrap();
-    assert!(tokio::time::timeout(Duration::ZERO, backend.retire(old)).await.is_err());
+    // The caller stops waiting at once, though the retirement may already have finished.
+    _ = tokio::time::timeout(Duration::ZERO, backend.retire(old)).await;
     for _ in 0..100 {
         if backend.deployments().await.unwrap().is_empty() {
             return;
