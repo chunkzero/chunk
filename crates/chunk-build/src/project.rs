@@ -34,6 +34,9 @@ pub struct ProjectMetadata {
     pub apps: Vec<AppMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalConfig>,
+    /// Each scope's packs, by scope path.
+    #[serde(skip)]
+    pub scope_packs: BTreeMap<String, BTreeMap<String, Pack>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,7 +121,7 @@ struct AppManifest {
 /// Rejects invalid manifests, missing app build files, unknown profiles and unsupported local limits.
 pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
     let inventory = inspect_inventory(root)?;
-    Ok(ProjectMetadata { version: 1, apps: inventory.apps, local: inventory.local })
+    Ok(ProjectMetadata { version: 1, apps: inventory.apps, local: inventory.local, scope_packs: inventory.packs })
 }
 
 /// `inspect`, keeping the scopes and authored modules discovered along the way.

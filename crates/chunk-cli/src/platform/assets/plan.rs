@@ -148,8 +148,9 @@ pub(super) fn locate(entry: &Entry, root: &Path, metadata: &ProjectMetadata) -> 
             }
         }
         Entry::Pack(name) => {
-            let pack = metadata.apps.iter().find_map(|app| app.packs.get(name));
-            let pack = pack.ok_or_else(|| format!("no app of this project declares pack {name}"))?;
+            let mut declared = metadata.apps.iter().map(|app| &app.packs).chain(metadata.scope_packs.values());
+            let pack = declared.find_map(|packs| packs.get(name));
+            let pack = pack.ok_or_else(|| format!("this project declares no pack {name}"))?;
             if Path::new(&pack.source).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("zip")) {
                 Ok(root.join(&pack.source))
             } else {
