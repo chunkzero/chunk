@@ -1,0 +1,148 @@
+name: Nightly CLI
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  pull_request:
+    # Drafts skip CI; run the checks locally while iterating. Marking a PR ready runs them here.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - .github/workflows/nightly.yml
+      - scripts/nightly.py
+      - scripts/package-sdk.py
+      - scripts/rust-notices.py
+      - scripts/install-typescript.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/nightly.py plan
+
+  # GitHub-hosted runners: they cover every platform, and the public repository runs them free.
+  package:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux-x64
+          - runner: ubuntu-24.04-arm
+            platform: linux-arm64
+          - runner: macos-15
+            platform: darwin-arm64
+          - runner: macos-15-intel
+            platform: darwin-x64
+          - runner: windows-2025
+            platform: windows-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    env:
+      CHUNK_RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Install the pinned TypeScript compiler
+        run: pnpm install --frozen-lockfile --filter chunk-monorepo
+      - run: rustup toolchain install --no-self-update
+      - name: Configure the vendored OpenSSL with Strawberry Perl
+        if: runner.os == 'Windows'
+        # Git's MSYS Perl, first on the bash PATH, cannot configure OpenSSL for MSVC.
+        run: echo 'OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe' >> "$GITHUB_ENV"
+      - run: cargo build --release --locked -p chunk-cli
+      - run: python scripts/package-sdk.py --no-maven --output dist
+      - name: Compile and type-check a project with the extracted CLI
+        if: runner.os != 'Windows'
+        run: |
+          name="chunk-$CHUNK_RELEASE_VERSION-${{ matrix.platform }}"
+          mkdir -p "$RUNNER_TEMP/sdk"
+          tar -xzf "dist/$name.tar.gz" -C "$RUNNER_TEMP/sdk"
+          chunk="$RUNNER_TEMP/sdk/$name/chunk"
+          test "$("$chunk" --version)" = "chunk $CHUNK_RELEASE_VERSION"
+          if [ "$RUNNER_OS" = macOS ] && otool -L "$chunk" | tail -n +2 | grep -v -e '/usr/lib/' -e '/System/'; then
+            echo "chunk links libraries macOS does not ship" >&2
+            exit 1
+          fi
+          "$chunk" gen examples/local --target typescript --frozen \
+            --output "$RUNNER_TEMP/generated" --backend-output "$RUNNER_TEMP/backend"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chunk-${{ matrix.platform }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+          # Cleanup deletes it once used; retention only bounds runs that never reach cleanup.
+          retention-days: 1
+
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: [plan, package]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chunk-*
+          merge-multiple: true
+          path: dist
+      - name: Publish the nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHUNK_RELEASE_VERSION: ${{ needs.plan.outputs.version }}
+        run: python3 scripts/nightly.py publish --directory dist
+
+  # The artifacts only hand the archives between jobs; keeping them counts against Actions storage.
+  cleanup:
+    if: >-
+      always() && needs.package.result != 'skipped' && (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+    needs: [package, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Delete this run's archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --paginate \
+            --jq '.artifacts[] | select(.name | startswith("chunk-")) | .id' |
+            while read -r id; do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+            done

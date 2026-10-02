@@ -12,8 +12,14 @@ mod nodes;
 mod platform;
 mod players;
 
+// Nightly builds report their full version; created projects still use the workspace version's JVM libraries.
+const RELEASE_VERSION: &str = match option_env!("CHUNK_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 #[derive(Parser)]
-#[command(name = "chunk", version, about = "Build and run Minecraft apps")]
+#[command(name = "chunk", version = RELEASE_VERSION, about = "Build and run Minecraft apps")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
