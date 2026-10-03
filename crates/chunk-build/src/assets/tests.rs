@@ -96,3 +96,22 @@ fn materialized_directories_link_read_only_blobs_and_are_reused() {
     assert!(error.to_string().contains("asset blob"), "{error}");
     assert!(store.insert("../escape", b"").is_err());
 }
+
+#[test]
+fn incomplete_materialized_directories_are_rebuilt() {
+    let project_directory = tempfile::tempdir().unwrap();
+    let root = project_directory.path();
+    project(root);
+    write(root, ".chunk/build/worlds/arena/koth.polar", b"Polr converted");
+    let store = Store::new(root.join("store"));
+    let revision = build_revision(root, &store).unwrap();
+    let directory = materialize(&store, &revision, "arena").unwrap();
+
+    fs::remove_file(directory.join("worlds/lobby.polar")).unwrap();
+    assert_eq!(materialize(&store, &revision, "arena").unwrap(), directory);
+    assert_eq!(fs::read(directory.join("worlds/lobby.polar")).unwrap(), POLAR);
+
+    fs::remove_file(directory.join("revision.json")).unwrap();
+    materialize(&store, &revision, "arena").unwrap();
+    assert_eq!(fs::read(directory.join("revision.json")).unwrap(), revision.encode());
+}

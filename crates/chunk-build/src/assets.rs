@@ -120,15 +120,16 @@ impl Store {
 }
 
 /// Builds `app`'s read-only directory of `revision` at `<store>/apps/<revision ID>/<app>/`, or returns it as it is
-/// when an earlier call built it:
+/// when an earlier call built it completely:
 ///
 /// - `revision.json`, the revision's canonical JSON;
 /// - `worlds/<name>.polar`, the app's worlds;
 /// - `app/<path>`, the app's files;
 /// - `shared/<path>`, the project's shared files.
 ///
-/// Files are hard links to the store's blobs, or read-only copies where linking fails. The directory appears
-/// atomically and complete.
+/// Files are hard links to the store's blobs, or read-only copies where linking fails. The directory is built beside
+/// its destination and renamed into place durably, so it appears atomically and complete. An existing directory
+/// whose `revision.json` or files differ from the revision's is removed and rebuilt.
 /// # Errors
 /// Rejects an invalid revision or app ID, blobs missing from the store, and filesystem failures.
 pub fn materialize(store: &Store, revision: &AssetRevision, app: &str) -> io::Result<PathBuf> {
@@ -138,23 +139,27 @@ pub fn materialize(store: &Store, revision: &AssetRevision, app: &str) -> io::Re
     }
     let parent = store.root.join("apps").join(revision.id());
     let destination = parent.join(app);
+    let assets = revision.apps.get(app);
+    let worlds = assets.into_iter().flat_map(|assets| &assets.worlds);
+    let worlds = worlds.map(|(name, blob)| (format!("worlds/{name}.polar"), blob));
+    let files = assets.into_iter().flat_map(|assets| &assets.files).map(|(path, blob)| (format!("app/{path}"), blob));
+    let shared = revision.shared.iter().map(|(path, blob)| (format!("shared/{path}"), blob));
+    let expected: Vec<_> = worlds.chain(files).chain(shared).collect();
     if fs::symlink_metadata(&destination).is_ok() {
-        return Ok(destination);
+        if is_complete(&destination, revision, &expected) {
+            return Ok(destination);
+        }
+        fs::remove_dir_all(&destination)?;
     }
     fs::create_dir_all(&parent)?;
     let staging = tempfile::Builder::new().prefix(".materialize-").tempdir_in(&parent)?;
     let mut revision_json = temporary(staging.path())?;
     revision_json.write_all(&revision.encode())?;
     persist(revision_json, &staging.path().join("revision.json"))?;
-    let assets = revision.apps.get(app);
-    let worlds = assets.into_iter().flat_map(|assets| &assets.worlds);
-    let worlds = worlds.map(|(name, blob)| (format!("worlds/{name}.polar"), blob));
-    let files = assets.into_iter().flat_map(|assets| &assets.files).map(|(path, blob)| (format!("app/{path}"), blob));
-    let shared = revision.shared.iter().map(|(path, blob)| (format!("shared/{path}"), blob));
     for directory in ["worlds", "app", "shared"] {
         fs::create_dir(staging.path().join(directory))?;
     }
-    for (path, blob) in worlds.chain(files).chain(shared) {
+    for (path, blob) in expected {
         let source = store.blob(&blob.sha256)?;
         if fs::symlink_metadata(&source).is_ok_and(|metadata| !metadata.is_file() || metadata.len() != blob.size) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("asset blob {} is corrupt", blob.sha256)));
@@ -165,11 +170,38 @@ pub fn materialize(store: &Store, revision: &AssetRevision, app: &str) -> io::Re
             io::Error::new(error.kind(), format!("asset blob {} is unavailable: {error}", blob.sha256))
         })?;
     }
+    sync_tree(staging.path())?;
     match crate::publication::rename_directory(staging.path(), &destination) {
-        Ok(()) => Ok(destination),
-        Err(_) if fs::symlink_metadata(&destination).is_ok() => Ok(destination),
-        Err(error) => Err(error),
+        Ok(()) => {}
+        Err(_) if fs::symlink_metadata(&destination).is_ok() => return Ok(destination),
+        Err(error) => return Err(error),
     }
+    sync_parent(&destination)?;
+    Ok(destination)
+}
+
+/// Whether `directory` holds the revision's `revision.json` and every expected file at its declared size.
+fn is_complete(directory: &Path, revision: &AssetRevision, expected: &[(String, &chunk_contract::AssetBlob)]) -> bool {
+    fs::read(directory.join("revision.json")).is_ok_and(|bytes| bytes == revision.encode())
+        && expected.iter().all(|(path, blob)| {
+            fs::symlink_metadata(directory.join(path))
+                .is_ok_and(|metadata| metadata.is_file() && metadata.len() == blob.size)
+        })
+}
+
+/// Makes every file and directory under `directory`, and `directory`, durable.
+fn sync_tree(directory: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if fs::symlink_metadata(&path)?.is_dir() {
+            sync_tree(&path)?;
+        } else {
+            fs::File::open(&path)?.sync_all()?;
+        }
+    }
+    #[cfg(unix)]
+    fs::File::open(directory)?.sync_all()?;
+    Ok(())
 }
 
 fn link(source: &Path, target: &Path) -> io::Result<()> {
