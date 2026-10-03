@@ -6,7 +6,7 @@ use std::{
     collections::BTreeMap,
     fs,
     io::{self, Read, Write as _},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use chunk_build::assets::Store;
@@ -264,10 +264,12 @@ async fn pull(session: &Session, path: &Path, selector: &ProjectArg) -> io::Resu
     .await
 }
 
-/// A file a pull changes: the entry, its local path and the head's SHA-256 to write, or none to delete it.
+/// A file a pull changes: the entry, its local path, the SHA-256 it had when planned (none when absent), and the
+/// head's SHA-256 to write, or none to delete it.
 struct Change<'a> {
     entry: Entry,
     path: PathBuf,
+    seen: Option<String>,
     write: Option<&'a str>,
 }
 
@@ -306,10 +308,12 @@ async fn pull_head(
                 continue;
             }
         };
-        match plan::decide(before, after, digest(&path)?.as_deref()) {
+        ensure_inside(root, &path)?;
+        let seen = digest(&path)?;
+        match plan::decide(before, after, seen.as_deref()) {
             Pull::Keep => {}
-            Pull::Write => changes.push(Change { entry: entry.clone(), path, write: after }),
-            Pull::Delete => changes.push(Change { entry: entry.clone(), path, write: None }),
+            Pull::Write => changes.push(Change { entry: entry.clone(), path, seen, write: after }),
+            Pull::Delete => changes.push(Change { entry: entry.clone(), path, seen, write: None }),
             Pull::Conflict => {
                 conflicts.push(format!("{entry}: {}", path.strip_prefix(root).unwrap_or(&path).display()));
             }
@@ -328,13 +332,16 @@ async fn pull_head(
     let (mut updated, mut deleted) = (Vec::new(), Vec::new());
     for change in changes {
         let shown = format!("{}: {}", change.entry, change.path.strip_prefix(root).unwrap_or(&change.path).display());
-        if let Some(sha256) = change.write {
-            let blob = store.root().join("blobs").join(sha256);
-            let target = change.path;
-            tokio::task::spawn_blocking(move || replace(&blob, &target)).await.map_err(io::Error::other)??;
+        let writing = change.write.is_some();
+        let blob = change.write.map(|sha256| store.root().join("blobs").join(sha256));
+        let root = root.to_path_buf();
+        let (path, seen) = (change.path, change.seen);
+        let applied = tokio::task::spawn_blocking(move || apply(&root, &path, seen.as_deref(), blob.as_deref()));
+        if !applied.await.map_err(io::Error::other)?? {
+            conflicts.push(shown);
+        } else if writing {
             updated.push(shown);
         } else {
-            fs::remove_file(&change.path)?;
             deleted.push(shown);
         }
     }
@@ -398,6 +405,45 @@ fn digest(path: &Path) -> io::Result<Option<String>> {
         }
         digest.update(&buffer[..read]);
     }
+}
+
+/// Writes the blob over the file at `path`, or deletes it, unless its digest is no longer `seen`.
+/// Returns whether it applied the change.
+fn apply(root: &Path, path: &Path, seen: Option<&str>, blob: Option<&Path>) -> io::Result<bool> {
+    ensure_inside(root, path)?;
+    if digest(path)?.as_deref() != seen {
+        return Ok(false);
+    }
+    match blob {
+        Some(blob) => replace(blob, path)?,
+        None => fs::remove_file(path)?,
+    }
+    Ok(true)
+}
+
+/// Rejects a path that leaves `root` or has a symlink among the components below it.
+fn ensure_inside(root: &Path, path: &Path) -> io::Result<()> {
+    let relative =
+        path.strip_prefix(root).map_err(|_| io::Error::other(format!("{} is outside the project", path.display())))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            return Err(io::Error::other(format!("{} is outside the project", path.display())));
+        };
+        current.push(name);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.is_symlink() => {
+                return Err(io::Error::other(format!(
+                    "{} is a symlink; pull does not write through symlinks",
+                    current.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// Atomically replaces `target` with a copy of the blob.

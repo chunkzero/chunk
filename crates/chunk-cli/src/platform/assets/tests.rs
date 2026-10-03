@@ -1,3 +1,4 @@
+use super::ensure_inside;
 use super::plan::{Pull, Push, check_push, decide, entries, summary};
 use chunk_contract::{AssetBlob, AssetRevision};
 
@@ -44,4 +45,16 @@ fn the_summary_counts_added_changed_and_removed_entries_by_kind() {
     new.apps.entry("arena".into()).or_default().worlds.insert("hub".into(), blob("5"));
     assert_eq!(summary(&entries(&old), &entries(&new)), ["files: 1 added, 1 changed, 1 removed", "worlds: 1 added"]);
     assert!(summary(&entries(&old), &entries(&old)).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_pull_never_writes_through_a_symlink() {
+    let (root, elsewhere) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::create_dir(root.path().join("assets")).unwrap();
+    std::os::unix::fs::symlink(elsewhere.path(), root.path().join("assets/config")).unwrap();
+    ensure_inside(root.path(), &root.path().join("assets/plain/new.json")).unwrap();
+    let error = ensure_inside(root.path(), &root.path().join("assets/config/new.json")).unwrap_err();
+    assert!(error.to_string().contains("symlink"));
+    assert!(ensure_inside(root.path(), &root.path().join("assets/../../x")).is_err());
 }
