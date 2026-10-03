@@ -72,14 +72,39 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
     await uploadAssets(h, projectId, revision);
     const sha256 = [...revision.blobs.keys()][0] ?? "";
     const lostKey = blobKey(projectId, sha256);
-    const { exists } = h.deps.releases;
+    const { exists, complete } = h.deps.releases;
     h.deps.releases.exists = async (key) => key !== lostKey && exists(key);
+    h.deps.releases.complete = async (key, expected, verify) =>
+      key === lostKey ? undefined : complete(key, expected, verify);
     try {
       const { uploads } = await assets.uploadAssets({ projectId, manifest: revision.manifest });
       expect(uploads.map((upload) => upload.sha256)).toEqual([sha256]);
       expect(await codeOf(assets.completeAssetUpload({ projectId, revisionId: revision.id }))).toBe(
         Code.FailedPrecondition,
       );
+    } finally {
+      h.deps.releases.exists = exists;
+      h.deps.releases.complete = complete;
+    }
+  });
+
+  test("a ready revision whose blob was lost is repaired by uploading the blob again", async () => {
+    const { projectId } = await createEnvironment(h);
+    const assets = h.client(AssetService);
+    const revision = assetRevision({ shared: { "a.txt": "a" } });
+    await uploadAssets(h, projectId, revision);
+    const sha256 = [...revision.blobs.keys()][0] ?? "";
+    const lostKey = blobKey(projectId, sha256);
+    const { exists } = h.deps.releases;
+    let repaired = false;
+    h.deps.releases.exists = async (key) => (key === lostKey && !repaired ? false : exists(key));
+    try {
+      const { uploads } = await assets.uploadAssets({ projectId, manifest: revision.manifest });
+      const target = uploads[0]?.upload?.url ?? "";
+      await fetch(target, { method: "PUT", body: revision.blobs.get(sha256) });
+      repaired = true;
+      const completed = await assets.completeAssetUpload({ projectId, revisionId: revision.id });
+      expect(completed.revision?.state).toBe(AssetRevisionState.READY);
     } finally {
       h.deps.releases.exists = exists;
     }

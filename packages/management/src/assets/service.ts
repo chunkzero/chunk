@@ -24,12 +24,14 @@ const uploadLifetimeMs = 60 * 60 * 1000;
 const downloadLifetimeMs = 60 * 60 * 1000;
 /** How many blobs completion verifies at once. */
 const verifyConcurrency = 8;
+/** How many blob existence checks run at once; a revision holds at most 4,096 blobs. */
+const existsConcurrency = 64;
 
 export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof AssetService>> {
   /** The project's verified blobs among `digests` that the blob store still holds. */
   async function storedBlobs(projectId: string, digests: string[]) {
     const held = await heldBlobs(db, projectId, digests);
-    await eachLimited([...held.keys()], verifyConcurrency, async (sha256) => {
+    await eachLimited([...held.keys()], existsConcurrency, async (sha256) => {
       if (!(await releases.exists(blobKey(projectId, sha256)))) held.delete(sha256);
     });
     return held;
@@ -93,15 +95,6 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
       const revision = decodeRevision(row.manifest);
       const blobs = revisionBlobs(revision);
       const held = await storedBlobs(project.id, [...blobs.keys()]);
-      if (row.state === AssetRevisionState.READY) {
-        const lost = [...blobs.keys()].filter((sha256) => !held.has(sha256)).sort();
-        if (lost.length > 0) {
-          throw failedPrecondition(
-            `${lost.length} of the revision's blobs are missing from storage, such as ${lost[0]}`,
-          );
-        }
-        return { revision: toAssetRevision(row) };
-      }
       const missing: string[] = [];
       const unverified = [...blobs].filter(([sha256]) => !held.has(sha256));
       await eachLimited(unverified, verifyConcurrency, async ([sha256, { size }]) => {
@@ -136,6 +129,7 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
           throw failedPrecondition(`pack ${name}'s SHA-1 does not match its bytes`);
         }
       }
+      if (row.state === AssetRevisionState.READY) return { revision: toAssetRevision(row) };
       const [ready] = await db
         .update(assetRevisions)
         .set({ state: AssetRevisionState.READY })
