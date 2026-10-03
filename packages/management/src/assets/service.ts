@@ -26,6 +26,15 @@ const downloadLifetimeMs = 60 * 60 * 1000;
 const verifyConcurrency = 8;
 
 export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof AssetService>> {
+  /** The project's verified blobs among `digests` that the blob store still holds. */
+  async function storedBlobs(projectId: string, digests: string[]) {
+    const held = await heldBlobs(db, projectId, digests);
+    await eachLimited([...held.keys()], verifyConcurrency, async (sha256) => {
+      if (!(await releases.exists(blobKey(projectId, sha256)))) held.delete(sha256);
+    });
+    return held;
+  }
+
   return {
     async uploadAssets(request, context) {
       const project = await loadProject(db, callerOf(context), request.projectId);
@@ -57,7 +66,7 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
       });
       const row = await findRevision(db, project.id, id);
       if (!row) throw notFound("asset revision");
-      const held = await heldBlobs(db, project.id, [...blobs.keys()]);
+      const held = await storedBlobs(project.id, [...blobs.keys()]);
       const expireTime = new Date(Date.now() + uploadLifetimeMs);
       const uploads = await Promise.all(
         [...blobs]
@@ -81,10 +90,18 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
       const project = await loadProject(db, callerOf(context), request.projectId);
       const row = await findRevision(db, project.id, required(request.revisionId, "revision_id"));
       if (!row) throw notFound("asset revision");
-      if (row.state === AssetRevisionState.READY) return { revision: toAssetRevision(row) };
       const revision = decodeRevision(row.manifest);
       const blobs = revisionBlobs(revision);
-      const held = await heldBlobs(db, project.id, [...blobs.keys()]);
+      const held = await storedBlobs(project.id, [...blobs.keys()]);
+      if (row.state === AssetRevisionState.READY) {
+        const lost = [...blobs.keys()].filter((sha256) => !held.has(sha256)).sort();
+        if (lost.length > 0) {
+          throw failedPrecondition(
+            `${lost.length} of the revision's blobs are missing from storage, such as ${lost[0]}`,
+          );
+        }
+        return { revision: toAssetRevision(row) };
+      }
       const missing: string[] = [];
       const unverified = [...blobs].filter(([sha256]) => !held.has(sha256));
       await eachLimited(unverified, verifyConcurrency, async ([sha256, { size }]) => {

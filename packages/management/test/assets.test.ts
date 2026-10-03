@@ -8,6 +8,7 @@ import { desiredState } from "../src/environments/desired.ts";
 import { AssetRevisionState, AssetService } from "../src/gen/chunk/management/v1/assets_pb.ts";
 import { DeploymentService } from "../src/gen/chunk/management/v1/deployments_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
+import { blobKey } from "../src/releases/store.ts";
 import { assetRevision } from "./fixtures.ts";
 import {
   codeOf,
@@ -62,6 +63,26 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
 
     const pretty = new TextEncoder().encode(JSON.stringify(JSON.parse(wrongSha1), null, 2));
     expect(await codeOf(assets.uploadAssets({ projectId, manifest: pretty }))).toBe(Code.InvalidArgument);
+  });
+
+  test("a blob the store lost is uploaded again, and blocks completing a revision that needs it", async () => {
+    const { projectId } = await createEnvironment(h);
+    const assets = h.client(AssetService);
+    const revision = assetRevision({ shared: { "a.txt": "a" } });
+    await uploadAssets(h, projectId, revision);
+    const sha256 = [...revision.blobs.keys()][0] ?? "";
+    const lostKey = blobKey(projectId, sha256);
+    const { exists } = h.deps.releases;
+    h.deps.releases.exists = async (key) => key !== lostKey && exists(key);
+    try {
+      const { uploads } = await assets.uploadAssets({ projectId, manifest: revision.manifest });
+      expect(uploads.map((upload) => upload.sha256)).toEqual([sha256]);
+      expect(await codeOf(assets.completeAssetUpload({ projectId, revisionId: revision.id }))).toBe(
+        Code.FailedPrecondition,
+      );
+    } finally {
+      h.deps.releases.exists = exists;
+    }
   });
 
   test("the head moves only from the head the caller expects", async () => {
