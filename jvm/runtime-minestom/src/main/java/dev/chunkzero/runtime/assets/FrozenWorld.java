@@ -13,6 +13,7 @@ import net.minestom.server.instance.block.BlockFace;
 import net.minestom.server.instance.block.BlockHandler;
 import net.minestom.server.instance.generator.Generator;
 import net.minestom.server.registry.RegistryKey;
+import net.minestom.server.utils.chunk.ChunkSupplier;
 import net.minestom.server.world.DimensionType;
 import net.minestom.server.world.biome.Biome;
 
@@ -23,11 +24,12 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * The instance a shared world loads into. Once {@link #freeze frozen}, Minestom's APIs can't change
- * its blocks or biomes, generate or unload its chunks: players' placements and breaks are refused,
- * and anything else throws.
+ * its blocks or biomes, generate, unload or replace its chunks: players' placements and breaks are
+ * refused, and anything else throws.
  */
 final class FrozenWorld extends InstanceContainer {
     private volatile boolean frozen;
+    private boolean constructed;
 
     FrozenWorld(ServerProcess process, ChunkLoader loader) {
         super(
@@ -36,7 +38,8 @@ final class FrozenWorld extends InstanceContainer {
                 DimensionType.OVERWORLD,
                 loader,
                 DimensionType.OVERWORLD.key());
-        setChunkSupplier(Frozen::new);
+        super.setChunkSupplier(Frozen::new);
+        constructed = true;
     }
 
     void freeze() {
@@ -62,6 +65,20 @@ final class FrozenWorld extends InstanceContainer {
     public boolean breakBlock(
             Player player, Point blockPosition, BlockFace blockFace, boolean doBlockUpdates) {
         return !frozen && super.breakBlock(player, blockPosition, blockFace, doBlockUpdates);
+    }
+
+    @Override
+    public void setChunkSupplier(ChunkSupplier chunkSupplier) {
+        // InstanceContainer's constructor sets a supplier before this class's own.
+        if (constructed)
+            throw new UnsupportedOperationException("A shared world's chunks are always read-only");
+        super.setChunkSupplier(chunkSupplier);
+    }
+
+    @Override
+    public void setChunkLoader(ChunkLoader chunkLoader) {
+        check();
+        super.setChunkLoader(chunkLoader);
     }
 
     @Override

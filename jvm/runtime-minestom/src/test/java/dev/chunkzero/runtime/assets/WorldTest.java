@@ -8,6 +8,7 @@ import dev.chunkzero.runtime.TestScopes;
 import net.hollowcube.polar.PolarWorld;
 import net.hollowcube.polar.PolarWriter;
 import net.minestom.server.ServerProcess;
+import net.minestom.server.instance.LightingChunk;
 import net.minestom.server.instance.block.Block;
 
 import org.junit.jupiter.api.Test;
@@ -60,6 +61,9 @@ class WorldTest {
                     UnsupportedOperationException.class,
                     () -> container.generateChunk(0, 0, unit -> {}));
             assertThrows(UnsupportedOperationException.class, () -> container.unloadChunk(chunk));
+            assertThrows(
+                    UnsupportedOperationException.class,
+                    () -> container.setChunkSupplier(LightingChunk::new));
             assertEquals(Block.AIR, container.getBlock(0, 64, 0));
         }
     }
