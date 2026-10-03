@@ -114,4 +114,14 @@ fn incomplete_materialized_directories_are_rebuilt() {
     fs::remove_file(directory.join("revision.json")).unwrap();
     materialize(&store, &revision, "arena").unwrap();
     assert_eq!(fs::read(directory.join("revision.json")).unwrap(), revision.encode());
+
+    // Concurrent callers repair it once and all see the complete directory.
+    fs::remove_file(directory.join("worlds/lobby.polar")).unwrap();
+    std::thread::scope(|scope| {
+        let callers: Vec<_> = (0..8).map(|_| scope.spawn(|| materialize(&store, &revision, "arena"))).collect();
+        for caller in callers {
+            assert_eq!(caller.join().unwrap().unwrap(), directory);
+        }
+    });
+    assert_eq!(fs::read(directory.join("worlds/lobby.polar")).unwrap(), POLAR);
 }

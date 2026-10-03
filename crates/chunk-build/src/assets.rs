@@ -129,7 +129,8 @@ impl Store {
 ///
 /// Files are hard links to the store's blobs, or read-only copies where linking fails. The directory is built beside
 /// its destination and renamed into place durably, so it appears atomically and complete. An existing directory
-/// whose `revision.json` or files differ from the revision's is removed and rebuilt.
+/// whose `revision.json` or files differ from the revision's is removed and rebuilt. Callers in every process take
+/// turns through a lock file beside the directory.
 /// # Errors
 /// Rejects an invalid revision or app ID, blobs missing from the store, and filesystem failures.
 pub fn materialize(store: &Store, revision: &AssetRevision, app: &str) -> io::Result<PathBuf> {
@@ -145,13 +146,17 @@ pub fn materialize(store: &Store, revision: &AssetRevision, app: &str) -> io::Re
     let files = assets.into_iter().flat_map(|assets| &assets.files).map(|(path, blob)| (format!("app/{path}"), blob));
     let shared = revision.shared.iter().map(|(path, blob)| (format!("shared/{path}"), blob));
     let expected: Vec<_> = worlds.chain(files).chain(shared).collect();
+    fs::create_dir_all(&parent)?;
+    // Held until this returns, so concurrent callers in any process check, repair and publish one at a time.
+    let lock =
+        fs::OpenOptions::new().create(true).truncate(false).write(true).open(parent.join(format!(".{app}.lock")))?;
+    lock.lock()?;
     if fs::symlink_metadata(&destination).is_ok() {
         if is_complete(&destination, revision, &expected) {
             return Ok(destination);
         }
         fs::remove_dir_all(&destination)?;
     }
-    fs::create_dir_all(&parent)?;
     let staging = tempfile::Builder::new().prefix(".materialize-").tempdir_in(&parent)?;
     let mut revision_json = temporary(staging.path())?;
     revision_json.write_all(&revision.encode())?;
@@ -171,11 +176,7 @@ pub fn materialize(store: &Store, revision: &AssetRevision, app: &str) -> io::Re
         })?;
     }
     sync_tree(staging.path())?;
-    match crate::publication::rename_directory(staging.path(), &destination) {
-        Ok(()) => {}
-        Err(_) if fs::symlink_metadata(&destination).is_ok() => return Ok(destination),
-        Err(error) => return Err(error),
-    }
+    crate::publication::rename_directory(staging.path(), &destination)?;
     sync_parent(&destination)?;
     Ok(destination)
 }
