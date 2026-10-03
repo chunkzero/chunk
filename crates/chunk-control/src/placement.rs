@@ -63,6 +63,8 @@ impl Control {
             let mut assignment = Assignment::decode(bytes.as_slice())?;
             assignment.configuration = Some(config);
             assignment.destination = Some(destination);
+            assignment.expires_at_ms =
+                claim.assigned_at_ms.unwrap_or(claim.created_at_ms) + crate::reconcile::UNACTIVATED_MS;
             return Ok(assignment);
         }
         // Control's desired state already asks the JVM for this session, and its topic for this delivery.
@@ -70,6 +72,7 @@ impl Control {
         let mut delivery = delivery(deployment, &runtime, &config, claim, &request);
         let preparation = self.prepared(&runtime, &request.operation_id, claim.generation).await?;
         delivery.identity = None;
+        let assigned_at_ms = crate::now_ms();
         let assignment = Assignment {
             claim: Some(claim.identity(&request.operation_id)),
             phase: ClaimPhase::Reserved as i32,
@@ -77,6 +80,7 @@ impl Control {
             configuration: Some(config),
             preparation: Some(preparation),
             destination: Some(destination),
+            expires_at_ms: assigned_at_ms + crate::reconcile::UNACTIVATED_MS,
         };
         self.update(|state| {
             // A host released while preparing never gets a new prepared claim, which only its release would end.
@@ -90,8 +94,9 @@ impl Control {
             let mut persisted = assignment.clone();
             persisted.configuration = None;
             persisted.destination = None;
+            persisted.expires_at_ms = 0;
             claim.assignment = Some(persisted.encode_to_vec());
-            claim.assigned_at_ms = Some(crate::now_ms());
+            claim.assigned_at_ms = Some(assigned_at_ms);
             Ok(())
         })?;
         Ok(assignment)

@@ -41,8 +41,8 @@ impl Packs {
     /// Brings a client in configuration to `wanted`, in its order: keeps the longest prefix of the stack it holds that
     /// `wanted` begins with, removes the rest, and sends the remaining wanted packs in order, waiting for each sent pack's
     /// final status while keeping the client alive. A required pack the client doesn't load disconnects it, as does
-    /// `max_wait` passing while a required pack is pending; optional packs still pending then are withdrawn. Returns with
-    /// no keepalive outstanding.
+    /// `max_wait` passing while a required pack is pending; optional packs still pending then are withdrawn, and only a
+    /// keepalive already sent is awaited. Returns with no keepalive outstanding.
     pub async fn apply<S: AsyncRead + AsyncWrite + Unpin>(
         &mut self,
         transport: &mut Transport<S>,
@@ -85,10 +85,11 @@ impl Packs {
         let mut pending: HashMap<_, _> = sent.iter().map(|(id, pack)| (*id, *pack)).collect();
         let mut loaded = HashSet::new();
         let mut keep_alive = KeepAlive::new();
+        let mut withdrawn = false;
         while !pending.is_empty() || !keep_alive.idle() {
             tokio::select! {
                 biased;
-                () = sleep_until(expires), if !pending.is_empty() => {
+                () = sleep_until(expires), if !withdrawn => {
                     if pending.values().any(|pack| pack.required) {
                         let _ = configuration::disconnect(transport, 0x02, "Resource pack download timed out.").await;
                         return Err(timed_out("resource pack wait expired"));
@@ -98,8 +99,9 @@ impl Packs {
                         queue(transport, &RemoveResourcePack { uuid: Some(Uuid(id)) })?;
                     }
                     within(WRITE_TIMEOUT, transport.flush()).await?;
+                    withdrawn = true;
                 }
-                () = sleep_until(keep_alive.deadline()) => {
+                () = sleep_until(keep_alive.deadline()), if !withdrawn || !keep_alive.idle() => {
                     let id = keep_alive.start().ok_or_else(|| timed_out("configuration keepalive timed out"))?;
                     within(WRITE_TIMEOUT, transport.write_packet(&ConfigurationKeepAlive { keep_alive_id: id })).await?;
                 }

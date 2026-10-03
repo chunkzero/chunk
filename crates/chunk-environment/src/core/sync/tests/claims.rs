@@ -195,7 +195,16 @@ async fn a_claim_replays_its_outcome_and_rejects_a_changed_request_or_another_ga
 
     let claimed = fixture.platform(&gateway, stream, "login", "chunk:claim", &login("connection")).await;
     let replayed = fixture.platform(&gateway, stream, "login", "chunk:claim", &login("connection")).await;
-    assert_eq!(result::<ClaimResult>(&replayed), result::<ClaimResult>(&claimed));
+    // Only the time the claim has left differs.
+    let outcome = |reply| {
+        let mut outcome = result::<ClaimResult>(reply).outcome;
+        if let Some(claim_result::Outcome::Assignment(assignment)) = &mut outcome {
+            assert!(assignment.expires_in_ms > 50_000, "{}", assignment.expires_in_ms);
+            assignment.expires_in_ms = 0;
+        }
+        outcome
+    };
+    assert_eq!(outcome(&replayed), outcome(&claimed));
     let changed = fixture.platform(&gateway, stream, "login", "chunk:claim", &login("elsewhere")).await;
     assert_eq!(code(&changed), Code::OperationMismatch);
     let as_move = fixture.platform(&gateway, stream, "login", "chunk:claim", &ClaimArguments::default()).await;

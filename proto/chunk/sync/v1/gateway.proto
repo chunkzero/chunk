@@ -188,6 +188,8 @@ message ClaimAssignment {
   // The resource packs the session's app declares, in the order the client stacks them. Before the player configures
   // for the session, the gateway removes the packs the player holds that are not here and sends the ones they lack.
   repeated ResourcePack packs = 8;
+  // How long core keeps the claim from when it answered unless the player is activated in the session, in milliseconds.
+  uint64 expires_in_ms = 9;
 }
 
 // A resource pack, as the client's `add_resource_pack` takes it.

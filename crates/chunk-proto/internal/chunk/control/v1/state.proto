@@ -53,6 +53,9 @@ message Assignment {
   PlayerPreparation preparation = 5;
   // The session's destination. Control fills it in when it answers a claim and does not store it.
   SessionDemand destination = 6;
+  // When control cancels the claim unless it is activated, in Unix milliseconds. Control fills it in when it answers a
+  // claim and does not store it.
+  uint64 expires_at_ms = 7;
 }
 
 enum ClaimPhase {

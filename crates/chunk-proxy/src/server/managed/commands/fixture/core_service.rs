@@ -298,5 +298,6 @@ fn reservation() -> ClaimAssignment {
         deployment: "deployment".into(),
         destination: None,
         packs: vec![],
+        expires_in_ms: 60_000,
     }
 }

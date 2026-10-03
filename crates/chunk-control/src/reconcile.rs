@@ -5,6 +5,9 @@ use tokio::{sync::Semaphore, task::JoinSet};
 
 use crate::{Control, Result, state::Phase};
 
+/// How long after its JVM prepares it, or after its creation until then, a claim that isn't activated is kept.
+pub(crate) const UNACTIVATED_MS: u64 = 60_000;
+
 impl Control {
     /// Expires unactivated reservations, withdraws claims whose capacity is retired or released, repairs what JVMs
     /// reported, and advances host drains and draining releases. Unreachable owners remain fenced.
@@ -18,7 +21,7 @@ impl Control {
         for claim in state.claims.values().filter(|claim| claim.phase != Phase::Released) {
             let request = chunk_proto::control::v1::ClaimRequest::decode(claim.request.as_slice())?;
             let since = claim.assigned_at_ms.unwrap_or(claim.created_at_ms);
-            let expired = !claim.activated && crate::now_ms().saturating_sub(since) > 60_000;
+            let expired = !claim.activated && crate::now_ms().saturating_sub(since) > UNACTIVATED_MS;
             let cancel = expired
                 || state.moves.get(&request.operation_id).is_some_and(|intent| intent.failure.is_some())
                 || (claim.phase == Phase::Reserved && state.sessions[&claim.session].retired)

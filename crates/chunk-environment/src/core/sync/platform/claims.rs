@@ -235,6 +235,7 @@ fn assigned(service: &SyncService, assignment: control::Assignment) -> Result<Cl
         packs: packs(service, &deployment, session_type)?,
         deployment,
         destination,
+        expires_in_ms: assignment.expires_at_ms.saturating_sub(now_ms()),
     })
 }
 
@@ -251,4 +252,9 @@ fn packs(service: &SyncService, deployment: &str, session_type: &str) -> Result<
         prompt: pack.prompt.unwrap_or_default(),
     });
     Ok(packs.collect())
+}
+
+fn now_ms() -> u64 {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
 }

@@ -37,9 +37,9 @@ use moves::{check_move, next_move};
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 /// How long a client may take to load its resource packs.
 const PACK_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long after its JVM prepares a claim its client's packs must be loaded by: control cancels a claim not activated
-/// within 60 seconds of that, and this keeps 15 of them for connecting to the JVM.
-const PACKS_LOADED_BY: Duration = Duration::from_secs(45);
+/// What a claim's lifetime keeps, after its client loaded its packs, for a keepalive the client still owes and for
+/// connecting to its JVM.
+const CONNECT_RESERVE: Duration = Duration::from_secs(20);
 /// How often a gateway tells core how many connections it holds.
 const ACTIVE_EVERY: Duration = Duration::from_secs(1);
 
@@ -104,8 +104,8 @@ struct Assignment {
     setup: PlayerSetup,
     /// The resource packs the session's app declares.
     packs: Vec<ResourcePack>,
-    /// When core assigned it, once its JVM prepared it.
-    assigned: Instant,
+    /// When core cancels the claim unless the player is activated in its session.
+    expires: Instant,
 }
 
 impl Assignment {
@@ -122,7 +122,7 @@ impl Assignment {
             endpoint: assigned.endpoint,
             setup: PlayerSetup { operation_id: claim.operation_id.clone(), capability: assigned.capability },
             packs: assigned.packs,
-            assigned: Instant::now(),
+            expires: Instant::now() + Duration::from_millis(assigned.expires_in_ms),
         })
     }
 }
@@ -176,8 +176,8 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let mut packs = packs::Packs::default();
     loop {
         commands.bind(&guard.claim, &assignment.identity)?;
-        // Packs load within what the claim's lifetime leaves after cutover, keeping time to connect before it expires.
-        let remaining = PACKS_LOADED_BY.saturating_sub(assignment.assigned.elapsed());
+        // Packs load within what the claim's lifetime leaves, keeping time to connect before it expires.
+        let remaining = assignment.expires.saturating_duration_since(Instant::now()).saturating_sub(CONNECT_RESERVE);
         packs
             .apply(
                 &mut authenticated.transport,
