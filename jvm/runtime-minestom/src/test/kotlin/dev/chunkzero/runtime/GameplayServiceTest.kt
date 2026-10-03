@@ -148,7 +148,7 @@ class GameplayServiceTest {
             assertTrue(minecraft.connectionManager().onlinePlayers.isEmpty())
 
             val expired = prepare("expired", 3)
-            clock.addAndGet(TimeUnit.SECONDS.toNanos(31))
+            clock.addAndGet(TimeUnit.SECONDS.toNanos(61))
             core.await("expired", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
             assertTrue(attempt(expired).packet(ConnectionState.LOGIN) is LoginDisconnectPacket)
         } finally {

@@ -33,6 +33,12 @@ import java.util.function.LongSupplier;
  * player once. Once closed it holds no live player references.
  */
 final class PreparedDelivery {
+    /**
+     * How long the gateway may take to connect the player: it loads their resource packs first.
+     * Control cancels the claim of a delivery not admitted within 60 seconds anyway.
+     */
+    private static final long CONNECT_NANOS = TimeUnit.SECONDS.toNanos(60);
+
     private final String operation;
     private final JvmDelivery delivery;
     private final DeliveryFence owners;
@@ -168,7 +174,7 @@ final class PreparedDelivery {
                 arrived = true;
             }
         }
-        if ((!consumed && now.getAsLong() - openedAt >= TimeUnit.SECONDS.toNanos(30))
+        if ((!consumed && now.getAsLong() - openedAt >= CONNECT_NANOS)
                 || (connection != null && !connection.isOnline())) {
             close();
         }

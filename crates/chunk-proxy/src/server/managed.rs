@@ -35,6 +35,9 @@ use super::{
 use moves::{check_move, next_move};
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long a client may take to load its resource packs. Its claim must still be admitted, and control cancels a claim
+/// not activated within 60 seconds.
+const PACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often a gateway tells core how many connections it holds.
 const ACTIVE_EVERY: Duration = Duration::from_secs(1);
 
@@ -168,7 +171,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let mut packs = packs::Packs::default();
     loop {
         commands.bind(&guard.claim, &assignment.identity)?;
-        packs.apply(&mut authenticated.transport, &mut settings, &assignment.packs, deadline.min(WAIT_TIMEOUT)).await?;
+        packs.apply(&mut authenticated.transport, &mut settings, &assignment.packs, deadline.min(PACK_TIMEOUT)).await?;
         let mut internal = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
             .await
             .map_err(io::Error::other)??;
