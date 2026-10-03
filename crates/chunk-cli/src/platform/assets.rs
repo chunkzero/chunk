@@ -1,4 +1,4 @@
-//! `chunk platform assets`: a project's worlds, resource packs and files as the platform holds them. Push publishes
+//! `chunk assets`: a project's worlds, resource packs and files as the platform holds them. Push publishes
 //! the local ones as the project's head, pull brings the head's single-file entries back into the sources, and deploy
 //! runs an environment's release against a revision.
 
@@ -202,12 +202,14 @@ async fn push(session: &Session, path: PathBuf, selector: &ProjectArg, force: bo
         let base = read_base(&local.root, &project.id)?;
         match plan::check_push(&head, base.as_deref(), &id, force) {
             Push::UpToDate => {
+                // Uploads whatever of the head the platform lost; normally nothing.
+                upload_revision(client, &project.id, revision, &built.asset_store).await?;
                 write_base(&local.root, &project.id, &id)?;
                 return cliclack::log::info(format!("Nothing to push; the head is already revision {id}"));
             }
             Push::Moved => {
                 return Err(io::Error::other(format!(
-                    "The head moved to {head} since your base {}. Run `chunk platform assets pull` first, or \
+                    "The head moved to {head} since your base {}. Run `chunk assets pull` first, or \
                      push with --force to replace it.",
                     base.as_deref().unwrap_or("(none)")
                 )));
@@ -230,7 +232,7 @@ async fn push(session: &Session, path: PathBuf, selector: &ProjectArg, force: bo
                 client.set_asset_head(&request).await.map_err(|error| {
                     if error.code() == Code::Aborted {
                         io::Error::other(
-                            "The head moved while pushing. Run `chunk platform assets pull`, then push again.",
+                            "The head moved while pushing. Run `chunk assets pull`, then push again.",
                         )
                     } else {
                         api_error(error)
@@ -283,7 +285,7 @@ async fn pull_head(
         GetAssetRevisionRequest { project_id: project_id.into(), revision_id: String::new(), downloads: true };
     let response = client.get_asset_revision(&request).await.map_err(api_error)?;
     let Some(revision) = response.revision else {
-        return cliclack::log::info("The project has no assets yet; `chunk platform assets push` publishes them.");
+        return cliclack::log::info("The project has no assets yet; `chunk assets push` publishes them.");
     };
     let head = decode(&revision.manifest, &revision.id)?;
     let store = dev_store(root);
@@ -482,7 +484,7 @@ async fn deploy_revision(
         None => head_id(client, &project.id).await?,
     };
     if revision.is_empty() {
-        return Err(io::Error::other("The project has no assets yet; `chunk platform assets push` publishes them."));
+        return Err(io::Error::other("The project has no assets yet; `chunk assets push` publishes them."));
     }
     let deployment = deploy::deploy(client, &environment, &release, &revision, stop_previous).await?;
     chunk_service::run(|stop: CancellationToken| deploy::follow_until_stopped(client, &environment, deployment, stop))

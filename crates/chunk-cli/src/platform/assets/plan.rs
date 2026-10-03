@@ -151,11 +151,15 @@ pub(super) fn locate(entry: &Entry, root: &Path, metadata: &ProjectMetadata) -> 
             let mut declared = metadata.apps.iter().map(|app| &app.packs).chain(metadata.scope_packs.values());
             let pack = declared.find_map(|packs| packs.get(name));
             let pack = pack.ok_or_else(|| format!("this project declares no pack {name}"))?;
-            if Path::new(&pack.source).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("zip")) {
-                Ok(root.join(&pack.source))
-            } else {
-                Err(format!("built from the directory {}", pack.source))
-            }
+            let path = root.join(&pack.source);
+            // A missing source becomes a `.zip`; an existing one is pulled into only if it is a file.
+            let file = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata.is_file(),
+                Err(_) => {
+                    Path::new(&pack.source).extension().is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+                }
+            };
+            if file { Ok(path) } else { Err(format!("built from the directory {}", pack.source)) }
         }
     }
 }
