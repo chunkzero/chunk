@@ -6,14 +6,9 @@ import dev.chunkzero.runtime.SessionScope;
 import net.hollowcube.polar.PolarReader;
 import net.hollowcube.polar.PolarWorld;
 import net.minestom.server.ServerProcess;
-import net.minestom.server.coordinate.Point;
-import net.minestom.server.entity.Player;
 import net.minestom.server.instance.InstanceContainer;
 import net.minestom.server.instance.LightingChunk;
 import net.minestom.server.instance.SharedInstance;
-import net.minestom.server.instance.block.Block;
-import net.minestom.server.instance.block.BlockFace;
-import net.minestom.server.instance.block.BlockHandler;
 import net.minestom.server.world.DimensionType;
 
 import org.jetbrains.annotations.Nullable;
@@ -59,18 +54,22 @@ public final class World {
         var instance =
                 scope.createInstance(
                         DimensionType.OVERWORLD, new PolarLoader(scope.getProcess(), world));
+        instance.setChunkSupplier(LightingChunk::new);
         return load(instance, world);
     }
 
     /**
      * Adds a read-only view of this world to {@code scope}, completing once its chunks are loaded.
      * The JVM loads the world into one instance the first time a session asks and keeps it; each
-     * session's view goes away with the session. Its blocks can't be changed. Call it on the
-     * session's tick thread.
+     * session's view goes away with the session. Once loaded, its blocks, biomes and chunks can't
+     * be changed through either the view or its instance container: players' placements and breaks
+     * are refused, and other changes throw. Call it on the session's tick thread.
      */
     public CompletableFuture<SharedInstance> shared(SessionScope scope) {
         var shared = shared(scope.getProcess());
-        var view = scope.registerSharedInstance(new ReadOnlyView(shared.container()));
+        var view =
+                scope.registerSharedInstance(
+                        new SharedInstance(UUID.randomUUID(), shared.container()));
         return shared.loaded().thenApply(ignored -> view);
     }
 
@@ -81,21 +80,15 @@ public final class World {
             return shared;
         }
         var world = polar();
-        var container =
-                new InstanceContainer(
-                        process,
-                        UUID.randomUUID(),
-                        DimensionType.OVERWORLD,
-                        new PolarLoader(process, world),
-                        DimensionType.OVERWORLD.key());
+        var container = new FrozenWorld(process, new PolarLoader(process, world));
         process.instanceManager().registerInstance(container);
-        shared = new Shared(container, load(container, world));
+        var loaded = load(container, world).thenRun(container::freeze);
+        shared = new Shared(container, loaded);
         return shared;
     }
 
     private static CompletableFuture<InstanceContainer> load(
             InstanceContainer instance, PolarWorld world) {
-        instance.setChunkSupplier(LightingChunk::new);
         var chunks =
                 world.chunks().stream()
                         .map(chunk -> instance.loadChunk(chunk.x(), chunk.z()))
@@ -107,28 +100,5 @@ public final class World {
         return asset.app() + "/" + asset.name();
     }
 
-    private record Shared(InstanceContainer container, CompletableFuture<?> loaded) {}
-
-    /** A session's view of the shared instance; block changes would reach every session. */
-    private static final class ReadOnlyView extends SharedInstance {
-        ReadOnlyView(InstanceContainer container) {
-            super(UUID.randomUUID(), container);
-        }
-
-        @Override
-        public void setBlock(int x, int y, int z, Block block, boolean doBlockUpdates) {
-            throw new UnsupportedOperationException("A shared world is read-only");
-        }
-
-        @Override
-        public boolean placeBlock(BlockHandler.Placement placement, boolean doBlockUpdates) {
-            return false;
-        }
-
-        @Override
-        public boolean breakBlock(
-                Player player, Point blockPosition, BlockFace blockFace, boolean doBlockUpdates) {
-            return false;
-        }
-    }
+    private record Shared(FrozenWorld container, CompletableFuture<?> loaded) {}
 }
