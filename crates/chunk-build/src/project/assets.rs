@@ -51,7 +51,7 @@ pub struct Pack {
 }
 
 /// The `assets/` directory a declaration's sources are relative to, and its project-relative path. Sources must
-/// exist unless `require_sources` is false, which leaves their kind to their extension.
+/// exist unless `require_sources` is false, which classifies a missing world by its `chunks` and extension.
 pub(super) struct Root<'a> {
     pub directory: &'a Path,
     pub prefix: &'a str,
@@ -68,7 +68,12 @@ pub(super) fn worlds(file: &Path, expression: &Expression<'_>, root: &Root<'_>) 
         if fields.keys().any(|key| !["source", "chunks"].contains(key)) {
             return Err(invalid(file, format!("unsupported option of world {name}")));
         }
-        let (source, found) = source(file, fields.get("source").copied(), root)?;
+        let (source, mut found) = source(file, fields.get("source").copied(), root)?;
+        if found.is_none() && !root.require_sources {
+            let path = root.directory.join(source.strip_prefix(root.prefix).unwrap_or(&source).trim_start_matches('/'));
+            found = fs::symlink_metadata(&path).ok().map(|metadata| (path, metadata));
+        }
+        let chunks = fields.get("chunks").map(|value| chunk_range(file, value)).transpose()?;
         let format = match found {
             Some((_, metadata)) if metadata.is_file() && extension(&source, "polar") => WorldFormat::Polar,
             Some((path, metadata))
@@ -79,10 +84,9 @@ pub(super) fn worlds(file: &Path, expression: &Expression<'_>, root: &Root<'_>) 
             Some(_) => {
                 return Err(invalid(file, format!("world {name} requires a .polar file or an Anvil save directory")));
             }
-            None if extension(&source, "polar") => WorldFormat::Polar,
+            None if chunks.is_none() && extension(&source, "polar") => WorldFormat::Polar,
             None => WorldFormat::Anvil,
         };
-        let chunks = fields.get("chunks").map(|value| chunk_range(file, value)).transpose()?;
         if chunks.is_some() && format == WorldFormat::Polar {
             return Err(invalid(file, format!("world {name} can only crop Anvil saves to chunks")));
         }

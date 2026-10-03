@@ -290,6 +290,16 @@ fn declarations_can_be_inspected_before_their_sources_exist() {
     assert_eq!(lobby.worlds["main"].source, "apps/lobby/assets/main.polar");
     assert_eq!(lobby.packs["ui"].source, "apps/lobby/assets/ui.zip");
 
+    write(
+        "apps/lobby/app.ts",
+        &app.replace("main.polar", "save.polar")
+            .replace("{source:'save.polar'}", "{source:'save.polar',chunks:{from:[0,0],to:[1,1]}}"),
+    );
+    assert_eq!(inspect_declarations(root).unwrap().apps[0].worlds["main"].format, WorldFormat::Anvil);
+    fs::create_dir_all(root.join("apps/lobby/assets/save.polar")).unwrap();
+    write("apps/lobby/assets/save.polar/level.dat", "");
+    assert_eq!(inspect_declarations(root).unwrap().apps[0].worlds["main"].format, WorldFormat::Anvil);
+
     write("apps/lobby/app.ts", &app.replace("main.polar", "../main.polar"));
     assert!(inspect_declarations(root).unwrap_err().to_string().contains("relative path inside"));
 }
