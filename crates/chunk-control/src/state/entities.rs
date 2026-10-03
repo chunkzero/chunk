@@ -343,6 +343,9 @@ pub(crate) struct Claim {
     pub assignment: Option<Vec<u8>>,
     pub activated: bool,
     pub created_at_ms: u64,
+    /// When its JVM prepared it. An unactivated claim expires 60 seconds after this, or after its creation until then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub released_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

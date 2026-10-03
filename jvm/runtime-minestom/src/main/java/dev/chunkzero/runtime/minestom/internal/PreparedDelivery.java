@@ -35,7 +35,8 @@ import java.util.function.LongSupplier;
 final class PreparedDelivery {
     /**
      * How long the gateway may take to connect the player: it loads their resource packs first.
-     * Control cancels the claim of a delivery not admitted within 60 seconds anyway.
+     * Control cancels the claim of a delivery not activated within 60 seconds of its preparation
+     * anyway.
      */
     private static final long CONNECT_NANOS = TimeUnit.SECONDS.toNanos(60);
 

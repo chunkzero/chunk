@@ -35,8 +35,8 @@ use super::{
 use moves::{check_move, next_move};
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
-/// How long a client may take to load its resource packs. Its claim must still be admitted, and control cancels a claim
-/// not activated within 60 seconds.
+/// How long a client may take to load its resource packs. Its claim must still be activated, and control cancels a claim
+/// not activated within 60 seconds of its JVM preparing it.
 const PACK_TIMEOUT: Duration = Duration::from_secs(30);
 /// How often a gateway tells core how many connections it holds.
 const ACTIVE_EVERY: Duration = Duration::from_secs(1);

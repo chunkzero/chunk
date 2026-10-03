@@ -167,6 +167,7 @@ fn recovery_fences_its_hosts_unassigned_reservations_but_never_another_hosts() {
             assignment: None,
             activated: false,
             created_at_ms: 0,
+            assigned_at_ms: None,
             released_at_ms: None,
             roster: None,
         };

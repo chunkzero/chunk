@@ -91,6 +91,7 @@ impl Control {
             persisted.configuration = None;
             persisted.destination = None;
             claim.assignment = Some(persisted.encode_to_vec());
+            claim.assigned_at_ms = Some(crate::now_ms());
             Ok(())
         })?;
         Ok(assignment)
@@ -297,6 +298,7 @@ pub(crate) fn insert_claim(
             assignment: None,
             activated: false,
             created_at_ms: crate::now_ms(),
+            assigned_at_ms: None,
             released_at_ms: None,
             roster,
         },
