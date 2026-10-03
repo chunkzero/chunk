@@ -194,10 +194,22 @@ fn persist(temporary: NamedTempFile, path: &Path) -> io::Result<()> {
     permissions.set_readonly(true);
     temporary.as_file().set_permissions(permissions)?;
     match temporary.persist_noclobber(path) {
-        Ok(_) => Ok(()),
-        Err(_) if fs::symlink_metadata(path).is_ok() => Ok(()),
-        Err(error) => Err(error.error),
+        Ok(_) => {}
+        Err(_) if fs::symlink_metadata(path).is_ok() => {}
+        Err(error) => return Err(error.error),
     }
+    sync_parent(path)
+}
+
+/// Makes the directory entry of `path`, and the entry of its directory, durable.
+fn sync_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    for directory in path.ancestors().skip(1).take(2) {
+        fs::File::open(directory)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }
 
 fn check_digest(value: &str) -> io::Result<()> {

@@ -22,11 +22,40 @@ pub(super) async fn load(
         contract.check(&revision).map_err(io::Error::other)?;
         return Ok(Some(revision));
     };
+    let revision = decode(artifact)?;
+    contract.check(&revision).map_err(io::Error::other)?;
+    download(client, store, artifact, revision, cancel).await
+}
+
+/// Downloads into `store` whatever of the revision `artifact` names it lost since core activated it, such as to a crash
+/// before the store's writes were durable. Returns `None` once `cancel` stops it before its downloads finish.
+pub(super) async fn restore(
+    client: &Client,
+    store: &Store,
+    artifact: Option<&v1::AssetArtifact>,
+    cancel: &CancellationToken,
+) -> io::Result<Option<AssetRevision>> {
+    let Some(artifact) = artifact else {
+        return Ok(Some(AssetRevision { version: ASSET_REVISION_VERSION, ..AssetRevision::default() }));
+    };
+    download(client, store, artifact, decode(artifact)?, cancel).await
+}
+
+fn decode(artifact: &v1::AssetArtifact) -> io::Result<AssetRevision> {
     let revision = AssetRevision::decode(&artifact.manifest).map_err(io::Error::other)?;
     if revision.id() != artifact.revision_id {
         return Err(io::Error::other("the asset revision's manifest has another ID"));
     }
-    contract.check(&revision).map_err(io::Error::other)?;
+    Ok(revision)
+}
+
+async fn download(
+    client: &Client,
+    store: &Store,
+    artifact: &v1::AssetArtifact,
+    revision: AssetRevision,
+    cancel: &CancellationToken,
+) -> io::Result<Option<AssetRevision>> {
     fs::create_dir_all(store.root())?;
     for (sha256, size) in jvm_blobs(&revision) {
         if store.contains(sha256)? {

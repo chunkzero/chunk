@@ -464,7 +464,7 @@ impl<'a> Managed<'a> {
         };
         let (state, message) = if let Some(known) = known {
             known
-        } else if self.resumes(&desired).await {
+        } else if self.resumes(&desired, &cancel).await {
             let started = Instant::now();
             self.route(deployment).await.map_err(Interrupted::Fatal)?;
             tracing::info!(deployment, route_ms = millis(started), "current deployment resumed");
@@ -492,8 +492,9 @@ impl<'a> Managed<'a> {
     }
 
     /// Whether `desired`'s deployment is control's current release, resident in the backend, with its release's archive
-    /// kept as `desired` names it. This core checked that release when it activated it, so it serves it again unchecked.
-    async fn resumes(&self, desired: &v1::AttachResponse) -> bool {
+    /// kept as `desired` names it and its asset revision whole in the store, restored if it wasn't. This core checked
+    /// both when it activated them, so it serves them again unchecked.
+    async fn resumes(&self, desired: &v1::AttachResponse, cancel: &CancellationToken) -> bool {
         let Some(artifact) = &desired.release else { return false };
         let current = self.core.control().and_then(|control| control.current_release().map_err(io::Error::other));
         if current.ok().flatten().as_deref() != Some(desired.deployment_id.as_str())
@@ -504,7 +505,16 @@ impl<'a> Managed<'a> {
         let (Some(backend), Ok(id)) = (self.core.backend(), chunk_js::DeploymentId::new(&desired.deployment_id)) else {
             return false;
         };
-        backend.check_deployment(id).await.is_ok()
+        if backend.check_deployment(id).await.is_err() {
+            return false;
+        }
+        match assets::restore(&self.client, &self.assets, desired.assets.as_ref(), cancel).await {
+            Ok(restored) => restored.is_some(),
+            Err(error) => {
+                tracing::warn!(%error, deployment = %desired.deployment_id, "cannot restore the deployment's assets");
+                false
+            }
+        }
     }
 
     /// Loads the deployment's release and the asset blobs its JVMs read, makes it resident in the backend and waits
