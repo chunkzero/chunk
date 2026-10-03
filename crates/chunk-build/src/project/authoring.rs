@@ -37,14 +37,21 @@ pub(crate) struct Destination {
 }
 
 /// Parses every `app.ts` and `scope.ts` under `apps/`. The root scope is always present.
-pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
+pub(crate) fn discover(root: &Path, require_sources: bool) -> io::Result<Inventory> {
     let mut inventory =
         Inventory { scopes: BTreeMap::from([(String::new(), DomainScope { parent: None })]), ..Inventory::default() };
-    collect(root, &root.join("apps"), "", &mut inventory, 0)?;
+    collect(root, &root.join("apps"), "", &mut inventory, 0, require_sources)?;
     Ok(inventory)
 }
 
-fn collect(root: &Path, directory: &Path, relative: &str, inventory: &mut Inventory, depth: usize) -> io::Result<()> {
+fn collect(
+    root: &Path,
+    directory: &Path,
+    relative: &str,
+    inventory: &mut Inventory,
+    depth: usize,
+    require_sources: bool,
+) -> io::Result<()> {
     if depth > 32 {
         return Err(invalid(directory, "app nesting limit"));
     }
@@ -59,7 +66,7 @@ fn collect(root: &Path, directory: &Path, relative: &str, inventory: &mut Invent
         register_scope(directory, relative, inventory)?;
     }
     if has_scope {
-        let assets = Root { directory: &root.join("assets"), prefix: "assets" };
+        let assets = Root { directory: &root.join("assets"), prefix: "assets", require_sources };
         let declaration = parse(&scope_path, false, &assets)?;
         if !declaration.packs.is_empty() {
             inventory.packs.insert(relative.into(), declaration.packs);
@@ -76,7 +83,8 @@ fn collect(root: &Path, directory: &Path, relative: &str, inventory: &mut Invent
     }
     if has_app {
         let prefix = format!("apps/{relative}/assets");
-        let declaration = parse(&app_path, true, &Root { directory: &directory.join("assets"), prefix: &prefix })?;
+        let assets = Root { directory: &directory.join("assets"), prefix: &prefix, require_sources };
+        let declaration = parse(&app_path, true, &assets)?;
         let id = declaration.id.ok_or_else(|| invalid(&app_path, "app.ts requires an explicit literal id"))?;
         require_file(&directory.join("build.gradle.kts"))?;
         inventory.modules.push(Module {
@@ -110,7 +118,7 @@ fn collect(root: &Path, directory: &Path, relative: &str, inventory: &mut Invent
     .filter(|child| child.kind.is_dir())
     {
         let relative = if relative.is_empty() { child.name } else { format!("{relative}/{}", child.name) };
-        collect(root, &child.path, &relative, inventory, depth + 1)?;
+        collect(root, &child.path, &relative, inventory, depth + 1, require_sources)?;
     }
     Ok(())
 }

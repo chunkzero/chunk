@@ -254,7 +254,7 @@ async fn push(session: &Session, path: PathBuf, selector: &ProjectArg, force: bo
 async fn pull(session: &Session, path: &Path, selector: &ProjectArg) -> io::Result<()> {
     let project = session.project(selector).await?;
     let root = path.canonicalize()?;
-    let metadata = chunk_build::project::inspect(&root)?;
+    let metadata = chunk_build::project::inspect_declarations(&root)?;
     chunk_service::run(|stop| async move {
         tokio::select! {
             pulled = pull_head(&session.client, &project.id, &root, &metadata) => pulled,

@@ -268,3 +268,28 @@ fn asset_declarations_resolve_sources_inside_assets_and_order_packs_by_scope() {
         assert!(error.contains("cannot be a symlink"), "{error}");
     }
 }
+
+#[test]
+fn declarations_can_be_inspected_before_their_sources_exist() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let write = |path: &str, contents: &str| {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    write("chunk.toml", "");
+    write("apps/lobby/build.gradle.kts", "");
+    let app =
+        "export default defineApp({id:'lobby',worlds:{main:{source:'main.polar'}},packs:{ui:{source:'ui.zip'}}});";
+    write("apps/lobby/app.ts", app);
+    assert!(inspect(root).is_err());
+    let metadata = inspect_declarations(root).unwrap();
+    let lobby = &metadata.apps[0];
+    assert_eq!(lobby.worlds["main"].format, WorldFormat::Polar);
+    assert_eq!(lobby.worlds["main"].source, "apps/lobby/assets/main.polar");
+    assert_eq!(lobby.packs["ui"].source, "apps/lobby/assets/ui.zip");
+
+    write("apps/lobby/app.ts", &app.replace("main.polar", "../main.polar"));
+    assert!(inspect_declarations(root).unwrap_err().to_string().contains("relative path inside"));
+}

@@ -50,10 +50,12 @@ pub struct Pack {
     pub position: usize,
 }
 
-/// The `assets/` directory a declaration's sources are relative to, and its project-relative path.
+/// The `assets/` directory a declaration's sources are relative to, and its project-relative path. Sources must
+/// exist unless `require_sources` is false, which leaves their kind to their extension.
 pub(super) struct Root<'a> {
     pub directory: &'a Path,
     pub prefix: &'a str,
+    pub require_sources: bool,
 }
 
 pub(super) fn worlds(file: &Path, expression: &Expression<'_>, root: &Root<'_>) -> io::Result<BTreeMap<String, World>> {
@@ -66,13 +68,19 @@ pub(super) fn worlds(file: &Path, expression: &Expression<'_>, root: &Root<'_>) 
         if fields.keys().any(|key| !["source", "chunks"].contains(key)) {
             return Err(invalid(file, format!("unsupported option of world {name}")));
         }
-        let (source, path, metadata) = source(file, fields.get("source").copied(), root)?;
-        let format = if metadata.is_file() && extension(&source, "polar") {
-            WorldFormat::Polar
-        } else if metadata.is_dir() && fs::symlink_metadata(path.join("level.dat")).is_ok_and(|level| level.is_file()) {
-            WorldFormat::Anvil
-        } else {
-            return Err(invalid(file, format!("world {name} requires a .polar file or an Anvil save directory")));
+        let (source, found) = source(file, fields.get("source").copied(), root)?;
+        let format = match found {
+            Some((_, metadata)) if metadata.is_file() && extension(&source, "polar") => WorldFormat::Polar,
+            Some((path, metadata))
+                if metadata.is_dir() && fs::symlink_metadata(path.join("level.dat")).is_ok_and(|l| l.is_file()) =>
+            {
+                WorldFormat::Anvil
+            }
+            Some(_) => {
+                return Err(invalid(file, format!("world {name} requires a .polar file or an Anvil save directory")));
+            }
+            None if extension(&source, "polar") => WorldFormat::Polar,
+            None => WorldFormat::Anvil,
         };
         let chunks = fields.get("chunks").map(|value| chunk_range(file, value)).transpose()?;
         if chunks.is_some() && format == WorldFormat::Polar {
@@ -93,11 +101,13 @@ pub(super) fn packs(file: &Path, expression: &Expression<'_>, root: &Root<'_>) -
         if fields.keys().any(|key| !["source", "required", "prompt"].contains(key)) {
             return Err(invalid(file, format!("unsupported option of pack {name}")));
         }
-        let (source, path, metadata) = source(file, fields.get("source").copied(), root)?;
-        let directory =
-            metadata.is_dir() && fs::symlink_metadata(path.join("pack.mcmeta")).is_ok_and(|meta| meta.is_file());
-        if !(directory || metadata.is_file() && extension(&source, "zip")) {
-            return Err(invalid(file, format!("pack {name} requires a directory with pack.mcmeta or a .zip")));
+        let (source, found) = source(file, fields.get("source").copied(), root)?;
+        if let Some((path, metadata)) = found {
+            let directory =
+                metadata.is_dir() && fs::symlink_metadata(path.join("pack.mcmeta")).is_ok_and(|meta| meta.is_file());
+            if !(directory || metadata.is_file() && extension(&source, "zip")) {
+                return Err(invalid(file, format!("pack {name} requires a directory with pack.mcmeta or a .zip")));
+            }
         }
         let required = match fields.get("required") {
             Some(Expression::BooleanLiteral(value)) => value.value,
@@ -110,9 +120,13 @@ pub(super) fn packs(file: &Path, expression: &Expression<'_>, root: &Root<'_>) -
     Ok(packs)
 }
 
-/// Resolves a literal `source` inside `root` without following symlinks, returning its project-relative path, its
-/// path and its metadata.
-fn source(file: &Path, value: Option<&Expression<'_>>, root: &Root<'_>) -> io::Result<(String, PathBuf, fs::Metadata)> {
+/// Resolves a literal `source` inside `root` without following symlinks, returning its project-relative path and,
+/// when sources are required, its path and metadata.
+fn source(
+    file: &Path,
+    value: Option<&Expression<'_>>,
+    root: &Root<'_>,
+) -> io::Result<(String, Option<(PathBuf, fs::Metadata)>)> {
     let source = value
         .map(|value| literal_string(file, value))
         .transpose()?
@@ -120,6 +134,9 @@ fn source(file: &Path, value: Option<&Expression<'_>>, root: &Root<'_>) -> io::R
     let prefix = root.prefix;
     crate::publication::relative_name(&source)
         .map_err(|_| invalid(file, format!("source {source:?} must be a relative path inside {prefix}/")))?;
+    if !root.require_sources {
+        return Ok((format!("{prefix}/{source}"), None));
+    }
     let missing = |error: io::Error| invalid(file, format!("source {prefix}/{source}: {error}"));
     let mut path = root.directory.to_path_buf();
     let mut metadata = fs::symlink_metadata(&path).map_err(missing)?;
@@ -133,7 +150,7 @@ fn source(file: &Path, value: Option<&Expression<'_>>, root: &Root<'_>) -> io::R
     if metadata.is_symlink() {
         return Err(invalid(file, format!("source {prefix}/{source} cannot be a symlink")));
     }
-    Ok((format!("{prefix}/{source}"), path, metadata))
+    Ok((format!("{prefix}/{source}"), Some((path, metadata))))
 }
 
 fn extension(source: &str, expected: &str) -> bool {
