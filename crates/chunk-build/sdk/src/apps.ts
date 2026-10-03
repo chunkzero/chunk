@@ -7,11 +7,14 @@ import { freeze, v } from "./validators.ts";
 import type { Infer, ObjectValidator, Shape } from "./validators.ts";
 
 type AnyHook = { [E in HookEvent]: HookDefinition<E> }[HookEvent];
-/** A resource pack players of the apps below hold: a directory with `pack.mcmeta`, or a `.zip`. */
+/**
+ * A resource pack players of the apps below hold: a directory with `pack.mcmeta`, or a `.zip`. Packs stack from the
+ * outermost scope down to the app, each file's in declaration order; later packs override earlier ones.
+ */
 export interface PackOptions {
   /** Relative to the project's `assets/` in a scope, and to the app's `assets/` in an app. */
   readonly source: string;
-  /** Disconnects players who decline or fail to load the pack. */
+  /** Disconnects players who decline, fail or take over 30 seconds to load the pack. */
   readonly required?: boolean;
   /** Plain text the client shows when it asks the player to accept the pack. */
   readonly prompt?: string;

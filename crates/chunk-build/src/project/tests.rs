@@ -220,9 +220,13 @@ fn asset_declarations_resolve_sources_inside_assets_and_order_packs_by_scope() {
     write("apps/scope.ts", "export default defineScope({packs:{base:{source:'packs/base'}}});");
     write("apps/games/scope.ts", "export default defineScope({packs:{games:{source:'games.zip',prompt:'Games'}}});");
     write("apps/games/arena/build.gradle.kts", "");
-    let app = "export default defineApp({id:'arena',worlds:{koth:{source:'worlds/koth',chunks:{from:[-8,-8],to:[7,7]}},lobby:{source:'lobby.polar'}},packs:{ui:{source:'ui',required:true}}});";
+    let app = "export default defineApp({id:'arena',worlds:{koth:{source:'worlds/koth',chunks:{from:[-8,-8],to:[7,7]}},lobby:{source:'lobby.polar'}},packs:{ui:{source:'ui',required:true},hud:{source:'hud'}}});";
     write("apps/games/arena/app.ts", app);
-    for path in ["assets/packs/base/pack.mcmeta", "apps/games/arena/assets/ui/pack.mcmeta"] {
+    for path in [
+        "assets/packs/base/pack.mcmeta",
+        "apps/games/arena/assets/ui/pack.mcmeta",
+        "apps/games/arena/assets/hud/pack.mcmeta",
+    ] {
         write(path, "{}");
     }
     write("assets/games.zip", "");
@@ -238,7 +242,7 @@ fn asset_declarations_resolve_sources_inside_assets_and_order_packs_by_scope() {
         })
     );
     let contract = assets::contract(&inspect_inventory(root).unwrap());
-    assert_eq!(contract.app_packs["arena"], ["base", "games", "ui"]);
+    assert_eq!(contract.app_packs["arena"], ["base", "games", "ui", "hud"]);
     assert!(contract.packs["ui"].required && contract.packs["games"].prompt.as_deref() == Some("Games"));
     contract.validate().unwrap();
 

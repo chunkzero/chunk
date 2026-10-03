@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use super::{
     Inventory,
-    authoring::{literal_string, object_fields},
+    authoring::{literal_string, object_entries, object_fields},
     invalid,
 };
 use crate::valid_id;
@@ -46,6 +46,8 @@ pub struct Pack {
     /// Project-relative path with forward slashes: a directory with `pack.mcmeta`, or a `.zip`.
     pub source: String,
     pub declaration: PackDeclaration,
+    /// Its position among the packs its file declares; later packs override earlier ones.
+    pub position: usize,
 }
 
 /// The `assets/` directory a declaration's sources are relative to, and its project-relative path.
@@ -83,7 +85,7 @@ pub(super) fn worlds(file: &Path, expression: &Expression<'_>, root: &Root<'_>) 
 
 pub(super) fn packs(file: &Path, expression: &Expression<'_>, root: &Root<'_>) -> io::Result<BTreeMap<String, Pack>> {
     let mut packs = BTreeMap::new();
-    for (name, value) in object_fields(file, expression)? {
+    for (position, (name, value)) in object_entries(file, expression)?.into_iter().enumerate() {
         if !valid_id(name) {
             return Err(invalid(file, "pack names must be ASCII identifiers"));
         }
@@ -103,7 +105,7 @@ pub(super) fn packs(file: &Path, expression: &Expression<'_>, root: &Root<'_>) -
             None => false,
         };
         let prompt = fields.get("prompt").map(|value| literal_string(file, value)).transpose()?;
-        packs.insert(name.into(), Pack { source, declaration: PackDeclaration { required, prompt } });
+        packs.insert(name.into(), Pack { source, declaration: PackDeclaration { required, prompt }, position });
     }
     Ok(packs)
 }
@@ -183,7 +185,8 @@ pub(super) fn check_unique_packs(root: &Path, inventory: &Inventory) -> io::Resu
     Ok(())
 }
 
-/// The worlds and packs the project's apps declare, with each app's packs from its outermost scope down to its own.
+/// The worlds and packs the project's apps declare, with each app's packs from its outermost scope down to its own,
+/// each file's in declaration order.
 pub(crate) fn contract(inventory: &Inventory) -> AssetContract {
     let mut contract = AssetContract::default();
     for packs in inventory.packs.values().chain(inventory.apps.iter().map(|app| &app.packs)) {
@@ -204,8 +207,11 @@ pub(crate) fn contract(inventory: &Inventory) -> AssetContract {
             .iter()
             .filter_map(|scope| inventory.packs.get(scope))
             .chain([&app.packs])
-            .flat_map(BTreeMap::keys)
-            .cloned()
+            .flat_map(|packs| {
+                let mut declared: Vec<_> = packs.iter().collect();
+                declared.sort_by_key(|(_, pack)| pack.position);
+                declared.into_iter().map(|(name, _)| name.clone())
+            })
             .collect();
         if !names.is_empty() {
             contract.app_packs.insert(app.id.clone(), names);

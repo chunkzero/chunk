@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -323,14 +323,27 @@ pub(super) fn object_fields<'a>(
     path: &Path,
     expression: &'a Expression<'a>,
 ) -> io::Result<BTreeMap<&'a str, &'a Expression<'a>>> {
+    Ok(object_entries(path, expression)?.into_iter().collect())
+}
+
+/// An object literal's properties in declaration order.
+pub(super) fn object_entries<'a>(
+    path: &Path,
+    expression: &'a Expression<'a>,
+) -> io::Result<Vec<(&'a str, &'a Expression<'a>)>> {
     let Expression::ObjectExpression(object) = expression else {
         return Err(invalid(path, "metadata and descriptor maps must be object literals"));
     };
-    properties(path, object)
+    entries(path, object)
 }
 
 fn properties<'a>(path: &Path, object: &'a ObjectExpression<'a>) -> io::Result<BTreeMap<&'a str, &'a Expression<'a>>> {
-    let mut fields = BTreeMap::new();
+    Ok(entries(path, object)?.into_iter().collect())
+}
+
+fn entries<'a>(path: &Path, object: &'a ObjectExpression<'a>) -> io::Result<Vec<(&'a str, &'a Expression<'a>)>> {
+    let mut fields = Vec::new();
+    let mut names = BTreeSet::new();
     for property in &object.properties {
         let ObjectPropertyKind::ObjectProperty(property) = property else {
             return Err(invalid(path, "spreads are unsupported in statically discovered declarations"));
@@ -343,9 +356,10 @@ fn properties<'a>(path: &Path, object: &'a ObjectExpression<'a>) -> io::Result<B
             PropertyKey::StringLiteral(value) => value.value.as_str(),
             _ => return Err(invalid(path, "declaration keys must be literal names")),
         };
-        if fields.insert(name, &property.value).is_some() {
+        if !names.insert(name) {
             return Err(invalid(path, format!("duplicate declaration key {name:?}")));
         }
+        fields.push((name, &property.value));
     }
     Ok(fields)
 }

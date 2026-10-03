@@ -60,14 +60,22 @@ async fn answer_keep_alive(client: &mut Transport<DuplexStream>) {
     client.write_packet(&ConfigurationKeepAliveResponse { keep_alive_id: id }).await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
-async fn moving_sessions_removes_stale_packs_and_sends_only_missing_or_changed_ones() {
-    let held = [(1, 'a'), (2, 'b'), (3, 'c')].map(|(id, sha1)| ([id; 16], sha1.to_string().repeat(40)));
-    let wanted = vec![pack(1, 'a', true), pack(2, 'e', false), pack(4, 'd', false)];
-    let (mut client, task) = apply(Packs(held.into()), wanted);
+fn held(packs: &[(u8, char)]) -> Packs {
+    Packs(packs.iter().map(|&(id, sha1)| ([id; 16], sha1.to_string().repeat(40))).collect())
+}
 
-    let removed = decode_packet::<RemoveResourcePack>(&client.read_frame(4096).await.unwrap()).unwrap();
-    assert_eq!(removed.uuid, Some(Uuid([3; 16])));
+async fn removed(client: &mut Transport<DuplexStream>) -> [u8; 16] {
+    let frame = client.read_frame(4096).await.unwrap();
+    decode_packet::<RemoveResourcePack>(&frame).unwrap().uuid.unwrap().0
+}
+
+#[tokio::test(start_paused = true)]
+async fn moving_sessions_keeps_the_matching_prefix_and_resends_the_rest_in_order() {
+    let wanted = vec![pack(1, 'a', true), pack(2, 'e', false), pack(4, 'd', false)];
+    let (mut client, task) = apply(held(&[(1, 'a'), (2, 'b'), (3, 'c')]), wanted);
+
+    assert_eq!(removed(&mut client).await, [2; 16]);
+    assert_eq!(removed(&mut client).await, [3; 16]);
     assert_eq!(added(&mut client).await, ([2; 16], "e".repeat(40)));
     assert_eq!(added(&mut client).await, ([4; 16], "d".repeat(40)));
     answer_keep_alive(&mut client).await;
@@ -79,8 +87,45 @@ async fn moving_sessions_removes_stale_packs_and_sends_only_missing_or_changed_o
 
     let (result, packs) = task.await.unwrap();
     result.unwrap();
-    let expected = [([1; 16], "a".repeat(40)), ([2; 16], "e".repeat(40))];
-    assert_eq!(packs.0, expected.into());
+    assert_eq!(packs.0, held(&[(1, 'a'), (2, 'e')]).0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reordering_unchanged_packs_restacks_them() {
+    let (mut client, task) = apply(held(&[(1, 'a'), (2, 'b')]), vec![pack(2, 'b', false), pack(1, 'a', false)]);
+
+    assert_eq!(removed(&mut client).await, [1; 16]);
+    assert_eq!(removed(&mut client).await, [2; 16]);
+    assert_eq!(added(&mut client).await.0, [2; 16]);
+    assert_eq!(added(&mut client).await.0, [1; 16]);
+    answer_keep_alive(&mut client).await;
+    // The stack follows the order the packs were sent, not the order they loaded.
+    respond(&mut client, 1, LOADED).await;
+    respond(&mut client, 2, LOADED).await;
+
+    let (result, packs) = task.await.unwrap();
+    result.unwrap();
+    assert_eq!(packs.0, held(&[(2, 'b'), (1, 'a')]).0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_optional_pack_past_the_wait_is_withdrawn() {
+    let (mut client, task) = apply(Packs::default(), vec![pack(6, 'g', false)]);
+    added(&mut client).await;
+    loop {
+        let frame = client.read_frame(4096).await.unwrap();
+        if let Ok(keep_alive) = decode_packet::<ConfigurationKeepAlive>(&frame) {
+            let response = ConfigurationKeepAliveResponse { keep_alive_id: keep_alive.keep_alive_id };
+            client.write_packet(&response).await.unwrap();
+            continue;
+        }
+        assert_eq!(decode_packet::<RemoveResourcePack>(&frame).unwrap().uuid, Some(Uuid([6; 16])));
+        break;
+    }
+
+    let (result, packs) = task.await.unwrap();
+    result.unwrap();
+    assert!(packs.0.is_empty());
 }
 
 #[tokio::test(start_paused = true)]
