@@ -112,11 +112,14 @@ export function encodeRevision(revision: AssetRevision): Uint8Array {
   );
 }
 
-/** Every distinct blob of the revision, by SHA-256, and whether it is a pack's. */
+/** Every distinct blob of the revision, by SHA-256, and whether it is a pack's. Throws on one digest with two sizes. */
 export function revisionBlobs(revision: AssetRevision): Map<string, { size: number; pack: boolean }> {
   const blobs = new Map<string, { size: number; pack: boolean }>();
-  const add = ({ sha256, size }: AssetBlob, pack: boolean) =>
-    blobs.set(sha256, { size, pack: pack || (blobs.get(sha256)?.pack ?? false) });
+  const add = ({ sha256, size }: AssetBlob, pack: boolean) => {
+    const known = blobs.get(sha256);
+    if (known !== undefined && known.size !== size) throw new Error(`blob ${sha256} is declared with different sizes`);
+    blobs.set(sha256, { size, pack: pack || (known?.pack ?? false) });
+  };
   for (const blob of revision.packs.values()) add(blob, true);
   for (const blob of revision.shared.values()) add(blob, false);
   for (const assets of revision.apps.values()) {

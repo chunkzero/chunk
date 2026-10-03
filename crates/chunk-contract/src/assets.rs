@@ -117,6 +117,12 @@ impl AssetRevision {
         if entries > MAX_ASSET_ENTRIES {
             return Err(format!("an asset revision holds at most {MAX_ASSET_ENTRIES} entries"));
         }
+        let mut sizes = BTreeMap::new();
+        for (sha256, size) in self.blob_entries() {
+            if sizes.insert(sha256, size).is_some_and(|other| other != size) {
+                return Err(format!("blob {sha256} is declared with different sizes"));
+            }
+        }
         if self.blobs().values().sum::<u64>() > MAX_REVISION_BYTES {
             return Err("asset revision size limit".into());
         }
@@ -126,10 +132,15 @@ impl AssetRevision {
     /// Every distinct blob the revision holds: its SHA-256 and size.
     #[must_use]
     pub fn blobs(&self) -> BTreeMap<&str, u64> {
+        self.blob_entries().collect()
+    }
+
+    /// Every blob reference of the revision, repeats included.
+    fn blob_entries(&self) -> impl Iterator<Item = (&str, u64)> {
         let packs = self.packs.values().map(|pack| (pack.sha256.as_str(), pack.size));
         let shared = self.shared.values().map(|blob| (blob.sha256.as_str(), blob.size));
         let apps = self.apps.values().flat_map(|assets| assets.worlds.values().chain(assets.files.values()));
-        packs.chain(shared).chain(apps.map(|blob| (blob.sha256.as_str(), blob.size))).collect()
+        packs.chain(shared).chain(apps.map(|blob| (blob.sha256.as_str(), blob.size)))
     }
 
     /// The blobs a JVM of `app` reads: its worlds and files and the shared files, but no packs.
@@ -312,6 +323,14 @@ mod tests {
         assert!(AssetRevision::decode(&pretty).is_err());
         revision.shared.insert("../escape".into(), blob('c'));
         assert!(AssetRevision::decode(&revision.encode()).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_one_digest_with_two_sizes() {
+        let mut revision = AssetRevision { version: ASSET_REVISION_VERSION, ..AssetRevision::default() };
+        revision.shared.insert("a.json".into(), blob('a'));
+        revision.shared.insert("b.json".into(), AssetBlob { size: 2, ..blob('a') });
+        assert!(revision.validate().unwrap_err().contains("different sizes"));
     }
 
     #[test]

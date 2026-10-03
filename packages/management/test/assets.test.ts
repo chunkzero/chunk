@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { Code } from "@connectrpc/connect";
 
-import { sha256Hex } from "../src/assets/revision.ts";
+import { decodeRevision, sha256Hex } from "../src/assets/revision.ts";
 import { issueEnvironmentToken } from "../src/auth/tokens.ts";
 import { desiredState } from "../src/environments/desired.ts";
 import { AssetRevisionState, AssetService } from "../src/gen/chunk/management/v1/assets_pb.ts";
@@ -18,6 +18,12 @@ import {
   uploadAssets,
   uploadRelease,
 } from "./harness.ts";
+
+test("a revision declaring one digest with two sizes is rejected", () => {
+  const sha256 = "a".repeat(64);
+  const manifest = `{"version":1,"packs":{},"shared":{"a":{"sha256":"${sha256}","size":1},"b":{"sha256":"${sha256}","size":2}},"apps":{}}`;
+  expect(() => decodeRevision(new TextEncoder().encode(manifest))).toThrow("different sizes");
+});
 
 describe.skipIf(!databaseUrl)("AssetService", () => {
   let h: Harness;
