@@ -13,6 +13,7 @@ import tempfile
 import tomllib
 
 NIGHTLY = re.compile(r"v\d+\.\d+\.\d+-nightly\.\d{8}\.g[0-9a-f]{12}")
+PLATFORMS = ("linux-x64", "linux-arm64", "darwin-arm64", "darwin-x64", "windows-x64")
 RETAINED = 30
 
 
@@ -45,8 +46,12 @@ def plan(sha, event):
 def publish(directory, version, sha):
     tag = f"v{version}"
     assets = sorted(path for path in directory.iterdir() if path.is_file())
-    if not any(path.suffix == ".gz" for path in assets):
-        raise ValueError("nightly has no archives")
+    archives = {f"chunk-{version}-{platform}.tar.gz" for platform in PLATFORMS}
+    expected_assets = archives | {name + ".sha256" for name in archives}
+    actual_assets = {path.name for path in assets}
+    if actual_assets != expected_assets:
+        raise ValueError(f"nightly assets differ: missing {sorted(expected_assets - actual_assets)}, "
+                         f"unexpected {sorted(actual_assets - expected_assets)}")
     for path in assets:
         if path.suffix != ".sha256":
             expected = path.with_name(path.name + ".sha256").read_text().split()[0]

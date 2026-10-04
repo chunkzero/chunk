@@ -9,6 +9,7 @@ on:
     paths:
       - .github/workflows/nightly.yml
       - scripts/nightly.py
+      - scripts/test-nightly.py
       - scripts/package-sdk.py
       - scripts/rust-notices.py
       - scripts/install-typescript.mjs
@@ -31,6 +32,7 @@ jobs:
       build: ${{ steps.plan.outputs.build }}
     steps:
       - uses: actions/checkout@v5
+      - run: python3 scripts/test-nightly.py
       - id: plan
         env:
           GH_TOKEN: ${{ github.token }}
@@ -103,7 +105,7 @@ jobs:
             dist/*.tar.gz
             dist/*.sha256
           if-no-files-found: error
-          # Cleanup deletes it once used; retention only bounds runs that never reach cleanup.
+          # Failed runs keep archives for retries until retention expires.
           retention-days: 1
 
   publish:
@@ -126,11 +128,11 @@ jobs:
           CHUNK_RELEASE_VERSION: ${{ needs.plan.outputs.version }}
         run: python3 scripts/nightly.py publish --directory dist
 
-  # The artifacts only hand the archives between jobs; keeping them counts against Actions storage.
+  # Preserve archives after failures so retries can reuse the successful builds.
   cleanup:
     if: >-
-      always() && needs.package.result != 'skipped' && (github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository)
+      always() && (needs.publish.result == 'success' || (github.event_name == 'pull_request' && needs.package.result ==
+      'success' && github.event.pull_request.head.repo.full_name == github.repository))
     needs: [package, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
