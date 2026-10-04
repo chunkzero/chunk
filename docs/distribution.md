@@ -59,6 +59,21 @@ checking the resulting releases. Those projects neither include the chunk build 
 To try unpublished artifacts in your own project, set its `chunk.mavenRepository` Gradle property to
 `file:///absolute/path/to/target/dist/maven`.
 
+## Nightly builds
+
+The `Nightly CLI` workflow ([`.github/workflows/nightly.yml`](../.github/workflows/nightly.yml)) builds the CLI archive
+for Linux and macOS on x64 and arm64, and Windows x64, every day `main` has changed, and on manual runs from `main`.
+Each archive is `chunk-<version>-<os>-<arch>.tar.gz` with a `.sha256`, where the version is
+`<workspace version>-nightly.<UTC date>.g<12-character commit>`, and the CLI reports that version. They are published as
+a GitHub prerelease `v<version>`; the 30 newest are kept, and older ones can no longer be installed. Linux archives are
+built on Ubuntu 24.04 and need its glibc and OpenSSL 3; macOS and Windows archives link OpenSSL statically. Nightlies
+carry no JVM artifacts, so `chunk create` still pins the workspace version's. Install them through the
+[Chunkzero aqua registry](https://github.com/chunkzero/aqua-registry) as `chunkzero/chunk-nightly`.
+
+`scripts/package-sdk.py --no-maven` packages the archive for the host platform, and `scripts/nightly.py` plans the
+version and publishes the verified archives. Pull requests that change them run the packaging once they are ready for
+review.
+
 ## Publishing
 
 The `SDK distribution` workflow ([`.github/workflows/sdk.yml`](../.github/workflows/sdk.yml)) packages the SDK on a

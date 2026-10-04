@@ -76,7 +76,7 @@ toolchain:
     pnpm install --frozen-lockfile
     node scripts/install-typescript.mjs
 
-# Build a Linux x64 CLI SDK archive and separate JVM publications.
+# Build a CLI SDK archive for this platform and separate JVM publications.
 package-cli:
     pnpm install --frozen-lockfile
     cargo build --release --locked -p chunk-cli
