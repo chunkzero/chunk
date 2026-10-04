@@ -1,9 +1,9 @@
-//! Calls to core: what this host runs, that release's archive, and the app's AOT cache.
+//! Calls to core: what this host runs, that release's archive, the app's asset blobs, and its AOT cache.
 
 use crate::{Failure, config::Config};
 use chunk_proto::sync::v1::{
-    CallRequest, JvmAotUse, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmBoot, JvmLaunch, call_response::Outcome,
-    core_client::CoreClient, error::Code,
+    CallRequest, JvmAotUse, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmAssetRead, JvmBoot, JvmLaunch,
+    call_response::Outcome, core_client::CoreClient, error::Code,
 };
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -81,27 +81,35 @@ impl Core {
     /// Downloads the archive `launch` names into `file`, checking its size and SHA-256 as it streams.
     pub async fn download(&self, boot: &str, launch: &JvmLaunch, file: &mut File) -> Result<(), Failure> {
         let (size, sha256) = (launch.archive_size, &launch.archive_sha256);
-        self.read_file("chunk:archive", "release archive", boot, (size, sha256), file).await
+        let read = |offset| JvmArchiveRead { boot: boot.into(), offset };
+        self.read_file("chunk:archive", "release archive", read, (size, sha256), file).await
+    }
+
+    /// Downloads the asset blob with this SHA-256 and size into `file`, checking both as it streams.
+    pub async fn download_blob(&self, boot: &str, sha256: &str, size: u64, file: &mut File) -> Result<(), Failure> {
+        let read = |offset| JvmAssetRead { boot: boot.into(), sha256: sha256.into(), offset };
+        self.read_file("chunk:asset-read", "asset blob", read, (size, sha256), file).await
     }
 
     /// Downloads the AOT cache `cache` names into `file`, checking its size and SHA-256 as it streams.
     pub async fn download_aot(&self, boot: &str, cache: &JvmAotUse, file: &mut File) -> Result<(), Failure> {
-        self.read_file("chunk:aot-read", "AOT cache", boot, (cache.size, &cache.sha256), file).await
+        let read = |offset| JvmArchiveRead { boot: boot.into(), offset };
+        self.read_file("chunk:aot-read", "AOT cache", read, (cache.size, &cache.sha256), file).await
     }
 
-    async fn read_file(
+    /// Reads a file from `method` chunk by chunk, each with the arguments `read` makes for its offset.
+    async fn read_file<M: Message>(
         &self,
         method: &str,
         what: &str,
-        boot: &str,
+        read: impl Fn(u64) -> M,
         (size, sha256): (u64, &str),
         file: &mut File,
     ) -> Result<(), Failure> {
         let mut digest = Sha256::new();
         let mut offset = 0;
         while offset < size {
-            let read = JvmArchiveRead { boot: boot.into(), offset };
-            let chunk: JvmArchiveChunk = self.call(method, &read).await?;
+            let chunk: JvmArchiveChunk = self.call(method, &read(offset)).await?;
             if chunk.data.is_empty() {
                 return Err(Failure::verify(format!("core sent no {what} bytes at offset {offset} of {size}")));
             }

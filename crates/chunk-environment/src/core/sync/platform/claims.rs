@@ -11,8 +11,8 @@ use chunk_proto::{
     control::v1 as control,
     sync::v1::{
         AbandonMoveArguments, ActivateResult, CallRequest, ClaimArguments, ClaimAssignment, ClaimRefusal, ClaimResult,
-        DepartResult, Error, GatewayLogin, Position, ReconnectArguments, ReservationResult, SessionDemand,
-        WithdrawResult, claim_result::Outcome, error::Code,
+        DepartResult, Error, GatewayLogin, Position, ReconnectArguments, ReservationResult, ResourcePack,
+        SessionDemand, WithdrawResult, claim_result::Outcome, error::Code,
     },
 };
 use prost::Message;
@@ -95,7 +95,7 @@ async fn claim(
     let control = service.control.clone();
     let outcome = match service.operations.admit(async move { control.claim_approved(request, &approved).await }).await
     {
-        Ok(assignment) => Outcome::Assignment(assigned(assignment)?),
+        Ok(assignment) => Outcome::Assignment(assigned(service, assignment)?),
         Err(Failure::Unresolved(ROUTE_AGAIN)) => Outcome::Refusal(ClaimRefusal::RouteAgain.into()),
         Err(Failure::Invalid(ALREADY_OWNED)) => Outcome::Refusal(ClaimRefusal::AlreadyConnected.into()),
         Err(failure) => return Err(errors::operation(&failure)),
@@ -211,7 +211,7 @@ fn login_request(gateway: &str, operation: &str, login: GatewayLogin) -> control
     }
 }
 
-fn assigned(assignment: control::Assignment) -> Result<ClaimAssignment, Error> {
+fn assigned(service: &SyncService, assignment: control::Assignment) -> Result<ClaimAssignment, Error> {
     let incomplete = || errors::error(Code::Unavailable, "control returned an incomplete assignment");
     let claim = assignment.claim.ok_or_else(incomplete)?;
     let delivery = assignment.delivery.ok_or_else(incomplete)?;
@@ -220,17 +220,41 @@ fn assigned(assignment: control::Assignment) -> Result<ClaimAssignment, Error> {
     let configuration = assignment.configuration.ok_or_else(incomplete)?;
     let preparation = assignment.preparation.ok_or_else(incomplete)?;
     let generation = Generation::from_wire(claim.delivery_generation);
+    let destination = assignment.destination.map(|demand| SessionDemand {
+        key: demand.key,
+        session_type: demand.session_type,
+        machine_profile: demand.machine_profile,
+    });
+    let session_type = destination.as_ref().map_or("", |destination| destination.session_type.as_str());
     Ok(ClaimAssignment {
         generation: Some(Position { epoch: generation.epoch, revision: generation.revision }),
         session: session.id,
         protocol: configuration.protocol,
         endpoint: preparation.endpoint,
         capability: preparation.capability,
+        packs: packs(service, &deployment, session_type)?,
         deployment,
-        destination: assignment.destination.map(|demand| SessionDemand {
-            key: demand.key,
-            session_type: demand.session_type,
-            machine_profile: demand.machine_profile,
-        }),
+        destination,
+        expires_in_ms: assignment.expires_at_ms.saturating_sub(now_ms()),
     })
+}
+
+/// The resource packs the app of `session_type` declares, as `deployment` pins them.
+fn packs(service: &SyncService, deployment: &str, session_type: &str) -> Result<Vec<ResourcePack>, Error> {
+    let app = session_type.split_once('/').map_or(session_type, |(app, _)| app);
+    let release = service.control.release(deployment).map_err(|failure| errors::operation(&failure))?;
+    let packs = release.map(|release| release.assets.packs(app)).unwrap_or_default();
+    let packs = packs.into_iter().map(|pack| ResourcePack {
+        id: pack.id.to_vec(),
+        url: pack.url,
+        sha1: pack.sha1,
+        required: pack.required,
+        prompt: pack.prompt.unwrap_or_default(),
+    });
+    Ok(packs.collect())
+}
+
+fn now_ms() -> u64 {
+    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
 }

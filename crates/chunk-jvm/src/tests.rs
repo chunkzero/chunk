@@ -1,7 +1,7 @@
 use super::*;
 use chunk_proto::sync::v1::{
     CallRequest, CallResponse, Error, JvmAotRecord, JvmAotUse, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead,
-    SubscribeRequest, Update, call_response, core_server, error::Code,
+    JvmAssetRead, JvmAssets, SubscribeRequest, Update, call_response, core_server, error::Code,
 };
 use config::Expected;
 use prost::Message;
@@ -86,6 +86,16 @@ struct Script {
 /// The AOT cache the fake core keeps.
 const AOT_CACHE: &[u8] = b"an AOT cache";
 
+/// The one file of the asset revision the fake core names, shared by every app.
+const SHARED_FILE: &[u8] = b"shared settings";
+
+fn asset_revision() -> chunk_contract::AssetRevision {
+    let mut revision = chunk_contract::AssetRevision { version: 1, ..Default::default() };
+    let blob = chunk_contract::AssetBlob { sha256: format!("{:x}", Sha256::digest(SHARED_FILE)), size: 15 };
+    revision.shared.insert("settings.json".into(), blob);
+    revision
+}
+
 struct FakeCore {
     script: Script,
     launches: AtomicUsize,
@@ -110,6 +120,7 @@ impl FakeCore {
             generation: 3,
             aot: self.script.aot.clone(),
             environment_name: "prod".into(),
+            assets: Some(JvmAssets { revision_id: asset_revision().id(), manifest: asset_revision().encode() }),
         }
     }
 }
@@ -158,6 +169,12 @@ impl core_server::Core for Served {
                 let start = usize::try_from(read.offset).unwrap();
                 let data = archive[start..archive.len().min(start + CHUNK)].to_vec();
                 JvmArchiveChunk { data }.encode_to_vec()
+            }
+            "chunk:asset-read" => {
+                let read = JvmAssetRead::decode(request.arguments.as_slice()).unwrap();
+                assert_eq!(read.sha256, format!("{:x}", Sha256::digest(SHARED_FILE)));
+                let start = usize::try_from(read.offset).unwrap();
+                JvmArchiveChunk { data: SHARED_FILE[start..SHARED_FILE.len().min(start + 4)].to_vec() }.encode_to_vec()
             }
             "chunk:aot-read" => {
                 core.aot_reads.fetch_add(1, Ordering::SeqCst);
@@ -300,8 +317,18 @@ async fn a_runner_retries_an_unavailable_core_then_starts_the_verified_release()
     assert_eq!(core.launches.load(Ordering::SeqCst), 3);
     let args = fs::read_to_string(machine.path("java/bin/java.args")).unwrap();
     let args: Vec<_> = args.lines().collect();
-    assert_eq!(args[..5], ["-Xms261m", "-Xmx261m", "-XX:+UseG1GC", "-XX:+ExitOnOutOfMemoryError", "-jar"]);
-    let jar = Path::new(args[5]);
+    assert_eq!(
+        args[..6],
+        [
+            "-Xms261m",
+            "-Xmx261m",
+            "-XX:+UseG1GC",
+            "-XX:+ExitOnOutOfMemoryError",
+            "--enable-native-access=ALL-UNNAMED",
+            "-jar"
+        ]
+    );
+    let jar = Path::new(args[6]);
     assert!(jar.starts_with(machine.path("cache/releases").join(&RELEASE.1).canonicalize().unwrap()));
     let env = fs::read_to_string(machine.path("java/bin/java.env")).unwrap();
     let env: BTreeMap<_, _> = env.lines().filter_map(|line| line.split_once('=')).collect();
@@ -323,6 +350,9 @@ async fn a_runner_retries_an_unavailable_core_then_starts_the_verified_release()
     assert!(Path::new(working.trim()).starts_with(machine.path("work")));
     assert!(!Path::new(working.trim()).exists());
     assert_eq!(machine.cached(), [RELEASE.1.as_str()]);
+    let assets = Path::new(env["CHUNK_ASSETS"]);
+    assert_eq!(assets, machine.path("cache/assets/apps").join(asset_revision().id()).join("lobby"));
+    assert_eq!(fs::read(assets.join("shared/settings.json")).unwrap(), SHARED_FILE);
 }
 
 #[tokio::test]
@@ -400,15 +430,15 @@ async fn a_recording_run_creates_and_uploads_the_aot_cache_once_the_jvm_exits_cl
     let (exit, core) = machine.run(record()).await;
     assert_eq!(exit, Ok(0));
     let args = machine.java("args");
-    let configuration = args[4].strip_prefix("-XX:AOTConfiguration=").unwrap();
-    assert_eq!(args[3], "-XX:AOTMode=record");
+    let configuration = args[5].strip_prefix("-XX:AOTConfiguration=").unwrap();
+    assert_eq!(args[4], "-XX:AOTMode=record");
     assert!(Path::new(configuration).starts_with(machine.path("work")));
     // Creating the cache repeats the run's Java flags and JAR.
     let create = machine.java("create");
-    assert_eq!((&create[..3], create[3].as_str()), (&args[..3], "-XX:AOTMode=create"));
-    assert_eq!(create[4], format!("-XX:AOTConfiguration={configuration}"));
-    assert!(create[5].starts_with("-XX:AOTCache="));
-    assert_eq!(create[6..], args[5..]);
+    assert_eq!((&create[..4], create[4].as_str()), (&args[..4], "-XX:AOTMode=create"));
+    assert_eq!(create[5], format!("-XX:AOTConfiguration={configuration}"));
+    assert!(create[6].starts_with("-XX:AOTCache="));
+    assert_eq!(create[7..], args[6..]);
     let uploaded = core.uploaded.lock().unwrap().clone();
     assert_eq!(uploaded, (b"created".to_vec(), 7, format!("{:x}", Sha256::digest(b"created"))));
     assert!(!core.abandoned.load(Ordering::SeqCst));
@@ -433,7 +463,7 @@ async fn a_machine_too_small_to_record_runs_without_recording_and_tells_core_but
     let using = JvmAotUse { size: AOT_CACHE.len() as u64, sha256: format!("{:x}", Sha256::digest(AOT_CACHE)) };
     let (exit, _) = machine.run(Script { aot: Some(Aot::Use(using)), ..Script::default() }).await;
     assert_eq!(exit, Ok(0));
-    assert!(machine.java("args")[4].starts_with("-XX:AOTCache="));
+    assert!(machine.java("args")[5].starts_with("-XX:AOTCache="));
 }
 
 #[tokio::test]
@@ -443,7 +473,16 @@ async fn a_one_cpu_512_mib_machine_records_with_the_serial_collector_and_a_growi
     let (exit, core) = machine.run(Script { aot: Some(Aot::Record(JvmAotRecord {})), ..Script::default() }).await;
     assert_eq!(exit, Ok(0));
     let args = machine.java("args");
-    assert_eq!(args[..4], ["-Xmx261m", "-XX:+UseSerialGC", "-XX:+ExitOnOutOfMemoryError", "-XX:AOTMode=record"]);
+    assert_eq!(
+        args[..5],
+        [
+            "-Xmx261m",
+            "-XX:+UseSerialGC",
+            "-XX:+ExitOnOutOfMemoryError",
+            "--enable-native-access=ALL-UNNAMED",
+            "-XX:AOTMode=record"
+        ]
+    );
     assert!(!core.uploaded.lock().unwrap().0.is_empty());
 }
 
@@ -459,16 +498,16 @@ async fn the_jvm_starts_with_a_fetched_aot_cache_or_without_one_that_fails_its_d
     assert_eq!(exit, Ok(0));
     assert!(core.aot_reads.load(Ordering::SeqCst) > 1);
     let args = machine.java("args");
-    let cache = args[4].strip_prefix("-XX:AOTCache=").unwrap();
+    let cache = args[5].strip_prefix("-XX:AOTCache=").unwrap();
     assert_eq!(Path::new(cache), machine.path("cache/aot").join(&RELEASE.1).join("lobby.aot"));
     assert_eq!(fs::read(cache).unwrap(), AOT_CACHE);
-    assert_eq!(args[5], "-jar");
+    assert_eq!(args[6], "-jar");
     // A kept cache that still matches is used again without a download.
     let (exit, core) = machine.run(using(&sha256)).await;
     assert_eq!((exit, core.aot_reads.load(Ordering::SeqCst)), (Ok(0), 0));
-    assert!(machine.java("args")[4].starts_with("-XX:AOTCache="));
+    assert!(machine.java("args")[5].starts_with("-XX:AOTCache="));
 
     let (exit, _) = machine.run(using(&"0".repeat(64))).await;
     assert_eq!(exit, Ok(0));
-    assert_eq!(machine.java("args")[4], "-jar");
+    assert_eq!(machine.java("args")[5], "-jar");
 }

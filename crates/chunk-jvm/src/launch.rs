@@ -49,12 +49,13 @@ impl Jvm {
 }
 
 /// Checks that the image can run `launch`'s app from `release`, installed at `directory`, and builds its command,
-/// which follows `aot`.
+/// which reads the app's assets from `assets` and follows `aot`.
 pub(crate) fn prepare(
     config: &Config,
     launch: &JvmLaunch,
     release: &VerifiedRelease,
     directory: &Path,
+    assets: &Path,
     player_address: IpAddr,
     aot: aot::Plan,
 ) -> Result<Jvm, Failure> {
@@ -95,6 +96,7 @@ pub(crate) fn prepare(
         .env("CHUNK_APP_ID", &launch.app)
         .env("CHUNK_ARTIFACT_DIGEST", &app.sha256)
         .env("CHUNK_PLAYER_ADDRESS", player_address.to_string())
+        .env("CHUNK_ASSETS", assets)
         .stdin(Stdio::null());
     if launch.environment_name.is_empty() {
         command.env_remove("CHUNK_ENVIRONMENT_NAME");
@@ -112,7 +114,13 @@ pub(crate) fn prepare(
 fn flags(heap: u64, cpus: usize, recording: bool) -> Vec<String> {
     let collector = if cpus == 1 { "-XX:+UseSerialGC" } else { "-XX:+UseG1GC" };
     let initial = (!recording).then(|| format!("-Xms{heap}m"));
-    let rest = [format!("-Xmx{heap}m"), collector.into(), "-XX:+ExitOnOutOfMemoryError".into()];
+    // Polar worlds load zstd through JNI.
+    let rest = [
+        format!("-Xmx{heap}m"),
+        collector.into(),
+        "-XX:+ExitOnOutOfMemoryError".into(),
+        "--enable-native-access=ALL-UNNAMED".into(),
+    ];
     initial.into_iter().chain(rest).collect()
 }
 

@@ -61,8 +61,11 @@ credentials in place: those of that first attach, kept open while core restores 
 attach, and after it ends, those of another attach that takes no lease, until the final flush. A log store moved
 elsewhere takes effect only when core starts again. Core waits for management before opening its store, and exits
 non-zero if stopped before management answered. It downloads each release archive, unpacks it under
-`$CHUNK_STATE/releases/`, verifies it with the same checks as `chunk build`, makes it the backend's and control's
-current release, and reports the deployment `ACTIVE`. A release it rejects is reported `FAILED`, and the previous
+`$CHUNK_STATE/releases/`, and verifies it with the same checks as `chunk build`. It checks the asset revision the
+deployment pins against the worlds and packs the release declares, and downloads each blob that JVMs read and
+`$CHUNK_STATE/assets/` lacks, verified against its digest, then writes the revision there; packs reach players' clients
+from management, never through core, and no blob is deleted yet. Only then does it make the deployment the backend's and
+control's current release, and report it `ACTIVE`. A deployment it rejects is reported `FAILED`, and the previous
 deployment keeps serving. The gateway starts with the first active deployment. Core retires the versions it no longer
 needs, stopping their JVMs first, and removes their unpacked releases. JVMs run on machines core asks management for
 (`EnsureCapacity`), each running [`chunk-jvm`](../chunk-jvm/README.md). A core that management fences stops.

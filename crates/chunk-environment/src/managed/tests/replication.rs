@@ -135,6 +135,7 @@ async fn a_fork_s_core_forks_the_named_log_and_reports_its_newest_deployment_wit
     let source_core = CoreConfig {
         environment: "env_source".into(),
         control_record: state.join("control.json"),
+        assets: state.join("assets"),
         state,
         replication: Some(replicated(&source)),
         ..harness.core()

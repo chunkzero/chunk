@@ -13,7 +13,7 @@ import dev.chunkzero.runtime.ManagedPlayer;
 import dev.chunkzero.runtime.SessionManager;
 import dev.chunkzero.runtime.TickExecutor;
 
-import net.minestom.server.instance.InstanceContainer;
+import net.minestom.server.instance.Instance;
 import net.minestom.server.network.ConnectionState;
 import net.minestom.server.network.player.GameProfile;
 import net.minestom.server.network.player.PlayerConnection;
@@ -33,6 +33,13 @@ import java.util.function.LongSupplier;
  * player once. Once closed it holds no live player references.
  */
 final class PreparedDelivery {
+    /**
+     * How long the gateway may take to connect the player: it loads their resource packs first.
+     * Control cancels the claim of a delivery not activated within 60 seconds of its preparation
+     * anyway.
+     */
+    private static final long CONNECT_NANOS = TimeUnit.SECONDS.toNanos(60);
+
     private final String operation;
     private final JvmDelivery delivery;
     private final DeliveryFence owners;
@@ -92,7 +99,7 @@ final class PreparedDelivery {
         return removed.isDone() && !removed.isCompletedExceptionally();
     }
 
-    synchronized InstanceContainer configure(ManagedPlayer current) {
+    synchronized Instance configure(ManagedPlayer current) {
         if (closed || connection != current.getPlayerConnection())
             throw new IllegalStateException("Delivery closed");
         if (session.getPhase() != JvmSessionPhase.JVM_SESSION_PHASE_READY)
@@ -168,7 +175,7 @@ final class PreparedDelivery {
                 arrived = true;
             }
         }
-        if ((!consumed && now.getAsLong() - openedAt >= TimeUnit.SECONDS.toNanos(30))
+        if ((!consumed && now.getAsLong() - openedAt >= CONNECT_NANOS)
                 || (connection != null && !connection.isOnline())) {
             close();
         }

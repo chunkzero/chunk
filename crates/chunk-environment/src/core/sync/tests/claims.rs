@@ -1,10 +1,13 @@
 //! A gateway's claim lifecycle over `chunk:*` calls.
 
-use super::{runtime::with_jvm, *};
+use super::{
+    runtime::{with_jvm, with_release},
+    *,
+};
 use chunk_control::MoveRequest;
 use chunk_proto::sync::v1::{
     AbandonMoveArguments, ActivateResult, ClaimArguments, ClaimPhase, ClaimResult, DepartResult, GatewayClaim,
-    GatewayLogin, PlayerIdentity, SessionDemand, WithdrawResult, claim_result,
+    GatewayLogin, PlayerIdentity, ResourcePack, SessionDemand, WithdrawResult, claim_result,
 };
 
 impl Fixture {
@@ -111,6 +114,45 @@ async fn a_gateway_claims_activates_and_sees_its_player_arrive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claim_carries_the_resource_packs_of_its_sessions_app() {
+    use chunk_contract::{AssetContract, AssetRevision, PackBlob, PackDeclaration};
+    let pack =
+        |byte: char| PackBlob { sha256: byte.to_string().repeat(64), sha1: byte.to_string().repeat(40), size: 1 };
+    let mut revision = AssetRevision { version: chunk_contract::ASSET_REVISION_VERSION, ..AssetRevision::default() };
+    revision.packs.extend([("base".into(), pack('a')), ("ui".into(), pack('b')), ("arena".into(), pack('c'))]);
+    let declared = PackDeclaration { required: true, prompt: Some("The HUD".into()) };
+    let contract = AssetContract {
+        packs: [
+            ("base".into(), PackDeclaration::default()),
+            ("ui".into(), declared),
+            ("arena".into(), PackDeclaration::default()),
+        ]
+        .into(),
+        app_packs: [("bridge".into(), vec!["base".into(), "ui".into()]), ("arena".into(), vec!["arena".into()])].into(),
+        ..AssetContract::default()
+    };
+    let assets = chunk_control::DeploymentAssets::new(&revision, contract, Some("https://packs.test/p/".into()));
+    let (mut fixture, jvm) = with_release(chunk_control::Release { assets, ..runtime::release() }).await;
+    let gateway = fixture.gateway.clone();
+    let (_updates, first) = fixture.follow(&gateway, "proxy").await;
+
+    let claimed = fixture.platform(&gateway, &first.stream, "login", "chunk:claim", &login("connection")).await;
+    let Some(claim_result::Outcome::Assignment(assignment)) = result::<ClaimResult>(&claimed).outcome else {
+        panic!("expected an assignment");
+    };
+    let expected = |name: &str, byte: char, required, prompt: &str| ResourcePack {
+        id: chunk_contract::pack_id(name).to_vec(),
+        url: format!("https://packs.test/p/{}", byte.to_string().repeat(64)),
+        sha1: byte.to_string().repeat(40),
+        required,
+        prompt: prompt.into(),
+    };
+    assert_eq!(assignment.packs, [expected("base", 'a', false, ""), expected("ui", 'b', true, "The HUD")]);
+    fixture.stop().await;
+    jvm.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_proxy_claims_a_login_with_its_gateway_credential_and_sees_it_arrive() {
     let (fixture, jvm) = with_jvm().await;
     let target = chunk_proxy::PlatformTarget {
@@ -153,7 +195,16 @@ async fn a_claim_replays_its_outcome_and_rejects_a_changed_request_or_another_ga
 
     let claimed = fixture.platform(&gateway, stream, "login", "chunk:claim", &login("connection")).await;
     let replayed = fixture.platform(&gateway, stream, "login", "chunk:claim", &login("connection")).await;
-    assert_eq!(result::<ClaimResult>(&replayed), result::<ClaimResult>(&claimed));
+    // Only the time the claim has left differs.
+    let outcome = |reply| {
+        let mut outcome = result::<ClaimResult>(reply).outcome;
+        if let Some(claim_result::Outcome::Assignment(assignment)) = &mut outcome {
+            assert!(assignment.expires_in_ms > 50_000, "{}", assignment.expires_in_ms);
+            assignment.expires_in_ms = 0;
+        }
+        outcome
+    };
+    assert_eq!(outcome(&replayed), outcome(&claimed));
     let changed = fixture.platform(&gateway, stream, "login", "chunk:claim", &login("elsewhere")).await;
     assert_eq!(code(&changed), Code::OperationMismatch);
     let as_move = fixture.platform(&gateway, stream, "login", "chunk:claim", &ClaimArguments::default()).await;

@@ -17,6 +17,8 @@ import {
   universalServerResponseToFetch,
 } from "@connectrpc/connect/protocol";
 
+import { assetRoutes } from "./assets/routes.ts";
+import { assetService } from "./assets/service.ts";
 import { authService, type SignInOption } from "./auth/service.ts";
 import { tokenAuthenticator } from "./auth/tokens.ts";
 import { dashboardHandler } from "./dashboard.ts";
@@ -25,6 +27,7 @@ import type { Deps } from "./deps.ts";
 import { domainService } from "./domains/service.ts";
 import { edgeService } from "./edge/service.ts";
 import { environmentService } from "./environments/service.ts";
+import { AssetService } from "./gen/chunk/management/v1/assets_pb.ts";
 import { AuthService } from "./gen/chunk/management/v1/auth_pb.ts";
 import { DeploymentService } from "./gen/chunk/management/v1/deployments_pb.ts";
 import { DomainService } from "./gen/chunk/management/v1/domains_pb.ts";
@@ -66,8 +69,9 @@ export interface Server {
 
 /**
  * Serves chunk.management.v1 over Connect, gRPC-Web and gRPC, plus plain HTTP. A request is answered by the first of:
- * the RPC its path names, `/healthz`, the release store's URLs, `options.routes`, then the dashboard. So an install's
- * routes can't shadow an RPC or a release URL, and every path they don't answer falls through to the dashboard.
+ * the RPC its path names, `/healthz`, the release store's URLs, asset blobs and packs (`/blobs/`, `/packs/`),
+ * `options.routes`, then the dashboard. So an install's routes can't shadow an RPC, a release URL or an asset URL, and
+ * every path they don't answer falls through to the dashboard.
  */
 export function createHandler(
   deps: Deps,
@@ -79,6 +83,7 @@ export function createHandler(
     .service(AuthService, authService(deps, options.signInOptions))
     .service(ProjectService, projectService(deps))
     .service(DeploymentService, deploymentService(deps))
+    .service(AssetService, assetService(deps))
     .service(SecretService, secretService(deps))
     .service(DomainService, domainService(deps))
     .service(EnvironmentService, environmentService(deps))
@@ -99,6 +104,7 @@ export function createHandler(
   const refusalsByPath = new Map(refusals.handlers.map((handler) => [handler.requestPath, handler]));
   const dashboard = options.dashboardDir === undefined ? undefined : dashboardHandler(options.dashboardDir);
   const rpcs = new Map(router.handlers.map((handler) => [handler.requestPath, handler]));
+  const assets = assetRoutes(deps, authenticator);
 
   /**
    * Every RPC passes here, and runs only once authorized: Connect reads a unary request's whole body before interceptors
@@ -127,6 +133,7 @@ export function createHandler(
     if (pathname === "/healthz") return new Response("ok\n");
     return (
       (await deps.releases.fetch?.(request)) ??
+      (await assets(request)) ??
       (await options.routes?.(request)) ??
       (await dashboard?.(request)) ??
       new Response("not found\n", { status: 404 })

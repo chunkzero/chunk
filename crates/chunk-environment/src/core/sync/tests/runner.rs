@@ -5,10 +5,11 @@ mod host;
 
 use super::{jvm::registration, *};
 use crate::core::ReleaseArchive;
+use chunk_contract::{AssetBlob, AssetRevision};
 use chunk_control::{Launch, MachineKind, Progress, Registration, RuntimeConnection};
 use chunk_proto::sync::v1::{
-    JvmAotRecord, JvmAotUse, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmBoot, JvmLaunch, JvmRegistered,
-    JvmRegistration, jvm_launch::Aot,
+    JvmAotRecord, JvmAotUse, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmAssetRead, JvmAssets, JvmBoot, JvmLaunch,
+    JvmRegistered, JvmRegistration, jvm_launch::Aot,
 };
 use sha2::{Digest, Sha256};
 use std::sync::Mutex;
@@ -66,8 +67,20 @@ fn launch() -> Launch {
     }
 }
 
-/// A core whose `HOST` runs `RELEASE`, whose kept archive is two full chunks and a partial one, with `HOST`'s machine
-/// credential and the archive's bytes.
+/// An asset revision whose `bridge` app reads its world `koth` and the shared file, while app `arena` reads a file of
+/// its own, and the bytes of each, in that order.
+fn assets() -> (AssetRevision, [&'static [u8]; 3]) {
+    let blobs: [&[u8]; 3] = [b"Polr koth", b"shared", b"arena only"];
+    let blob = |bytes: &[u8]| AssetBlob { sha256: auth::hex(&Sha256::digest(bytes)), size: bytes.len() as u64 };
+    let mut revision = AssetRevision { version: chunk_contract::ASSET_REVISION_VERSION, ..AssetRevision::default() };
+    revision.apps.entry("bridge".into()).or_default().worlds.insert("koth".into(), blob(blobs[0]));
+    revision.shared.insert("config.json".into(), blob(blobs[1]));
+    revision.apps.entry("arena".into()).or_default().files.insert("kit.json".into(), blob(blobs[2]));
+    (revision, blobs)
+}
+
+/// A core whose `HOST` runs `RELEASE`, whose kept archive is two full chunks and a partial one, and whose deployment
+/// pins [`assets`], with `HOST`'s machine credential and the archive's bytes.
 async fn runner() -> (Fixture, String, Vec<u8>) {
     let fixture = Fixture::with_host(Arc::new(Remote::default())).await;
     let credential = Issuer::new("test", None, &fixture.cli).machine(MachineKind::Jvm, HOST);
@@ -80,6 +93,15 @@ async fn runner() -> (Fixture, String, Vec<u8>) {
         size: u64::try_from(archive.len()).unwrap(),
     };
     fixture.archives.insert(RELEASE.into(), kept);
+    let (revision, blobs) = assets();
+    let store = chunk_build::assets::Store::new(fixture.directory.path().join("assets"));
+    for bytes in blobs {
+        store.insert(&auth::hex(&Sha256::digest(bytes)), bytes).unwrap();
+    }
+    store.write_revision(&revision).unwrap();
+    let assets = chunk_control::DeploymentAssets::new(&revision, chunk_contract::AssetContract::default(), None);
+    let release = chunk_control::Release { release_id: RELEASE.into(), assets, ..runtime::release() };
+    fixture.control.activate_release(release, chunk_control::DrainPolicy::default()).unwrap();
     fixture.control.record_launch(HOST, launch()).unwrap();
     (fixture, credential, archive)
 }
@@ -163,6 +185,7 @@ async fn a_runner_boots_its_host_once_and_downloads_the_bound_release() {
         generation: 1,
         aot: None,
         environment_name: "prod".into(),
+        assets: Some(JvmAssets { revision_id: assets().0.id(), manifest: assets().0.encode() }),
     };
     assert_eq!(result::<JvmLaunch>(&launched), expected);
     // A retry after a lost response gets the same launch; a machine that booted again is refused.
@@ -180,6 +203,27 @@ async fn a_runner_boots_its_host_once_and_downloads_the_bound_release() {
     assert_eq!(auth::hex(&Sha256::digest(&downloaded)), expected.archive_sha256);
     for offset in [expected.archive_size, expected.archive_size + 1] {
         assert_eq!(code(&fixture.read(&credential, "boot-1", offset).await), Code::Invalid);
+    }
+    fixture.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runner_reads_only_the_asset_blobs_its_app_reads() {
+    let (fixture, credential, _) = runner().await;
+    result::<JvmLaunch>(&fixture.launch(&credential, "boot-1").await);
+    let read = |boot: &str, bytes: &[u8]| {
+        let read = JvmAssetRead { boot: boot.into(), sha256: auth::hex(&Sha256::digest(bytes)), offset: 0 };
+        let fixture = &fixture;
+        let credential = credential.clone();
+        async move { fixture.runner_call(&credential, "chunk:asset-read", &read).await }
+    };
+    let [world, shared, arena] = assets().1;
+    for bytes in [world, shared] {
+        assert_eq!(result::<JvmArchiveChunk>(&read("boot-1", bytes).await).data, bytes);
+    }
+    // Another app's blob, one of no revision, and any read by a boot the host isn't bound to are refused.
+    for (boot, bytes) in [("boot-1", arena), ("boot-1", b"unknown".as_slice()), ("boot-2", world)] {
+        assert_eq!(code(&read(boot, bytes).await), Code::Denied);
     }
     fixture.stop().await;
 }

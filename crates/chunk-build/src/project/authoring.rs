@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs, io,
     path::{Path, PathBuf},
 };
@@ -13,7 +13,11 @@ use oxc_ast::ast::{
 use oxc_parser::Parser;
 use oxc_span::SourceType;
 
-use super::{AppMetadata, Inventory, RuntimeRequirements, children, invalid, require_file, valid_id};
+use super::{
+    AppMetadata, Inventory, RuntimeRequirements,
+    assets::{self, Pack, Root, World},
+    children, invalid, require_file, valid_id,
+};
 
 pub(crate) struct Module {
     pub path: PathBuf,
@@ -33,14 +37,21 @@ pub(crate) struct Destination {
 }
 
 /// Parses every `app.ts` and `scope.ts` under `apps/`. The root scope is always present.
-pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
+pub(crate) fn discover(root: &Path, require_sources: bool) -> io::Result<Inventory> {
     let mut inventory =
         Inventory { scopes: BTreeMap::from([(String::new(), DomainScope { parent: None })]), ..Inventory::default() };
-    collect(&root.join("apps"), "", &mut inventory, 0)?;
+    collect(root, &root.join("apps"), "", &mut inventory, 0, require_sources)?;
     Ok(inventory)
 }
 
-fn collect(directory: &Path, relative: &str, inventory: &mut Inventory, depth: usize) -> io::Result<()> {
+fn collect(
+    root: &Path,
+    directory: &Path,
+    relative: &str,
+    inventory: &mut Inventory,
+    depth: usize,
+    require_sources: bool,
+) -> io::Result<()> {
     if depth > 32 {
         return Err(invalid(directory, "app nesting limit"));
     }
@@ -55,7 +66,11 @@ fn collect(directory: &Path, relative: &str, inventory: &mut Inventory, depth: u
         register_scope(directory, relative, inventory)?;
     }
     if has_scope {
-        let declaration = parse(&scope_path, false)?;
+        let assets = Root { directory: &root.join("assets"), prefix: "assets", require_sources };
+        let declaration = parse(&scope_path, false, &assets)?;
+        if !declaration.packs.is_empty() {
+            inventory.packs.insert(relative.into(), declaration.packs);
+        }
         inventory.modules.push(Module {
             path: scope_path,
             namespace: if relative.is_empty() { "scopes".into() } else { format!("scopes/{relative}") },
@@ -67,7 +82,9 @@ fn collect(directory: &Path, relative: &str, inventory: &mut Inventory, depth: u
         });
     }
     if has_app {
-        let declaration = parse(&app_path, true)?;
+        let prefix = format!("apps/{relative}/assets");
+        let assets = Root { directory: &directory.join("assets"), prefix: &prefix, require_sources };
+        let declaration = parse(&app_path, true, &assets)?;
         let id = declaration.id.ok_or_else(|| invalid(&app_path, "app.ts requires an explicit literal id"))?;
         require_file(&directory.join("build.gradle.kts"))?;
         inventory.modules.push(Module {
@@ -86,6 +103,8 @@ fn collect(directory: &Path, relative: &str, inventory: &mut Inventory, depth: u
             domain: relative.into(),
             runtime: declaration.runtime,
             sessions: declaration.sessions,
+            worlds: declaration.worlds,
+            packs: declaration.packs,
         });
     }
     // A legacy app is a leaf; its source/build directories are not new app roots.
@@ -99,7 +118,7 @@ fn collect(directory: &Path, relative: &str, inventory: &mut Inventory, depth: u
     .filter(|child| child.kind.is_dir())
     {
         let relative = if relative.is_empty() { child.name } else { format!("{relative}/{}", child.name) };
-        collect(&child.path, &relative, inventory, depth + 1)?;
+        collect(root, &child.path, &relative, inventory, depth + 1, require_sources)?;
     }
     Ok(())
 }
@@ -133,9 +152,11 @@ struct Declaration {
     hooks: Vec<String>,
     commands: Vec<String>,
     destinations: BTreeMap<String, Destination>,
+    worlds: BTreeMap<String, World>,
+    packs: BTreeMap<String, Pack>,
 }
 
-fn parse(path: &Path, app: bool) -> io::Result<Declaration> {
+fn parse(path: &Path, app: bool, root: &Root<'_>) -> io::Result<Declaration> {
     require_file(path)?;
     let bytes = crate::read_limited(path, 65_536).map_err(|error| invalid(path, error))?;
     let source = std::str::from_utf8(&bytes).map_err(|error| invalid(path, error))?;
@@ -167,9 +188,9 @@ fn parse(path: &Path, app: bool) -> io::Result<Declaration> {
     };
     let fields = properties(path, object)?;
     let allowed = if app {
-        &["id", "runtime", "implementations", "destinations", "hooks", "commands"][..]
+        &["id", "runtime", "implementations", "destinations", "worlds", "packs", "hooks", "commands"][..]
     } else {
-        &["hooks", "commands"][..]
+        &["packs", "hooks", "commands"][..]
     };
     if let Some(name) = fields.keys().find(|name| !allowed.contains(name)) {
         return Err(invalid(path, format!("unsupported {expected} field {name:?}")));
@@ -206,11 +227,15 @@ fn parse(path: &Path, app: bool) -> io::Result<Declaration> {
         return Err(invalid(path, "implementations must declare at least one implementation"));
     }
     let destinations = destinations(path, fields.get("destinations").copied(), &sessions)?;
+    let worlds = fields.get("worlds").map(|value| assets::worlds(path, value, root)).transpose()?.unwrap_or_default();
+    let packs = fields.get("packs").map(|value| assets::packs(path, value, root)).transpose()?.unwrap_or_default();
     Ok(Declaration {
         id,
         runtime,
         sessions,
         destinations,
+        worlds,
+        packs,
         hooks: descriptor_names(path, fields.get("hooks").copied())?,
         commands: descriptor_names(path, fields.get("commands").copied())?,
     })
@@ -295,22 +320,38 @@ fn runtime_requirements(path: &Path, expression: &Expression<'_>) -> io::Result<
     Ok(runtime)
 }
 
-fn literal_string(path: &Path, expression: &Expression<'_>) -> io::Result<String> {
+pub(super) fn literal_string(path: &Path, expression: &Expression<'_>) -> io::Result<String> {
     match expression {
         Expression::StringLiteral(value) => Ok(value.value.to_string()),
         _ => Err(invalid(path, "metadata must use literal strings")),
     }
 }
 
-fn object_fields<'a>(path: &Path, expression: &'a Expression<'a>) -> io::Result<BTreeMap<&'a str, &'a Expression<'a>>> {
+pub(super) fn object_fields<'a>(
+    path: &Path,
+    expression: &'a Expression<'a>,
+) -> io::Result<BTreeMap<&'a str, &'a Expression<'a>>> {
+    Ok(object_entries(path, expression)?.into_iter().collect())
+}
+
+/// An object literal's properties in declaration order.
+pub(super) fn object_entries<'a>(
+    path: &Path,
+    expression: &'a Expression<'a>,
+) -> io::Result<Vec<(&'a str, &'a Expression<'a>)>> {
     let Expression::ObjectExpression(object) = expression else {
         return Err(invalid(path, "metadata and descriptor maps must be object literals"));
     };
-    properties(path, object)
+    entries(path, object)
 }
 
 fn properties<'a>(path: &Path, object: &'a ObjectExpression<'a>) -> io::Result<BTreeMap<&'a str, &'a Expression<'a>>> {
-    let mut fields = BTreeMap::new();
+    Ok(entries(path, object)?.into_iter().collect())
+}
+
+fn entries<'a>(path: &Path, object: &'a ObjectExpression<'a>) -> io::Result<Vec<(&'a str, &'a Expression<'a>)>> {
+    let mut fields = Vec::new();
+    let mut names = BTreeSet::new();
     for property in &object.properties {
         let ObjectPropertyKind::ObjectProperty(property) = property else {
             return Err(invalid(path, "spreads are unsupported in statically discovered declarations"));
@@ -323,9 +364,10 @@ fn properties<'a>(path: &Path, object: &'a ObjectExpression<'a>) -> io::Result<B
             PropertyKey::StringLiteral(value) => value.value.as_str(),
             _ => return Err(invalid(path, "declaration keys must be literal names")),
         };
-        if fields.insert(name, &property.value).is_some() {
+        if !names.insert(name) {
             return Err(invalid(path, format!("duplicate declaration key {name:?}")));
         }
+        fields.push((name, &property.value));
     }
     Ok(fields)
 }

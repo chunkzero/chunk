@@ -316,6 +316,7 @@ fn tombstone(status: &JvmDeliveryStatus) -> Claim {
         assignment: None,
         activated: false,
         created_at_ms: now,
+        assigned_at_ms: None,
         released_at_ms: Some(now),
         roster: None,
     }

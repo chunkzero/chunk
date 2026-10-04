@@ -310,6 +310,17 @@ async fn expiry_releases_only_unactivated_reservations_and_confirmed_death_fence
             Ok(())
         })
         .unwrap();
+    // A reservation's minute starts over once its JVM prepared it.
+    control.reconcile_all().await.unwrap();
+    assert!(control.state().unwrap().claims["waiting"].phase == Phase::Reserved);
+    control
+        .update(|state| {
+            for claim in state.claims.values_mut() {
+                claim.assigned_at_ms = Some(0);
+            }
+            Ok(())
+        })
+        .unwrap();
     control.reconcile_all().await.unwrap();
     assert!(control.state().unwrap().claims["waiting"].phase == Phase::Released);
     assert!(control.state().unwrap().claims["active"].phase == Phase::Arrived);
@@ -561,6 +572,7 @@ pub(crate) fn release() -> Release {
         )]),
         max_processes: 1,
         idle_node_timeout_seconds: 0,
+        assets: crate::DeploymentAssets::default(),
     }
 }
 

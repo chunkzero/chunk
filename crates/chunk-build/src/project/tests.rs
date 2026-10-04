@@ -206,3 +206,100 @@ fn app_ts_discovery_uses_stable_ids_and_never_loads_imported_behavior() {
         assert!(error.contains("app.ts") && error.contains(diagnostic), "{error}");
     }
 }
+
+#[test]
+fn asset_declarations_resolve_sources_inside_assets_and_order_packs_by_scope() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let write = |path: &str, contents: &str| {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    write("chunk.toml", "");
+    write("apps/scope.ts", "export default defineScope({packs:{base:{source:'packs/base'}}});");
+    write("apps/games/scope.ts", "export default defineScope({packs:{games:{source:'games.zip',prompt:'Games'}}});");
+    write("apps/games/arena/build.gradle.kts", "");
+    let app = "export default defineApp({id:'arena',worlds:{koth:{source:'worlds/koth',chunks:{from:[-8,-8],to:[7,7]}},lobby:{source:'lobby.polar'}},packs:{ui:{source:'ui',required:true},hud:{source:'hud'}}});";
+    write("apps/games/arena/app.ts", app);
+    for path in [
+        "assets/packs/base/pack.mcmeta",
+        "apps/games/arena/assets/ui/pack.mcmeta",
+        "apps/games/arena/assets/hud/pack.mcmeta",
+    ] {
+        write(path, "{}");
+    }
+    write("assets/games.zip", "");
+    write("apps/games/arena/assets/lobby.polar", "");
+    write("apps/games/arena/assets/worlds/koth/level.dat", "");
+    let metadata = serde_json::to_value(inspect(root).unwrap()).unwrap();
+    assert_eq!(
+        metadata["apps"][0]["worlds"],
+        json!({
+            "koth": {"source": "apps/games/arena/assets/worlds/koth", "format": "anvil",
+                     "chunks": {"from": [-8, -8], "to": [7, 7]}},
+            "lobby": {"source": "apps/games/arena/assets/lobby.polar", "format": "polar"}
+        })
+    );
+    let contract = assets::contract(&inspect_inventory(root).unwrap());
+    assert_eq!(contract.app_packs["arena"], ["base", "games", "ui", "hud"]);
+    assert!(contract.packs["ui"].required && contract.packs["games"].prompt.as_deref() == Some("Games"));
+    contract.validate().unwrap();
+
+    for (from, to, expected) in [
+        ("source:'lobby.polar'", "source:'../lobby.polar'", "relative path inside apps/games/arena/assets/"),
+        ("source:'lobby.polar'", "source:'missing.polar'", "missing.polar"),
+        ("source:'lobby.polar'", "source:'worlds'", "requires a .polar file or an Anvil save"),
+        ("source:'lobby.polar'", "source:'lobby.polar',chunks:{from:[0,0],to:[1,1]}", "only crop Anvil"),
+        ("from:[-8,-8]", "from:[8,-8]", "from <= to"),
+        ("source:'ui'", "source:'worlds/koth'", "pack.mcmeta or a .zip"),
+        ("ui:{", "base:{", "pack base is declared more than once"),
+    ] {
+        write("apps/games/arena/app.ts", &app.replace(from, to));
+        let error = inspect(root).unwrap_err().to_string();
+        assert!(error.contains(expected), "{expected}: {error}");
+    }
+    write("apps/games/arena/app.ts", app);
+    #[cfg(unix)]
+    {
+        fs::remove_file(root.join("assets/games.zip")).unwrap();
+        std::os::unix::fs::symlink(root.join("chunk.toml"), root.join("assets/games.zip")).unwrap();
+        let error = inspect(root).unwrap_err().to_string();
+        assert!(error.contains("cannot be a symlink"), "{error}");
+    }
+}
+
+#[test]
+fn declarations_can_be_inspected_before_their_sources_exist() {
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    let write = |path: &str, contents: &str| {
+        let path = root.join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, contents).unwrap();
+    };
+    write("chunk.toml", "");
+    write("apps/lobby/build.gradle.kts", "");
+    let app =
+        "export default defineApp({id:'lobby',worlds:{main:{source:'main.polar'}},packs:{ui:{source:'ui.zip'}}});";
+    write("apps/lobby/app.ts", app);
+    assert!(inspect(root).is_err());
+    let metadata = inspect_declarations(root).unwrap();
+    let lobby = &metadata.apps[0];
+    assert_eq!(lobby.worlds["main"].format, WorldFormat::Polar);
+    assert_eq!(lobby.worlds["main"].source, "apps/lobby/assets/main.polar");
+    assert_eq!(lobby.packs["ui"].source, "apps/lobby/assets/ui.zip");
+
+    write(
+        "apps/lobby/app.ts",
+        &app.replace("main.polar", "save.polar")
+            .replace("{source:'save.polar'}", "{source:'save.polar',chunks:{from:[0,0],to:[1,1]}}"),
+    );
+    assert_eq!(inspect_declarations(root).unwrap().apps[0].worlds["main"].format, WorldFormat::Anvil);
+    fs::create_dir_all(root.join("apps/lobby/assets/save.polar")).unwrap();
+    write("apps/lobby/assets/save.polar/level.dat", "");
+    assert_eq!(inspect_declarations(root).unwrap().apps[0].worlds["main"].format, WorldFormat::Anvil);
+
+    write("apps/lobby/app.ts", &app.replace("main.polar", "../main.polar"));
+    assert!(inspect_declarations(root).unwrap_err().to_string().contains("relative path inside"));
+}

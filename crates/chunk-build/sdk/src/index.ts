@@ -72,4 +72,12 @@ export type { CommandEffectReceipt, CommandPlayer, CommandSession, CommandRoutin
 export type { ActionRouting, MoveRefusal, MoveResult } from "./routing.ts";
 
 export { defineApp, defineScope } from "./apps.ts";
-export type { AppDefinition, AppRuntime, ImplementationOptions, ScopeDefinition, ScopeOptions } from "./apps.ts";
+export type {
+  AppDefinition,
+  AppRuntime,
+  ImplementationOptions,
+  PackOptions,
+  ScopeDefinition,
+  ScopeOptions,
+  WorldOptions,
+} from "./apps.ts";

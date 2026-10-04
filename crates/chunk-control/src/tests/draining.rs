@@ -128,7 +128,8 @@ async fn a_release_deadline_passes_while_withdrawals_are_stuck() {
     control.claim(request("stuck", &uuid::Uuid::new_v4().to_string())).await.unwrap();
     control
         .update(|state| {
-            state.claims.get_mut("stuck").unwrap().created_at_ms = 0;
+            let stuck = state.claims.get_mut("stuck").unwrap();
+            (stuck.created_at_ms, stuck.assigned_at_ms) = (0, Some(0));
             Ok(())
         })
         .unwrap();

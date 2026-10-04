@@ -86,30 +86,39 @@ async fn launch_registration_is_frozen_and_only_owned_children_can_be_released()
 }
 
 #[tokio::test]
-async fn jvms_learn_the_machines_private_address_and_the_environments_name() {
+async fn jvms_learn_the_machines_private_address_the_environments_name_and_their_assets() {
     let directory = tempfile::tempdir().unwrap();
     let java = directory.path().join("java");
-    std::fs::write(&java, "#!/bin/sh\necho \"$CHUNK_PLAYER_ADDRESS $CHUNK_ENVIRONMENT_NAME\"\nexec sleep 60\n")
-        .unwrap();
+    let script = "#!/bin/sh\necho \"$CHUNK_PLAYER_ADDRESS $CHUNK_ENVIRONMENT_NAME\"\ncat \"$CHUNK_ASSETS/shared/game.json\"\n\
+                  exec sleep 60\n";
+    std::fs::write(&java, script).unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut artifact = crate::tests::test_app();
     let jar = manifest_jar("Manifest-Version: 1.0\r\n\r\n");
     std::fs::write(unpacked(&directory).join(&artifact.jar), &jar).unwrap();
     artifact.sha256 = format!("{:x}", Sha256::digest(&jar));
+    let mut release = release(artifact);
+    let store = chunk_build::assets::Store::new(directory.path().join("assets"));
+    let sha256 = format!("{:x}", Sha256::digest(b"{}\n"));
+    store.insert(&sha256, b"{}\n").unwrap();
+    let mut revision = release.assets.revision(&store).unwrap();
+    revision.shared.insert("game.json".into(), chunk_contract::AssetBlob { sha256, size: 3 });
+    store.write_revision(&revision).unwrap();
+    release.assets = crate::DeploymentAssets::new(&revision, chunk_contract::AssetContract::default(), None);
     let host = ProcessHost::new(ProcessHostConfig {
         environment_name: Some("prod".into()),
         ..config(directory.path(), java, Some("fdaa::2".parse().unwrap()))
     });
     host.configure("http://127.0.0.1:1".into()).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
-    let process = host.launch(&id, &release(artifact), "bridge", "local").unwrap().unwrap();
+    let process = host.launch(&id, &release, "bridge", "local").unwrap().unwrap();
     let log = host.path(&id, "jvm.log").unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while std::fs::read_to_string(&log).unwrap().is_empty() {
-        assert!(Instant::now() < deadline, "the JVM logged its player address");
+    while std::fs::read_to_string(&log).unwrap().lines().count() < 2 {
+        assert!(Instant::now() < deadline, "the JVM logged its player address and assets");
         sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(std::fs::read_to_string(&log).unwrap(), "fdaa::2 prod\n");
+    assert_eq!(std::fs::read_to_string(&log).unwrap(), "fdaa::2 prod\n{}\n");
     let registration =
         |endpoint: &str| Registration { identity: process.identity.clone(), player_endpoint: endpoint.into() };
     let token = format!("Bearer {}", process.token);
@@ -232,6 +241,7 @@ fn config(
     ProcessHostConfig {
         directory: directory.join("nodes"),
         releases: directory.join("releases"),
+        assets: directory.join("assets"),
         java,
         environment: "test".into(),
         environment_name: None,

@@ -19,6 +19,7 @@ fn add(control: &Control, gateway: &str, operations: impl IntoIterator<Item = St
                     assignment: None,
                     activated: false,
                     created_at_ms: 0,
+                    assigned_at_ms: None,
                     released_at_ms: None,
                     roster: None,
                 };

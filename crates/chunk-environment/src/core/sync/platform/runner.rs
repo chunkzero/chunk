@@ -1,5 +1,6 @@
-//! What a remote runner starts on its host, `chunk:launch`, that host's release archive, `chunk:archive`, and its AOT
-//! cache, `chunk:aot-read` and `chunk:aot-write`. Only the host's JVM machine credential calls them.
+//! What a remote runner starts on its host, `chunk:launch`, that host's release archive, `chunk:archive`, its app's
+//! asset blobs, `chunk:asset-read`, and its AOT cache, `chunk:aot-read` and `chunk:aot-write`. Only the host's JVM
+//! machine credential calls them.
 
 use super::{
     super::{
@@ -10,12 +11,15 @@ use super::{
     decode,
 };
 use crate::core::{Archives, ReleaseArchive};
+use chunk_build::assets::Store;
+use chunk_contract::AssetRevision;
 use chunk_proto::sync::v1::{
-    CallRequest, Error, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmBoot, JvmLaunch, Position, error::Code,
+    CallRequest, Error, JvmAotWrite, JvmArchiveChunk, JvmArchiveRead, JvmAssetRead, JvmAssets, JvmBoot, JvmLaunch,
+    Position, error::Code,
 };
 use prost::Message;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -24,11 +28,14 @@ use std::{
 /// The most one archive chunk carries, leaving room for the response's framing under tonic's default 4 MiB limit.
 const CHUNK_BYTES: usize = 4 * 1024 * 1024 - 1024;
 const BOOT_BYTES: usize = 128;
+/// The most asset revisions core keeps decoded at once.
+const REVISIONS: usize = 16;
 
 #[derive(Clone, Copy)]
 pub(super) enum Method {
     Launch,
     Archive,
+    AssetRead,
     AotRead,
     AotWrite,
 }
@@ -38,6 +45,7 @@ impl Method {
         Some(match name {
             "launch" => Self::Launch,
             "archive" => Self::Archive,
+            "asset-read" => Self::AssetRead,
             "aot-read" => Self::AotRead,
             "aot-write" => Self::AotWrite,
             _ => return None,
@@ -72,6 +80,9 @@ pub(super) async fn call(
             }
             let launch = service.control.boot_launch(host, &boot).map_err(|failure| errors::control(&failure))?;
             let archive = service.archives.archive(&launch.release)?;
+            let assets = &release(service, &launch.deployment)?.assets;
+            let manifest = service.archives.revision(assets)?.encode();
+            let assets = JvmAssets { revision_id: assets.revision_id.clone(), manifest };
             let aot = service.aot.plan(host, &boot, &launch.release, &launch.app, &runtime).await;
             JvmLaunch {
                 deployment: launch.deployment,
@@ -84,6 +95,7 @@ pub(super) async fn call(
                 generation: launch.generation,
                 aot,
                 environment_name: service.environment_name.clone(),
+                assets: Some(assets),
             }
             .encode_to_vec()
         }
@@ -92,6 +104,15 @@ pub(super) async fn call(
             let launch = bound(&read.boot)?;
             let archive = service.archives.archive(&launch.release)?;
             JvmArchiveChunk { data: service.archives.read(host, archive, read.offset).await? }.encode_to_vec()
+        }
+        Method::AssetRead => {
+            let read: JvmAssetRead = decode(&request.arguments)?;
+            let launch = bound(&read.boot)?;
+            let revision = service.archives.revision(&release(service, &launch.deployment)?.assets)?;
+            let size = revision.app_blobs(&launch.app).get(read.sha256.as_str()).copied();
+            let size = size.ok_or_else(|| errors::denied("the blob is not one the host's app reads"))?;
+            let blob = service.archives.blob(read.sha256, size)?;
+            JvmArchiveChunk { data: service.archives.read(host, blob, read.offset).await? }.encode_to_vec()
         }
         Method::AotRead => {
             let read: JvmArchiveRead = decode(&request.arguments)?;
@@ -111,20 +132,55 @@ pub(super) async fn call(
     Ok((None, result))
 }
 
-/// Core's kept release archives, and the hosts reading a chunk of one now.
+/// The release of `deployment`, which a host's launch names.
+fn release(service: &SyncService, deployment: &str) -> Result<Arc<chunk_control::Release>, Error> {
+    let release = service.control.release(deployment).map_err(|failure| errors::control(&failure))?;
+    release.ok_or_else(|| errors::error(Code::Contract, "core knows no release of the host's deployment"))
+}
+
+/// Core's kept release archives and asset store, the asset revisions it read last, and the hosts reading a chunk of
+/// one of their files now.
 pub(in super::super) struct ArchiveReads {
     archives: Arc<Archives>,
+    assets: Store,
+    revisions: Mutex<BTreeMap<String, Arc<AssetRevision>>>,
     reading: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl ArchiveReads {
-    pub fn new(archives: Arc<Archives>) -> Self {
-        Self { archives, reading: Arc::default() }
+    pub fn new(archives: Arc<Archives>, assets: Store) -> Self {
+        Self { archives, assets, revisions: Mutex::default(), reading: Arc::default() }
+    }
+
+    /// The asset revision a deployment pins, which core wrote to its store before activating it.
+    fn revision(&self, assets: &chunk_control::DeploymentAssets) -> Result<Arc<AssetRevision>, Error> {
+        if let Some(revision) = lock(&self.revisions).get(&assets.revision_id) {
+            return Ok(revision.clone());
+        }
+        let revision = assets.revision(&self.assets).map_err(|error| {
+            errors::error(Code::Contract, format!("core cannot read the host's asset revision: {error}"))
+        })?;
+        let revision = Arc::new(revision);
+        let mut revisions = lock(&self.revisions);
+        if revisions.len() >= REVISIONS {
+            revisions.clear();
+        }
+        revisions.insert(assets.revision_id.clone(), revision.clone());
+        Ok(revision)
     }
 
     fn archive(&self, release: &str) -> Result<ReleaseArchive, Error> {
         let archive = self.archives.get(release);
         archive.ok_or_else(|| errors::error(Code::Contract, "core keeps no archive of the host's release"))
+    }
+
+    /// The asset blob with this SHA-256 and size, which the store checked as it stored it.
+    fn blob(&self, sha256: String, size: u64) -> Result<ReleaseArchive, Error> {
+        if !self.assets.contains(&sha256).unwrap_or(false) {
+            return Err(errors::error(Code::Contract, "core holds no such asset blob"));
+        }
+        let path = self.assets.root().join("blobs").join(&sha256);
+        Ok(ReleaseArchive { path, sha256, size })
     }
 
     /// The chunk of `archive`, or of another file core checked the same way, at `offset`, read for `host` unless
@@ -174,6 +230,6 @@ impl Drop for Reading {
     }
 }
 
-fn lock(hosts: &Mutex<BTreeSet<String>>) -> MutexGuard<'_, BTreeSet<String>> {
-    hosts.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }

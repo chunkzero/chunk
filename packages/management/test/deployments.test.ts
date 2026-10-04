@@ -10,14 +10,15 @@ import { DeploymentState } from "../src/gen/chunk/management/v1/common_pb.ts";
 import { DeploymentService, DeploymentTrigger, ReleaseState } from "../src/gen/chunk/management/v1/deployments_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { releaseKey } from "../src/releases/store.ts";
-import { releaseArchive } from "./fixtures.ts";
-import { codeOf, databaseUrl, type Harness, startHarness } from "./harness.ts";
+import { assetRevision, releaseArchive } from "./fixtures.ts";
+import { codeOf, databaseUrl, type Harness, startHarness, uploadAssets } from "./harness.ts";
 
 describe.skipIf(!databaseUrl)("DeploymentService", () => {
   let h: Harness;
   let projectId: string;
   let staging: string;
   let production: string;
+  let assetRevisionId: string;
   beforeAll(async () => {
     h = await startHarness();
     const projects = h.client(ProjectService);
@@ -26,6 +27,7 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
       (await projects.createEnvironment({ requestId: crypto.randomUUID(), projectId, name })).environment?.id ?? "";
     staging = await environment("staging");
     production = await environment("production");
+    assetRevisionId = await uploadAssets(h, projectId);
   });
   afterAll(() => h.close());
 
@@ -156,8 +158,8 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
         ?.id ?? "";
     await upload("r7");
     const deploy = async () =>
-      (await deployments.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId: "r7" })).deployment?.id ??
-      "";
+      (await deployments.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId: "r7", assetRevisionId }))
+        .deployment?.id ?? "";
     const states = (...ids: string[]) =>
       Promise.all(
         ids.map(async (deploymentId) => (await deployments.getDeployment({ deploymentId })).deployment?.state),
@@ -183,17 +185,33 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
 
   test("a release whose Java version has no JVM image is refused at deploy", async () => {
     await upload("r-java", releaseArchive("r-java", undefined, { manifest: (m) => ({ ...m, java_version: "25" }) }));
-    const deploy = { requestId: crypto.randomUUID(), environmentId: staging, releaseId: "r-java" };
+    const deploy = { requestId: crypto.randomUUID(), environmentId: staging, releaseId: "r-java", assetRevisionId };
     expect(await codeOf(h.client(DeploymentService).deploy(deploy))).toBe(Code.FailedPrecondition);
   });
 
-  test("deploy, promote and rollback move releases between environments", async () => {
+  test("deploy refuses an asset revision that lacks a world the release declares", async () => {
+    const assets = { worlds: { lobby: ["hub"] } };
+    await upload("r-world", releaseArchive("r-world", undefined, { manifest: (m) => ({ ...m, assets }) }));
+    const deploy = (revisionId: string) =>
+      h.client(DeploymentService).deploy({
+        requestId: crypto.randomUUID(),
+        environmentId: staging,
+        releaseId: "r-world",
+        assetRevisionId: revisionId,
+      });
+    expect(await codeOf(deploy(assetRevisionId))).toBe(Code.FailedPrecondition);
+    const withHub = await uploadAssets(h, projectId, assetRevision({ apps: { lobby: { worlds: { hub: "polar" } } } }));
+    expect((await deploy(withHub)).deployment?.assetRevisionId).toBe(withHub);
+  });
+
+  test("deploy, promote and rollback move releases and asset revisions between environments", async () => {
     const deployments = h.client(DeploymentService);
     await upload("r2");
     await upload("r3");
+    const later = await uploadAssets(h, projectId, assetRevision({ shared: { "config.json": "{}" } }));
 
-    const deploy = (environmentId: string, releaseId: string) =>
-      deployments.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId });
+    const deploy = (environmentId: string, releaseId: string, revisionId = assetRevisionId) =>
+      deployments.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId, assetRevisionId: revisionId });
     const first = (await deploy(staging, "r2")).deployment;
     const second = (await deploy(staging, "r3")).deployment;
     expect(second?.state).toBe(DeploymentState.PENDING);
@@ -205,7 +223,7 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
     // The environment reports serving r2, then r3; part 2's ReportStatus does this.
     const r2 = (await deploy(staging, "r2")).deployment?.id ?? "";
     await activateDeployment(h.db, r2);
-    const r3 = (await deploy(staging, "r3")).deployment?.id ?? "";
+    const r3 = (await deploy(staging, "r3", later)).deployment?.id ?? "";
     await activateDeployment(h.db, r3);
     expect((await deployments.getDeployment({ deploymentId: r2 })).deployment?.state).toBe(DeploymentState.SUPERSEDED);
     expect((await deployments.listApps({ environmentId: staging })).apps).toEqual([
@@ -217,12 +235,12 @@ describe.skipIf(!databaseUrl)("DeploymentService", () => {
       sourceEnvironmentId: staging,
       targetEnvironmentId: production,
     });
-    expect(promoted.deployment?.releaseId).toBe("r3");
+    expect(promoted.deployment).toMatchObject({ releaseId: "r3", assetRevisionId: later });
     expect(promoted.deployment?.trigger).toBe(DeploymentTrigger.PROMOTE);
 
     const rollback = { requestId: crypto.randomUUID(), environmentId: staging, deploymentId: "" };
     const rolledBack = await deployments.rollback(rollback);
-    expect(rolledBack.deployment?.releaseId).toBe("r2");
+    expect(rolledBack.deployment).toMatchObject({ releaseId: "r2", assetRevisionId });
     expect((await deployments.rollback(rollback)).deployment?.id).toBe(rolledBack.deployment?.id ?? "");
     expect(await codeOf(deployments.rollback({ ...rollback, deploymentId: first?.id ?? "" }))).toBe(Code.AlreadyExists);
 

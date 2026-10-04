@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package chunk.management.v1;
+
+import "chunk/management/v1/deployments.proto";
+import "google/protobuf/timestamp.proto";
+
+// Asset revisions, for the CLI and dashboards. A revision is an immutable
+// manifest of a project's worlds, resource packs and files by content digest,
+// which `chunk build` writes beside a release. A deployment pins one release
+// and one revision. Blobs are stored once per project, so a revision that
+// changes one map uploads one blob. A project's head is the revision `chunk
+// platform assets push` last published and `pull` fetches.
+service AssetService {
+  // Declares a revision and returns where to upload each of its blobs the
+  // project does not hold yet. Idempotent by revision ID, which management
+  // derives from the manifest; then call CompleteAssetUpload.
+  rpc UploadAssets(UploadAssetsRequest) returns (UploadAssetsResponse);
+  // Verifies every blob of the revision against its digests, including each
+  // pack's SHA-1, and makes the revision deployable. Fails with
+  // FAILED_PRECONDITION while a blob is missing. Idempotent.
+  rpc CompleteAssetUpload(CompleteAssetUploadRequest) returns (CompleteAssetUploadResponse);
+  // Returns a READY revision's manifest, and with `downloads`, a URL for each
+  // of its blobs.
+  rpc GetAssetRevision(GetAssetRevisionRequest) returns (GetAssetRevisionResponse);
+  // Lists a project's READY revisions, newest first.
+  rpc ListAssetRevisions(ListAssetRevisionsRequest) returns (ListAssetRevisionsResponse);
+  // Moves the project's head to a READY revision if the head is still
+  // `expected_head_id`; otherwise fails with ABORTED, leaving it as it is.
+  rpc SetAssetHead(SetAssetHeadRequest) returns (SetAssetHeadResponse);
+}
+
+message AssetRevision {
+  // The lowercase hex SHA-256 of `manifest`.
+  string id = 1;
+  string project_id = 2;
+  AssetRevisionState state = 3;
+  // The revision's canonical JSON manifest, as `chunk build` writes it.
+  bytes manifest = 4;
+  // The distinct bytes of its blobs.
+  uint64 size_bytes = 5;
+  google.protobuf.Timestamp create_time = 6;
+}
+
+enum AssetRevisionState {
+  ASSET_REVISION_STATE_UNSPECIFIED = 0;
+  ASSET_REVISION_STATE_UPLOADING = 1;
+  ASSET_REVISION_STATE_READY = 2;
+}
+
+message BlobUpload {
+  // Lowercase hex SHA-256 of the blob.
+  string sha256 = 1;
+  UploadTarget upload = 2;
+}
+
+message BlobDownload {
+  string sha256 = 1;
+  // Fetch with HTTP GET; it may expire.
+  string url = 2;
+}
+
+message UploadAssetsRequest {
+  string project_id = 1;
+  // The revision's canonical JSON manifest, at most 4 MiB.
+  bytes manifest = 2;
+}
+
+message UploadAssetsResponse {
+  AssetRevision revision = 1;
+  // The blobs to upload; empty when the project holds them all.
+  repeated BlobUpload uploads = 2;
+}
+
+message CompleteAssetUploadRequest {
+  string project_id = 1;
+  string revision_id = 2;
+}
+
+message CompleteAssetUploadResponse {
+  AssetRevision revision = 1;
+}
+
+message GetAssetRevisionRequest {
+  string project_id = 1;
+  // Empty for the project's head.
+  string revision_id = 2;
+  // Also return a download URL for every blob.
+  bool downloads = 3;
+}
+
+message GetAssetRevisionResponse {
+  // Unset when the revision is empty and the project has no head.
+  AssetRevision revision = 1;
+  repeated BlobDownload downloads = 2;
+}
+
+message ListAssetRevisionsRequest {
+  string project_id = 1;
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+message ListAssetRevisionsResponse {
+  // Without manifests.
+  repeated AssetRevision revisions = 1;
+  // The project's head; empty when nothing was pushed.
+  string head_id = 2;
+  string next_page_token = 3;
+}
+
+message SetAssetHeadRequest {
+  string project_id = 1;
+  string revision_id = 2;
+  // The head the caller's revision was made from; empty when the project has
+  // no head yet.
+  string expected_head_id = 3;
+}
+
+message SetAssetHeadResponse {
+  // The head before the call.
+  string previous_head_id = 1;
+}

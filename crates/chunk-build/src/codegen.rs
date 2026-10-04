@@ -54,6 +54,7 @@ fn read_contract(contract: &Path) -> io::Result<BackendMetadata> {
     }
     .validate()
     .map_err(io::Error::other)?;
+    contract.assets.validate().map_err(io::Error::other)?;
     Ok(contract)
 }
 

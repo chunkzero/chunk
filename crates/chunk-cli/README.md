@@ -16,7 +16,7 @@ covers the packaged SDK.
 | ------------------------------------ | ---------------------------------------------------------------------------------------------- |
 | `chunk create DIR`                   | Creates a project with one `lobby` app. `--language java` or `kotlin` (the default).           |
 | `chunk codegen [PROJECT]`            | Writes the schema-aware TypeScript SDK into `PROJECT/.chunk/` for editors, without a build.    |
-| `chunk build [PROJECT]`              | Builds the backend and every app into a release, `dist/<release id>.tar.gz`.                   |
+| `chunk build [PROJECT]`              | Builds a release, `dist/<release id>.tar.gz`, and its asset revision, in `dist/assets/`.       |
 | `chunk dev [PROJECT]`                | Builds the project and runs it locally, rebuilding on change. `chunk local` is an alias.       |
 | `chunk clean [PROJECT]`              | Deletes `dist/` and `.chunk/` output, keeping `chunk dev` backend data unless `--data`.        |
 | `chunk gen [PROJECT] --target T`     | Compiles the backend and generates a `java`, `kotlin` or `typescript` client for it.           |
@@ -31,7 +31,7 @@ covers the packaged SDK.
 | `chunk environments delete E`        | Deletes an environment, destroying its machines and data.                                      |
 | `chunk environments fork N --from E` | Creates an environment from a snapshot of another, running the release that data was serving.  |
 | `chunk environments snapshots E`     | Lists the snapshots stored in an environment's log, newest first.                              |
-| `chunk deploy [PROJECT] --env E`     | Builds the project, uploads and deploys its release, and waits until it is active.             |
+| `chunk deploy [PROJECT] --env E`     | Builds the project, uploads and deploys its release and assets, and waits until it is active.  |
 | `chunk deployments --env E`          | Lists an environment's recent deployments, newest first.                                       |
 | `chunk apps --env E`                 | Lists the apps and session types the environment's active release runs.                        |
 | `chunk logs --env E`                 | Prints an environment's logs; `--follow` keeps printing new ones.                              |
@@ -40,6 +40,10 @@ covers the packaged SDK.
 | `chunk secrets delete NAME --env E`  | Deletes a secret.                                                                              |
 | `chunk promote --from E1 --env E2`   | Deploys the release active in `E1` to `E2`, and waits until it is active.                      |
 | `chunk rollback --env E`             | Deploys the release of an earlier deployment again; `--to ID` picks it.                        |
+| `chunk assets push [PROJECT]`        | Publishes the project's assets as the project's head revision.                                 |
+| `chunk assets pull [PROJECT]`        | Updates local asset files to the head revision, never overwriting local changes.               |
+| `chunk assets deploy --env E`        | Deploys the active release with the head asset revision; `--revision ID` picks another.        |
+| `chunk assets list`                  | Lists the project's asset revisions, newest first, marking the head.                           |
 | `chunk domains add HOST --env E`     | Claims a custom hostname and prints the DNS records to create.                                 |
 | `chunk domains verify HOST --env E`  | Checks the domain's DNS records now, verifying it when they match.                             |
 | `chunk domains list --env E`         | Lists an environment's custom domains.                                                         |
@@ -151,7 +155,7 @@ Two variables override the saved login, for scripts and CI. `CHUNK_API_URL` sele
 saved token unless it is the saved platform's. `CHUNK_TOKEN` is the token to use instead, sent to `CHUNK_API_URL` or
 else the saved platform; `chunk auth logout` never revokes it.
 
-### `deploy`, `promote`, `rollback`, `projects`, `environments`, `deployments`, `apps`, `logs`, `secrets` and `domains`
+### `deploy`, `promote`, `rollback`, `projects`, `environments`, `deployments`, `apps`, `logs`, `secrets`, `assets` and `domains`
 
 ```sh
 chunk projects create my-server
@@ -165,15 +169,15 @@ selects an environment of it the same way. Project and environment names are 1 t
 hyphens, starting and ending with a letter or digit.
 
 `chunk deploy` builds the project as `chunk build` does, uploads the release unless the project already holds it,
-deploys it, and follows the deployment until it is active, then prints where players join. It fails if the deployment
-fails or a later one supersedes it first. Ctrl-C stops waiting but not the deployment; `chunk deployments` shows how it
-ends (`--limit`, default 20, lists up to 200). Before uploading, it warns about secrets `chunk.toml` requires that the
-environment has no value for.
+uploads the asset blobs the project lacks, deploys both, and follows the deployment until it is active, then prints
+where players join. It fails if the deployment fails or a later one supersedes it first. Ctrl-C stops waiting but not
+the deployment; `chunk deployments` shows how it ends (`--limit`, default 20, lists up to 200). Before uploading, it
+warns about secrets `chunk.toml` requires that the environment has no value for.
 
 `chunk promote --from SOURCE --env TARGET` deploys the release active in `SOURCE` to `TARGET`, an environment of the
-same project, and follows the deployment as `deploy` does. Only the release moves, never data or secrets.
-`chunk rollback --env E` deploys the release of the deployment active before the current one again, or of the one
-`--to DEPLOYMENT_ID` names, which `chunk deployments` lists.
+same project, and follows the deployment as `deploy` does. Only the release and asset revision move, never data or
+secrets. `chunk rollback --env E` deploys the release and asset revision of the deployment active before the current one
+again, or of the one `--to DEPLOYMENT_ID` names, which `chunk deployments` lists.
 
 `chunk environments delete NAME_OR_ID` asks for confirmation on a terminal, and needs `--yes` without one, since it
 destroys the environment's machines and data. Deleting finishes in the background; `--wait` polls until the platform
@@ -196,6 +200,17 @@ without its final line break, as in `printf %s "$TOKEN" | chunk secrets put API_
 version, and running deployments receive it without a redeploy. Values are non-empty UTF-8 up to 64 KiB, and an
 environment holds up to 256 secrets. `chunk secrets list` shows names and versions only; no command prints a value.
 `chunk secrets delete NAME` asks for confirmation on a terminal and needs `--yes` without one.
+
+An asset revision is an immutable manifest of the project's worlds, resource packs and files by content digest, which
+every build writes beside its release; a deployment pins one release and one revision, so assets change without
+rebuilding the release. `chunk assets push` builds the project as `chunk dev` does, so Anvil worlds are converted to
+Polar, uploads the blobs the project lacks, and moves the project's head to the new revision. It records the revision as
+the base in `.chunk/assets.json`, and refuses when someone else moved the head since, until you pull; `--force` replaces
+the head anyway. `chunk assets pull` fetches the head and updates each local file whose source is one file (plain files,
+`.polar` worlds and `.zip` packs): a file you haven't changed since the base is replaced or deleted, and a file you
+changed is left as it is and reported as a conflict, which your next push publishes. Entries built from a directory,
+Anvil worlds and pack directories, are listed but never pulled. `chunk assets deploy --env E` deploys the environment's
+active release with the head revision, or the one `--revision ID` names.
 
 `chunk domains add HOSTNAME --env E` claims a custom hostname and prints its state and the DNS records to create: a TXT
 ownership proof and an SRV record that routes players to the environment. A hostname routes only once it is verified:

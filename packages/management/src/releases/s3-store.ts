@@ -2,12 +2,12 @@ import { createHash } from "node:crypto";
 
 import type { ReleaseBucket } from "../config.ts";
 import { bucketClient, s3Request, s3Stream } from "../s3.ts";
-import type { ExpectedArchive, ReleaseStore } from "./store.ts";
+import { type Audience, contentType, type ExpectedObject, type ReleaseStore, servedUrlLifetimeMs } from "./store.ts";
 
 /**
- * Stores archives in an S3-compatible bucket: stored ones below `<prefix>archives/`, uploads below `<prefix>uploads/`.
- * Clients upload and machines download through presigned URLs, which can't bind an upload to its digest, so an upload
- * is verified where it lands, then copied into place through a check of its size and digest. Uploads that are never
+ * Stores objects in an S3-compatible bucket: stored ones below `<prefix>archives/`, uploads below `<prefix>uploads/`.
+ * Clients upload and download through presigned URLs, which can't bind an upload to its digest, so an upload is
+ * verified where it lands, then copied into place through a check of its size and digest. Uploads that are never
  * completed stay; a lifecycle rule on `<prefix>uploads/` can expire them.
  */
 export function s3ReleaseStore(bucket: ReleaseBucket): ReleaseStore {
@@ -18,18 +18,23 @@ export function s3ReleaseStore(bucket: ReleaseBucket): ReleaseStore {
   const upload = (key: string) => `${bucket.prefix}uploads/${key}`;
   const exists = (path: string) => s3Request("release store lookup", () => client.exists(path));
   const read = (path: string) => s3Stream("release store read", client.file(path));
+  const presignDownload = (key: string, expireTime: Date, audience: Audience = "machines") =>
+    (audience === "machines" ? client : publicClient).presign(archive(key), { expiresIn: secondsUntil(expireTime) });
 
   return {
     async uploadTarget(key, _expected, expireTime) {
       return {
         url: publicClient.presign(upload(key), { method: "PUT", expiresIn: secondsUntil(expireTime) }),
         method: "PUT",
-        headers: { "content-type": "application/gzip" },
+        headers: { "content-type": contentType(key) },
       };
     },
 
-    async downloadUrl(key, expireTime) {
-      return client.presign(archive(key), { expiresIn: secondsUntil(expireTime) });
+    downloadUrl: async (key, expireTime, audience) => presignDownload(key, expireTime, audience),
+
+    async serve(key, audience) {
+      const location = presignDownload(key, new Date(Date.now() + servedUrlLifetimeMs), audience);
+      return new Response(null, { status: 302, headers: { location } });
     },
 
     exists: (key) => exists(archive(key)),
@@ -44,7 +49,7 @@ export function s3ReleaseStore(bucket: ReleaseBucket): ReleaseStore {
         // The upload may have been replaced since, so only bytes that match the digest verified above are copied.
         const checked = matching(read(upload(key)), expected);
         await s3Request("release store copy", () =>
-          client.write(archive(key), new Response(checked), { type: "application/gzip" }),
+          client.write(archive(key), new Response(checked), { type: contentType(key) }),
         );
       } catch (error) {
         // A concurrent completion may have stored the archive and removed the upload meanwhile.
@@ -52,7 +57,7 @@ export function s3ReleaseStore(bucket: ReleaseBucket): ReleaseStore {
         throw error;
       }
       await s3Request("release store cleanup", () => client.delete(upload(key))).catch((error: unknown) =>
-        console.error("removing a stored release's upload failed:", error),
+        console.error("removing a stored object's upload failed:", error),
       );
       return result;
     },
@@ -60,20 +65,20 @@ export function s3ReleaseStore(bucket: ReleaseBucket): ReleaseStore {
 }
 
 /** `stream`, erroring before it ends unless it has the expected size and digest. */
-function matching(stream: ReadableStream<Uint8Array>, expected: ExpectedArchive): ReadableStream<Uint8Array> {
+function matching(stream: ReadableStream<Uint8Array>, expected: ExpectedObject): ReadableStream<Uint8Array> {
   const hash = createHash("sha256");
   let size = 0n;
   return stream.pipeThrough(
     new TransformStream({
       transform(chunk, controller) {
         size += BigInt(chunk.byteLength);
-        if (size > expected.sizeBytes) throw new Error("the archive is larger than declared");
+        if (size > expected.sizeBytes) throw new Error("the object is larger than declared");
         hash.update(chunk);
         controller.enqueue(chunk);
       },
       flush() {
         if (size !== expected.sizeBytes || hash.digest("hex") !== expected.sha256) {
-          throw new Error("the archive does not match the declared size and digest");
+          throw new Error("the object does not match the declared size and digest");
         }
       },
     }),

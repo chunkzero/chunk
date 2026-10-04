@@ -106,9 +106,14 @@ impl Running {
 /// Starts core with a host whose JVM registers over sync once control launches it, and runs that JVM. The fake player
 /// arrives once their claim activates, as when the proxy connects them.
 pub async fn with_jvm() -> (Fixture, Running) {
+    with_release(release()).await
+}
+
+/// Like [`with_jvm`], running `release` instead.
+pub async fn with_release(release: chunk_control::Release) -> (Fixture, Running) {
     let launches = Launches::default();
     let fixture = Fixture::with_host(Arc::new(launches.clone())).await;
-    fixture.control.activate_release(release(), chunk_control::DrainPolicy::default()).unwrap();
+    fixture.control.activate_release(release, chunk_control::DrainPolicy::default()).unwrap();
     let (client, control) = (fixture.client.clone(), fixture.control.clone());
     let jvm = Arc::new(OnceLock::new());
     let running = jvm.clone();

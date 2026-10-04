@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use chunk_contract::{AppArtifact, Contracts, Deployment};
+use chunk_contract::{AppArtifact, AssetContract, Contracts, Deployment};
 use serde::Deserialize;
 
 use super::{
@@ -23,6 +23,8 @@ pub struct VerifiedRelease {
     pub apps: Vec<AppArtifact>,
     /// The machine profiles its sessions and destinations run on; empty when it was built without `[local]`.
     pub profiles: BTreeMap<String, MachineProfile>,
+    /// The worlds and packs its apps need from the asset revision deployed with it.
+    pub assets: AssetContract,
     pub backend: Deployment,
 }
 
@@ -37,8 +39,8 @@ pub(super) struct Signed {
 /// # Errors
 /// Rejects links, nonportable paths, oversized contents, an unsupported descriptor version, contents that differ
 /// from the release ID, a `backend.json` not derived from the release's backend, invalid contracts, app catalogs or
-/// machine profiles, contract references outside the release, missing or modified assets, and app JARs that are
-/// missing, incompatible, conflicting or differ from their contracts.
+/// machine profiles, contract or asset declaration references outside the release, and app JARs that are missing,
+/// incompatible, conflicting or differ from their contracts.
 pub fn verify_release(directory: &Path) -> io::Result<VerifiedRelease> {
     let mut files = Files::new();
     publication::collect(directory, "", &mut files)?;
@@ -49,8 +51,8 @@ pub(super) fn check(files: &Files) -> io::Result<VerifiedRelease> {
     let file = |name: &str| files.get(name).ok_or_else(|| io::Error::other(format!("release is missing {name}")));
     let manifest = file("release.json")?;
     let Signed { id, metadata } = serde_json::from_slice(manifest).map_err(io::Error::other)?;
-    if metadata.version != 3 || !(25..=100).contains(&metadata.java_version) {
-        return Err(io::Error::other("release requires descriptor version 3 and Java 25–100"));
+    if metadata.version != 4 || !(25..=100).contains(&metadata.java_version) {
+        return Err(io::Error::other("release requires descriptor version 4 and Java 25–100"));
     }
     if serde_json::to_vec(&Manifest { id: &id, metadata: &metadata }).map_err(io::Error::other)? != *manifest {
         return Err(io::Error::other("release.json is not in its canonical form"));
@@ -64,6 +66,9 @@ pub(super) fn check(files: &Files) -> io::Result<VerifiedRelease> {
     }
 
     let contract: BackendMetadata = serde_json::from_slice(file("contract.json")?).map_err(io::Error::other)?;
+    if contract.assets != metadata.assets {
+        return Err(io::Error::other("release.json asset declarations differ from the compiled backend's"));
+    }
     let source = String::from_utf8(file("source.mjs")?.clone()).map_err(io::Error::other)?;
     let mut backend = deployment(source, contract);
     backend.id.clone_from(&id);
@@ -76,16 +81,12 @@ pub(super) fn check(files: &Files) -> io::Result<VerifiedRelease> {
     for app in apps.values() {
         check_jar(app, metadata.java_version, files, &backend.contracts)?;
     }
-    for (name, sha256) in &metadata.assets {
-        if files.get(name).is_none_or(|bytes| content_digest(bytes) != *sha256) {
-            return Err(io::Error::other(format!("asset {name} is missing or differs from the release")));
-        }
-    }
     Ok(VerifiedRelease {
         id,
         java_version: metadata.java_version,
         apps: metadata.apps,
         profiles: metadata.profiles,
+        assets: metadata.assets,
         backend,
     })
 }
@@ -136,6 +137,11 @@ fn check_catalog(metadata: &Metadata, backend: &Deployment) -> io::Result<BTreeM
         && !domains.apps.keys().eq(apps.keys())
     {
         return Err(io::Error::other("domain manifest app bindings differ from the release's apps"));
+    }
+    metadata.assets.validate().map_err(io::Error::other)?;
+    let assets = &metadata.assets;
+    if assets.worlds.keys().chain(assets.app_packs.keys()).any(|app| !apps.contains_key(app)) {
+        return Err(io::Error::other("asset declarations reference an app outside the release"));
     }
     if let Some(destinations) = &contracts.destinations {
         destinations.validate_apps(&apps).map_err(io::Error::other)?;

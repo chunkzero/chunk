@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 chunk-build = { path = "../chunk-build", default-features = false }
+chunk-contract = { path = "../chunk-contract" }
 chunk-proto = { path = "../chunk-proto" }
 chunk-service = { path = "../chunk-service" }
 prost = "0.14.3"

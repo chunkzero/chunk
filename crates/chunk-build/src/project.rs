@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{MachineProfile, valid_id};
 
+pub(crate) mod assets;
 pub(crate) mod authoring;
+
+pub use assets::{ChunkRange, Pack, World, WorldFormat};
 
 /// Apps, domain scopes and authored modules found in one pass over the project tree.
 #[derive(Default)]
@@ -19,6 +22,8 @@ pub(crate) struct Inventory {
     pub apps: Vec<AppMetadata>,
     pub scopes: BTreeMap<String, DomainScope>,
     pub modules: Vec<authoring::Module>,
+    /// Each scope's packs, by scope path.
+    pub packs: BTreeMap<String, BTreeMap<String, Pack>>,
     pub local: Option<LocalConfig>,
     pub env: chunk_contract::EnvManifest,
 }
@@ -29,6 +34,9 @@ pub struct ProjectMetadata {
     pub apps: Vec<AppMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub local: Option<LocalConfig>,
+    /// Each scope's packs, by scope path.
+    #[serde(skip)]
+    pub scope_packs: BTreeMap<String, BTreeMap<String, Pack>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -42,6 +50,11 @@ pub struct AppMetadata {
     pub runtime: RuntimeRequirements,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub sessions: BTreeMap<String, RuntimeRequirements>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub worlds: BTreeMap<String, World>,
+    /// The app's own packs; its scopes' packs apply too.
+    #[serde(skip)]
+    pub packs: BTreeMap<String, Pack>,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -107,16 +120,31 @@ struct AppManifest {
 /// # Errors
 /// Rejects invalid manifests, missing app build files, unknown profiles and unsupported local limits.
 pub fn inspect(root: &Path) -> io::Result<ProjectMetadata> {
-    let inventory = inspect_inventory(root)?;
-    Ok(ProjectMetadata { version: 1, apps: inventory.apps, local: inventory.local })
+    Ok(metadata(inspect_inventory(root)?))
+}
+
+/// `inspect` for declarations whose world and pack sources may be missing, as in a checkout that has yet to fetch
+/// them. Sources must still be relative paths inside `assets/`.
+/// # Errors
+/// Rejects what `inspect` does, except for missing or malformed sources.
+pub fn inspect_declarations(root: &Path) -> io::Result<ProjectMetadata> {
+    Ok(metadata(inventory(root, false)?))
+}
+
+fn metadata(inventory: Inventory) -> ProjectMetadata {
+    ProjectMetadata { version: 1, apps: inventory.apps, local: inventory.local, scope_packs: inventory.packs }
 }
 
 /// `inspect`, keeping the scopes and authored modules discovered along the way.
 pub(crate) fn inspect_inventory(root: &Path) -> io::Result<Inventory> {
+    inventory(root, true)
+}
+
+fn inventory(root: &Path, require_sources: bool) -> io::Result<Inventory> {
     let manifest_path = root.join("chunk.toml");
     // Room for the variables `[vars]` and `[env.<name>.vars]` may hold.
     let manifest: ProjectManifest = read_manifest(&manifest_path, 1024 * 1024)?;
-    let mut inventory = discover(root)?;
+    let mut inventory = discover_with(root, require_sources)?;
     if let Some(local) = &manifest.local {
         local.validate(&manifest_path)?;
         for app in &mut inventory.apps {
@@ -158,6 +186,10 @@ pub(crate) fn load(root: &Path) -> io::Result<Inventory> {
 /// Discovers recursive `apps/**/app.ts` declarations and legacy immediate `apps/*/app.toml` children, plus the
 /// scopes and modules authored under `apps/`. Unmanifested directories are ignored.
 pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
+    discover_with(root, true)
+}
+
+fn discover_with(root: &Path, require_sources: bool) -> io::Result<Inventory> {
     let domains = root.join("server/domains");
     if fs::symlink_metadata(&domains).is_ok() {
         return Err(invalid(
@@ -165,8 +197,9 @@ pub(crate) fn discover(root: &Path) -> io::Result<Inventory> {
             "server/domains is no longer supported; declare scopes in apps/**/scope.ts and bind hooks and commands in defineScope or defineApp",
         ));
     }
-    let mut inventory = authoring::discover(root)?;
+    let mut inventory = authoring::discover(root, require_sources)?;
     legacy_apps(root, &mut inventory)?;
+    assets::check_unique_packs(root, &inventory)?;
     Ok(inventory)
 }
 
@@ -224,6 +257,8 @@ fn legacy_apps(root: &Path, inventory: &mut Inventory) -> io::Result<()> {
             domain: String::new(),
             runtime: manifest.runtime,
             sessions: manifest.sessions,
+            worlds: BTreeMap::new(),
+            packs: BTreeMap::new(),
         });
     }
     inventory.apps.sort_by(|left, right| left.id.cmp(&right.id));

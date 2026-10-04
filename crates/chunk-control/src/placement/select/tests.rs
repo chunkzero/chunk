@@ -63,6 +63,7 @@ fn placement_groups_only_matching_apps_and_profiles() {
         session_types: BTreeMap::new(),
         max_processes: 4,
         idle_node_timeout_seconds: 0,
+        assets: crate::DeploymentAssets::default(),
     };
     for (name, app, profile) in
         [("lobby/default", "lobby", "small"), ("arena/default", "arena", "small"), ("arena/large", "arena", "large")]

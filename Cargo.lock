@@ -599,6 +599,7 @@ dependencies = [
  "rustix 1.1.4",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tar",
  "tempfile",
@@ -623,6 +624,9 @@ dependencies = [
  "clap",
  "cliclack",
  "dirs",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "keyring-core",
  "notify",
  "process-wrap",
@@ -652,6 +656,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -660,6 +665,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "chunk-backend",
+ "chunk-build",
  "chunk-contract",
  "chunk-proto",
  "chunk-service",
@@ -764,6 +770,7 @@ name = "chunk-jvm"
 version = "0.1.0"
 dependencies = [
  "chunk-build",
+ "chunk-contract",
  "chunk-proto",
  "chunk-service",
  "prost",

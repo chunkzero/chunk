@@ -1,5 +1,6 @@
 mod commands;
 mod moves;
+mod packs;
 mod relay;
 
 #[cfg(feature = "bench-support")]
@@ -13,8 +14,8 @@ use std::{io, time::Duration};
 
 use chunk_proto::sync::v1::{
     AbandonMoveArguments, ActivateResult, ClaimArguments, ClaimAssignment, ClaimPhase, ClaimRefusal, ClaimResult,
-    GatewayLogin, PlayerSetup, Position, ReconnectArguments, ReservationResult, SessionDemand, WithdrawResult,
-    claim_result::Outcome,
+    GatewayLogin, PlayerSetup, Position, ReconnectArguments, ReservationResult, ResourcePack, SessionDemand,
+    WithdrawResult, claim_result::Outcome,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -34,6 +35,11 @@ use super::{
 use moves::{check_move, next_move};
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long a client may take to load its resource packs.
+const PACK_TIMEOUT: Duration = Duration::from_secs(30);
+/// What a claim's lifetime keeps, after its client loaded its packs, for a keepalive the client still owes and for
+/// connecting to its JVM.
+const CONNECT_RESERVE: Duration = Duration::from_secs(20);
 /// How often a gateway tells core how many connections it holds.
 const ACTIVE_EVERY: Duration = Duration::from_secs(1);
 
@@ -96,6 +102,10 @@ struct Assignment {
     /// The destination JVM's player listener.
     endpoint: String,
     setup: PlayerSetup,
+    /// The resource packs the session's app declares.
+    packs: Vec<ResourcePack>,
+    /// When core cancels the claim unless the player is activated in its session.
+    expires: Instant,
 }
 
 impl Assignment {
@@ -111,6 +121,8 @@ impl Assignment {
             destination: assigned.destination.unwrap_or_default(),
             endpoint: assigned.endpoint,
             setup: PlayerSetup { operation_id: claim.operation_id.clone(), capability: assigned.capability },
+            packs: assigned.packs,
+            expires: Instant::now() + Duration::from_millis(assigned.expires_in_ms),
         })
     }
 }
@@ -161,8 +173,19 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let mut platform = guard.platform.clone();
     let mut lifecycle = Lifecycle::new(platform.clone());
     let mut commands = commands::Commands::new(&platform).await?;
+    let mut packs = packs::Packs::default();
     loop {
         commands.bind(&guard.claim, &assignment.identity)?;
+        // Packs load within what the claim's lifetime leaves, keeping time to connect before it expires.
+        let remaining = assignment.expires.saturating_duration_since(Instant::now()).saturating_sub(CONNECT_RESERVE);
+        packs
+            .apply(
+                &mut authenticated.transport,
+                &mut settings,
+                &assignment.packs,
+                deadline.min(PACK_TIMEOUT).min(remaining),
+            )
+            .await?;
         let mut internal = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
             .await
             .map_err(io::Error::other)??;

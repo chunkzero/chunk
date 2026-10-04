@@ -51,6 +51,7 @@ fn core_config(directory: &Path) -> CoreConfig {
         environment_name: None,
         secrets: chunk_backend::Secrets::default(),
         control_record: state.join("control.json"),
+        assets: state.join("assets"),
         state,
         control_bind: "127.0.0.1:0".parse().unwrap(),
         core_bind: None,

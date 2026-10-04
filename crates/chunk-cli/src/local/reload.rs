@@ -18,13 +18,15 @@ pub(super) enum Change {
     Jvm,
 }
 
-pub(super) fn classify(current: &Release, next: &Release) -> Change {
-    if current.id == next.id {
-        Change::Unchanged
-    } else if current.apps == next.apps {
-        Change::Backend
-    } else {
+/// How `next` differs from `current`, each a release and the ID of the asset revision built with it. New assets need
+/// new JVMs, as changed app JARs do.
+pub(super) fn classify((current, current_assets): (&Release, &str), (next, next_assets): (&Release, &str)) -> Change {
+    if current_assets != next_assets || current.apps != next.apps {
         Change::Jvm
+    } else if current.id == next.id {
+        Change::Unchanged
+    } else {
+        Change::Backend
     }
 }
 

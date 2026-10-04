@@ -100,6 +100,11 @@ pub(super) struct Version {
 }
 
 impl Version {
+    /// The ID of the asset revision the version pins.
+    pub fn assets(&self) -> &str {
+        &self.control.assets.revision_id
+    }
+
     pub fn new(staged: Staged) -> Self {
         Self {
             destinations: destinations(staged.control.contracts.destinations.as_ref()),
@@ -126,6 +131,7 @@ pub(super) async fn start(settings: &Settings, staged: Staged, reporter: &Report
         core_bind: None,
         private_address: None,
         java: settings.java.clone(),
+        assets: settings.assets.clone(),
         environment_token: None,
         // Starts over from an earlier session, first stopping any of its JVMs that still run.
         fresh: true,

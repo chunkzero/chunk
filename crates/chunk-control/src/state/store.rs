@@ -246,7 +246,8 @@ fn schema() -> DatabaseSchema {
         CLAIMS: {
             "request": string, "player": string, "proxy": string, "membership": generation,
             "generation": generation, "session": string, "phase": {"type": "enum", "values": Phase::NAMES},
-            "assignment?": string, "activated": boolean, "created_at_ms": integer, "released_at_ms?": integer,
+            "assignment?": string, "activated": boolean, "created_at_ms": integer, "assigned_at_ms?": integer,
+            "released_at_ms?": integer,
             "roster?": string,
         },
         MOVES: {

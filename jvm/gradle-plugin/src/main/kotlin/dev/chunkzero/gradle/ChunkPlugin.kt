@@ -22,13 +22,9 @@ class ChunkPlugin : Plugin<Project> {
             project.dependencies.add("implementation", project.dependencies.project(mapOf("path" to ":")))
             project.dependencies.add("implementation", framework("runtime-minestom"))
         }
-        configureModule(
-            project,
-            configuration.apps
-                .find { it.projectPath == project.path }
-                ?.id
-                .orEmpty(),
-        )
+        val app = configuration.apps.find { it.projectPath == project.path }
+        configureModule(project, app?.id.orEmpty())
+        if (app != null) configureWorlds(project, configuration.directory, app)
     }
 }
 

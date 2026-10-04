@@ -49,14 +49,13 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
         return Err(io::Error::other("JVM descriptor apps must exactly match the discovered app inventory"));
     }
     let mut files = Files::new();
-    let mut backend = assemble_backend(&inputs.backend, &mut files)?;
-    let mut metadata = Metadata {
-        version: 3,
-        java_version: jvm.java.version,
-        apps: Vec::new(),
-        profiles: BTreeMap::new(),
-        assets: BTreeMap::new(),
-    };
+    let (mut backend, assets) = assemble_backend(&inputs.backend, &mut files)?;
+    if assets != project::assets::contract(&project) {
+        return Err(io::Error::other("compiled asset declarations no longer match the project; recompile the backend"));
+    }
+    assets.validate().map_err(io::Error::other)?;
+    let mut metadata =
+        Metadata { version: 4, java_version: jvm.java.version, apps: Vec::new(), profiles: BTreeMap::new(), assets };
     for app in &project.apps {
         let input = descriptor_apps[app.id.as_str()];
         let bytes = executable_jar(input, &mut files)?;
@@ -93,11 +92,6 @@ pub fn publish_release(inputs: &ReleaseInputs, dist: &Path) -> io::Result<Releas
             java_version: input.java_version,
             sessions,
         });
-    }
-    assets(&inputs.project.join("assets"), "assets", &mut files, &mut metadata.assets)?;
-    for app in &project.apps {
-        let directory = format!("{}/assets", app.directory);
-        assets(&inputs.project.join(&directory), &directory, &mut files, &mut metadata.assets)?;
     }
     destination_profiles(&backend, project.local.as_ref(), &mut metadata)?;
     if let Some(compiled) = &backend.contracts.domains {
@@ -208,13 +202,18 @@ fn destination_profiles(
     Ok(())
 }
 
-fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_contract::Deployment> {
+/// Adds the compiled backend to `files`, returning its deployment and the asset declarations it was compiled with.
+fn assemble_backend(
+    directory: &Path,
+    files: &mut Files,
+) -> io::Result<(chunk_contract::Deployment, chunk_contract::AssetContract)> {
     let source =
         String::from_utf8(read_limited(&directory.join("source.mjs"), 4 * 1024 * 1024)?).map_err(io::Error::other)?;
     let contract: BackendMetadata =
         serde_json::from_slice(&read_limited(&directory.join("contract.json"), 2 * 1024 * 1024)?)
             .map_err(io::Error::other)?;
     let encoded_contract = serde_json::to_vec(&contract).map_err(io::Error::other)?;
+    let assets = contract.assets.clone();
     let backend = verify::deployment(source, contract);
     insert(files, "source.mjs".into(), backend.source.as_bytes().to_vec())?;
     insert(files, "contract.json".into(), encoded_contract)?;
@@ -222,17 +221,5 @@ fn assemble_backend(directory: &Path, files: &mut Files) -> io::Result<chunk_con
     if directory::exists(&source_map)? {
         insert(files, "source.mjs.map".into(), read_limited(&source_map, 8 * 1024 * 1024)?)?;
     }
-    Ok(backend)
-}
-
-fn assets(directory: &Path, prefix: &str, files: &mut Files, hashes: &mut BTreeMap<String, String>) -> io::Result<()> {
-    if directory::exists(directory)? {
-        let mut collected = Files::new();
-        publication::collect(directory, prefix, &mut collected)?;
-        for (name, bytes) in collected {
-            hashes.insert(name.clone(), content_digest(&bytes));
-            insert(files, name, bytes)?;
-        }
-    }
-    Ok(())
+    Ok((backend, assets))
 }

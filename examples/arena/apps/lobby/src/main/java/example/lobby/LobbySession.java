@@ -3,12 +3,11 @@ package example.lobby;
 import dev.chunkzero.backend.api.PlayerId;
 import dev.chunkzero.generated.BackendClient;
 import dev.chunkzero.generated.BackendTypes.Shared.Stats.MineResult;
+import dev.chunkzero.generated.Worlds;
 import dev.chunkzero.runtime.Session;
 import dev.chunkzero.runtime.SessionScope;
+import dev.chunkzero.runtime.assets.Assets;
 
-import example.world.PolarWorlds;
-
-import net.hollowcube.polar.PolarWorld;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.minestom.server.coordinate.Pos;
@@ -28,7 +27,8 @@ final class LobbySession extends Session {
     @Override
     public CompletionStage<Void> onCreate(SessionScope scope) {
         this.scope = scope;
-        return PolarWorlds.load(scope, scope.component(PolarWorld.class))
+        return Assets.world(Worlds.Lobby.LOBBY)
+                .shared(scope)
                 .thenCompose(instance -> scope.onTick(() -> open(instance)));
     }
 

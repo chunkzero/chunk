@@ -1,7 +1,7 @@
 use std::{fmt, time::Duration};
 
 use prost::Message;
-use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue, LOCATION};
 use reqwest::{Response, StatusCode};
 
 use crate::error::{self, Code, Error, Status};
@@ -131,6 +131,33 @@ impl Client {
         Ok(Download(response))
     }
 
+    /// Starts fetching an asset blob from an `AssetArtifact`'s `blob_url_prefix` followed by its SHA-256. The bearer
+    /// token goes along only to this service's own origin; a redirect elsewhere, such as to a presigned URL, is
+    /// followed without credentials.
+    ///
+    /// # Errors
+    /// The server's refusal, with a code from its HTTP status, or a transport failure. Errors never include the URL,
+    /// which may carry a signature.
+    pub async fn download_blob(&self, url: &str) -> Result<Download, Error> {
+        let url = reqwest::Url::parse(url).map_err(|_| Error::Protocol("invalid blob URL".into()))?;
+        let own = reqwest::Url::parse(&self.base_url).is_ok_and(|base| base.origin() == url.origin());
+        let request = if own { self.authorized(self.http.get(url)) } else { self.presigned.get(url) };
+        let mut response = request.send().await.map_err(without_url)?;
+        // The service's client stops at a redirect to another origin, which then goes without the token.
+        if own && response.status().is_redirection() {
+            let location = response.headers().get(LOCATION).and_then(|value| value.to_str().ok());
+            let target = location.and_then(|location| response.url().join(location).ok());
+            let target = target.ok_or_else(|| Error::Protocol("blob redirect without a valid location".into()))?;
+            response = self.presigned.get(target).send().await.map_err(without_url)?;
+        }
+        let status = response.status();
+        if !status.is_success() {
+            let message = format!("blob download refused with HTTP {status}");
+            return Err(Status { code: Code::from_http(status), message }.into());
+        }
+        Ok(Download(response))
+    }
+
     fn post(&self, path: &str, content_type: &'static str, body: Vec<u8>) -> reqwest::RequestBuilder {
         let request = self
             .http
@@ -149,11 +176,11 @@ impl Client {
     }
 }
 
-/// A release archive's bytes as they arrive. Dropping it ends the download.
+/// A release archive's or asset blob's bytes as they arrive. Dropping it ends the download.
 pub struct Download(Response);
 
 impl Download {
-    /// The next piece of the archive, or None once all of it arrived.
+    /// The next piece of the download, or None once all of it arrived.
     ///
     /// # Errors
     /// A transport failure, without the URL.

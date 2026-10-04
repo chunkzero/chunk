@@ -1,5 +1,6 @@
 //! Durable local placement and player ownership, independent of gameplay data.
 
+mod assets;
 mod callers;
 mod capacity;
 mod delivery;
@@ -26,6 +27,7 @@ mod session_methods;
 mod sessions;
 mod state;
 mod sync;
+pub use assets::DeploymentAssets;
 pub use callers::{ArrivedClaim, Reservation, SessionScope, StoredClaim};
 pub use draining::{DrainPolicy, RECONNECT_GRACE};
 pub use nodes::NodeStatus;
@@ -117,6 +119,9 @@ pub struct Release {
     pub max_processes: u16,
     /// Seconds a node may run without unfinished sessions before it is stopped; zero keeps idle nodes.
     pub idle_node_timeout_seconds: u32,
+    /// The asset revision the deployment pins; an empty one when absent.
+    #[serde(default)]
+    pub assets: DeploymentAssets,
     #[serde(flatten)]
     pub contracts: Contracts,
 }
@@ -180,6 +185,7 @@ impl Release {
                 );
             }
         }
+        self.assets.validate()?;
         let contracts = &self.contracts;
         if let Some(destinations) = &contracts.destinations {
             destinations.validate_apps(&self.apps).map_err(Error::Invalid)?;
