@@ -72,7 +72,8 @@ python3 scripts/check-sdk.py target/dist/chunk-0.1.0-linux-x64.tar.gz target/dis
 
 `just package-cli` builds the release CLI and runs `scripts/package-sdk.py`, which writes the archive, its checksum and
 a `maven/` repository with every JVM artifact to `target/dist/`. It refuses to replace existing outputs; pass
-`--output DIRECTORY` for another candidate of the same version, or `--chunk PATH` to package another CLI build.
+`--output DIRECTORY` for another candidate of the same version, or `--chunk PATH` to package another CLI build and
+`--platform` to name a cross-compiled build's platform.
 
 `scripts/check-sdk.py` checks the sources and documentation JARs, installs the archive into a temporary prefix, serves
 the Maven directory over local HTTP, and creates, generates and builds a Java and a Kotlin project against them,

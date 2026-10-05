@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble a versioned SDK for the host platform from a prepared CLI and, optionally, the JVM publications."""
+"""Assemble a versioned SDK for one platform from a prepared CLI and, optionally, the JVM publications."""
 
 import argparse
 import gzip
@@ -27,15 +27,19 @@ def host_platform():
 
 
 def main():
-    target = host_platform()
-    suffix = ".exe" if target.startswith("windows-") else ""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--chunk", type=Path, default=Path(f"target/release/chunk{suffix}"))
+    parser.add_argument("--chunk", type=Path, help="CLI to package; defaults to Cargo's release output")
+    parser.add_argument("--platform", default=host_platform(), help="platform of the CLI; defaults to the host")
     parser.add_argument("--output", type=Path, default=Path("target/dist"))
     parser.add_argument("--no-maven", action="store_true", help="package only the CLI archive")
     args = parser.parse_args()
+    target = args.platform
+    suffix = ".exe" if target.startswith("windows-") else ""
+    # Cargo writes cross-compiled builds to a target triple directory.
+    rust_target = os.environ.get("CARGO_BUILD_TARGET", "")
+    chunk = args.chunk or Path(os.environ.get("CARGO_TARGET_DIR", "target"), rust_target, "release", f"chunk{suffix}")
     repository = Path(__file__).resolve().parent.parent
-    executable = args.chunk.resolve(strict=True)
+    executable = chunk.resolve(strict=True)
     output = args.output.resolve()
     cargo = tomllib.loads((repository / "Cargo.toml").read_text())
     versions = tomllib.loads((repository / "gradle/libs.versions.toml").read_text())["versions"]
@@ -62,10 +66,11 @@ def main():
         root.mkdir()
         shutil.copy2(executable, root / f"chunk{suffix}")
         shutil.copy2(repository / "LICENSE.md", root / "LICENSE.md")
-        notices = subprocess.run([sys.executable, "-X", "utf8", "scripts/rust-notices.py"], cwd=repository, check=True,
+        notices = subprocess.run([sys.executable, "-X", "utf8", "scripts/rust-notices.py",
+                                  *(["--target", rust_target] if rust_target else [])], cwd=repository, check=True,
                                  stdout=subprocess.PIPE, text=True, encoding="utf-8").stdout
         (root / "THIRD_PARTY_LICENSES").write_text(notices, encoding="utf-8", newline="\n")
-        subprocess.run(["node", "scripts/install-typescript.mjs", str(root)], cwd=repository, check=True)
+        subprocess.run(["node", "scripts/install-typescript.mjs", str(root), target], cwd=repository, check=True)
         if not args.no_maven:
             subprocess.run([
                 str(repository / "gradlew"), "publishSdk", f"-Pchunk.sdkRepository={staged_maven}",

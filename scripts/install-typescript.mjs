@@ -6,6 +6,11 @@ import getExePath from "../node_modules/typescript/lib/getExePath.js";
 
 const version = "7.0.2";
 const destination = path.resolve(process.argv[2] ?? "target/debug");
+// The installed compiler matches this Node.js build's platform, so a cross-platform SDK needs a matching Node.js.
+const platform = `${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
+if (process.argv[3] && process.argv[3] !== platform) {
+  throw new Error(`Expected a ${process.argv[3]} Node.js to install its TypeScript compiler, got ${platform}`);
+}
 const compiler = getExePath();
 const pkg = JSON.parse(await fs.readFile(new URL("../node_modules/typescript/package.json", import.meta.url), "utf8"));
 if (pkg.version !== version) throw new Error(`Expected TypeScript ${version}`);
