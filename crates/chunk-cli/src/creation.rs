@@ -43,17 +43,15 @@ const WRAPPER: &[(&str, &[u8])] = &[
 ];
 
 pub(crate) fn run(options: &Options) -> io::Result<()> {
-    let executable = std::env::current_exe()?;
-    create(options, &executable)?;
+    create(options)?;
     cliclack::log::success(format!("Created project → {}", options.directory.display()))?;
-    let executable = shell(&executable)?;
     cliclack::log::info(format!(
-        "Next:\n  cd {}\n  {executable} codegen\n  {executable} build\n  {executable} dev",
-        shell(&options.directory.canonicalize()?)?,
+        "Next:\n  cd {}\n  chunk codegen\n  chunk build\n  chunk dev",
+        shell(&options.directory)?
     ))
 }
 
-fn create(options: &Options, executable: &Path) -> io::Result<()> {
+fn create(options: &Options) -> io::Result<()> {
     files::validate(&options.directory)?;
     let toolchain = toolchain::Toolchain::resolve(options.chunk_source.as_deref())?;
     let directory = if options.directory.exists() {
@@ -81,10 +79,8 @@ fn create(options: &Options, executable: &Path) -> io::Result<()> {
             "apps/lobby/src/main/kotlin/example/Lobby.kt",
         ),
     };
-    let mut properties = format!(
-        "chunk.executable={}\norg.gradle.caching=true\norg.gradle.configuration-cache=true\norg.gradle.jvmargs=-Xmx2g\n",
-        property(executable)?,
-    );
+    let mut properties =
+        String::from("org.gradle.caching=true\norg.gradle.configuration-cache=true\norg.gradle.jvmargs=-Xmx2g\n");
     if let Some(source) = &toolchain.source {
         writeln!(properties, "chunk.source={}", property(source)?).expect("writing to String cannot fail");
     }
@@ -93,9 +89,7 @@ fn create(options: &Options, executable: &Path) -> io::Result<()> {
         .replace("\"@KOTLIN_VERSION@\"", &kotlin(&toolchain.versions.kotlin))
         .replace("\"@FOOJAY_VERSION@\"", &kotlin(&toolchain.versions.foojay))
         .replace("\"@PROJECT_NAME@\"", &kotlin(name));
-    let readme = include_str!("../templates/common/README.md")
-        .replace("@CHUNK_COMMAND@", &shell(executable)?)
-        .replace("@PROJECT_NAME@", name);
+    let readme = include_str!("../templates/common/README.md").replace("@PROJECT_NAME@", name);
     let root_build = format!(
         "plugins {{\n    id(\"{plugin}\")\n}}\n\njava {{ toolchain.languageVersion = JavaLanguageVersion.of(25) }}\n"
     );
@@ -135,7 +129,10 @@ fn kotlin(value: &str) -> String {
 }
 
 fn shell(path: &Path) -> io::Result<String> {
-    let path = path.to_str().ok_or_else(|| io::Error::other("project toolchain paths must be UTF-8"))?;
+    let path = path.to_str().ok_or_else(|| io::Error::other("project paths must be UTF-8"))?;
+    if !path.is_empty() && path.chars().all(|c| c.is_ascii_alphanumeric() || "_-./+@%:,".contains(c)) {
+        return Ok(path.to_owned());
+    }
     Ok(format!("'{}'", path.replace('\'', "'\"'\"'")))
 }
 
