@@ -107,6 +107,7 @@ fn invalid_toolchain_leaves_no_project_and_paths_are_properties_not_code() {
     assert_eq!(kotlin("a\"$b\n"), "\"a\\\"\\$b\\n\"");
     assert_eq!(shell(Path::new("/tools/it's chunk")).unwrap(), "'/tools/it'\"'\"'s chunk'");
     assert_eq!(shell(Path::new("../my-server")).unwrap(), "../my-server");
+    assert_eq!(shell(Path::new("-server")).unwrap(), "./-server");
 }
 
 #[test]

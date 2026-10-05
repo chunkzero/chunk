@@ -130,8 +130,10 @@ fn kotlin(value: &str) -> String {
 
 fn shell(path: &Path) -> io::Result<String> {
     let path = path.to_str().ok_or_else(|| io::Error::other("project paths must be UTF-8"))?;
+    // `cd -server` would read the directory as an option.
+    let path = if path.starts_with('-') { format!("./{path}") } else { path.to_owned() };
     if !path.is_empty() && path.chars().all(|c| c.is_ascii_alphanumeric() || "_-./+@%:,".contains(c)) {
-        return Ok(path.to_owned());
+        return Ok(path);
     }
     Ok(format!("'{}'", path.replace('\'', "'\"'\"'")))
 }

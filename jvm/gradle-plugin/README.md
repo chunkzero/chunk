@@ -81,8 +81,8 @@ extensions.configure<ChunkSettingsExtension> {
 }
 ```
 
-The `chunk.executable` Gradle property overrides `executable`; `chunk build` and `chunk dev` always pass the CLI they run
-as. The plugin runs that CLI; it never builds Rust tools or installs Node packages.
+The `chunk.executable` Gradle property overrides `executable`; `chunk build` and `chunk dev` always pass the CLI they
+run as. The plugin runs that CLI; it never builds Rust tools or installs Node packages.
 
 ## What a build does
 
