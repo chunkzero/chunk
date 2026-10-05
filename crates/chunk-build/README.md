@@ -101,9 +101,9 @@ unchanged files untouched. `chunk gen` compiles and then generates one client:
 | `kotlin`     | `.chunk/generated/kotlin`     | The Java sources plus `kotlin/<package>/CoroutineBackendClient.kt`                |
 | `typescript` | `.chunk/generated/typescript` | `api.ts`                                                                          |
 
-The package defaults to `dev.chunkzero.generated`. Each output directory holds a `.chunk-codegen.json` ownership record:
-regeneration removes files it generated before, keeps other files, and refuses to overwrite handwritten or edited
-generated files. The Gradle plugin runs `chunk gen` before compiling apps, so builds keep clients current.
+The package defaults to `com.chunkzero.chunk.generated`. Each output directory holds a `.chunk-codegen.json` ownership
+record: regeneration removes files it generated before, keeps other files, and refuses to overwrite handwritten or
+edited generated files. The Gradle plugin runs `chunk gen` before compiling apps, so builds keep clients current.
 
 The TypeScript compiler is looked up at `toolchain/typescript/7.0.2/tsc` beside the CLI (`just toolchain` installs it
 into `target/debug`); `CHUNK_TYPESCRIPT` points at another installation of the same version.

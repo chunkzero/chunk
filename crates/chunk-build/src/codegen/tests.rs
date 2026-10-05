@@ -225,10 +225,10 @@ fn session_configuration_providers_are_scoped_to_their_app_and_detect_java_colli
     assert!(provider.contains("ConfiguredSessionProvider<SessionConfigs.Duels.Default.Config>"));
     assert!(provider.contains("return SessionConfigs.Duels.Default.TYPE;"));
     let models = fs::read_to_string(output.join("java/example/SessionConfigs.java")).unwrap();
-    assert!(!models.contains("dev.chunkzero.runtime"));
+    assert!(!models.contains("com.chunkzero.chunk.runtime"));
     let destinations = fs::read_to_string(output.join("java/example/Destinations.java")).unwrap();
     assert!(destinations.contains(
-        "public static final class Lobby {\nprivate Lobby() {}\npublic static final dev.chunkzero.backend.api.Destination main = new dev.chunkzero.backend.api.Destination(\"main\", \"lobby/default\", \"small\");"
+        "public static final class Lobby {\nprivate Lobby() {}\npublic static final com.chunkzero.chunk.backend.api.Destination main = new com.chunkzero.chunk.backend.api.Destination(\"main\", \"lobby/default\", \"small\");"
     ));
     // An app's class may be named `Destination`, so generated code never names the API type unqualified.
     assert!(destinations.contains("public static final class Destination {"));
@@ -259,6 +259,6 @@ fn declared_worlds_become_typed_constants_per_app() {
     generate(&path, &output, GenerationTarget::Java { package: "example" }).unwrap();
     let worlds = fs::read_to_string(output.join("java/example/Worlds.java")).unwrap();
     assert!(worlds.contains(
-        "public static final class Arena {\nprivate Arena() {}\npublic static final dev.chunkzero.backend.api.WorldAsset KOTH = new dev.chunkzero.backend.api.WorldAsset(\"arena\", \"koth\");\npublic static final dev.chunkzero.backend.api.WorldAsset LOBBY_MAP = new dev.chunkzero.backend.api.WorldAsset(\"arena\", \"lobbyMap\");"
+        "public static final class Arena {\nprivate Arena() {}\npublic static final com.chunkzero.chunk.backend.api.WorldAsset KOTH = new com.chunkzero.chunk.backend.api.WorldAsset(\"arena\", \"koth\");\npublic static final com.chunkzero.chunk.backend.api.WorldAsset LOBBY_MAP = new com.chunkzero.chunk.backend.api.WorldAsset(\"arena\", \"lobbyMap\");"
     ), "{worlds}");
 }

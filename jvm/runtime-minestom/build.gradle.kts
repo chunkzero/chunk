@@ -26,7 +26,7 @@ dependencies {
 dokka {
     dokkaSourceSets.configureEach {
         suppressedFiles.from(
-            fileTree("src/main/java/dev/chunkzero/runtime") {
+            fileTree("src/main/java/com/chunkzero/chunk/runtime") {
                 include("ManagedPlayer.java", "SessionManager.java", "SessionRegistration.java", "TickExecutor.java")
             },
         )

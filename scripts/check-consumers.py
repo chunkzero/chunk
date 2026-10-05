@@ -17,7 +17,7 @@ INPUTS = (
     "gradlew", "gradlew.bat", "gradle", "gradle.properties", "settings.gradle.kts", "build.gradle.kts",
     "buildSrc", "jvm", "proto", "examples/arena", "examples/local",
 )
-PROVIDER = "META-INF/services/dev.chunkzero.runtime.SessionProvider"
+PROVIDER = "META-INF/services/com.chunkzero.chunk.runtime.SessionProvider"
 
 
 def require(condition, message):
@@ -90,11 +90,11 @@ def verify_release(project, package, app_ids, kotlin):
             require(len(providers) == len(app["sessions"]), "Session registry differs from deployment capabilities")
             for provider in providers:
                 require(provider.replace(".", "/") + ".class" in names, "Session factory missing")
-            for entry in ("dev/chunkzero/runtime/ChunkProcess.class", "dev/chunkzero/runtime/ChunkMinestom.class",
+            for entry in ("com/chunkzero/chunk/runtime/ChunkProcess.class", "com/chunkzero/chunk/runtime/ChunkMinestom.class",
                           "net/minestom/server/ServerProcess.class", package.replace(".", "/") + "/BackendTypes.class",
                           package.replace(".", "/") + "/BackendClient.class"):
                 require(entry in names, f"App executable missing {entry}")
-            require("dev/chunkzero/runtime/BridgeMain.class" not in names, "Legacy runtime launcher remains")
+            require("com/chunkzero/chunk/runtime/BridgeMain.class" not in names, "Legacy runtime launcher remains")
             facade = package.replace(".", "/") + "/CoroutineBackendClient.class"
             require((facade in names) == kotlin, "Unexpected Kotlin facade")
             if not kotlin:
@@ -122,10 +122,10 @@ def main():
             require(not (project / ".chunk").exists(), "Scaffolding should not depend on generated output")
             subprocess.run([str(executable), "codegen", str(project)], check=True)
             subprocess.run([str(executable), "build", str(project)], check=True)
-            verify_release(project, "dev.chunkzero.generated", {"lobby"}, language == "kotlin")
+            verify_release(project, "com.chunkzero.chunk.generated", {"lobby"}, language == "kotlin")
         for name, package, apps, kotlin in (
-            ("arena", "dev.chunkzero.generated", {"arena", "lobby"}, False),
-            ("local", "dev.chunkzero.example.generated", {"arena", "lobby"}, True),
+            ("arena", "com.chunkzero.chunk.generated", {"arena", "lobby"}, False),
+            ("local", "com.chunkzero.chunk.example.generated", {"arena", "lobby"}, True),
         ):
             project = checkout / "examples" / name
             require(not (project / ".chunk").exists() and not (project / "dist").exists(), "Consumer outputs were copied")

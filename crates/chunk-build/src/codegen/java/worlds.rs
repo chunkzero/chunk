@@ -6,7 +6,7 @@ use std::{
 use super::{container, names, quote, schema};
 
 /// Fully qualified, since an app's class may share its simple name.
-const WORLD: &str = "dev.chunkzero.backend.api.WorldAsset";
+const WORLD: &str = "com.chunkzero.chunk.backend.api.WorldAsset";
 
 /// `Worlds`, each app's declared worlds as `WorldAsset` constants, such as `Worlds.Arena.KOTH`.
 pub(super) fn source(worlds: &BTreeMap<String, BTreeSet<String>>, package: &str) -> io::Result<(String, String)> {

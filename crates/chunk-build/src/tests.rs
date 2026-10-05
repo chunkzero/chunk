@@ -29,9 +29,12 @@ fn codegen_rejects_colliding_names_and_unsupported_literals_before_writing() {
         (invalid_name, "invalid schema identifier"),
     ] {
         fs::write(&contract_file, serde_json::to_vec(&contract).unwrap()).unwrap();
-        let error =
-            super::generate(&contract_file, &output, GenerationTarget::Java { package: "dev.chunkzero.generated" })
-                .unwrap_err();
+        let error = super::generate(
+            &contract_file,
+            &output,
+            GenerationTarget::Java { package: "com.chunkzero.chunk.generated" },
+        )
+        .unwrap_err();
         assert!(error.to_string().contains(message), "{error}");
         assert!(!output.exists());
     }

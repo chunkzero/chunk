@@ -7,11 +7,11 @@ Minestom or Kotlin dependency.
 
 Apps use it together with an engine adapter:
 
-| Module                                                  | Artifact                                | Contents                                                    |
-| ------------------------------------------------------- | --------------------------------------- | ----------------------------------------------------------- |
-| `jvm/runtime`                                           | `dev.chunkzero:runtime`                 | `ChunkProcess`, `@SessionType`, `@Component`                |
-| [`jvm/runtime-minestom`](../runtime-minestom/README.md) | `dev.chunkzero:runtime-minestom`        | The Minestom adapter and the session API gameplay code uses |
-| `jvm/runtime-minestom-kotlin`                           | `dev.chunkzero:runtime-minestom-kotlin` | Coroutine adapters, covered in the Minestom README          |
+| Module                                                  | Artifact                                      | Contents                                                    |
+| ------------------------------------------------------- | --------------------------------------------- | ----------------------------------------------------------- |
+| `jvm/runtime`                                           | `com.chunkzero.chunk:runtime`                 | `ChunkProcess`, `@SessionType`, `@Component`                |
+| [`jvm/runtime-minestom`](../runtime-minestom/README.md) | `com.chunkzero.chunk:runtime-minestom`        | The Minestom adapter and the session API gameplay code uses |
+| `jvm/runtime-minestom-kotlin`                           | `com.chunkzero.chunk:runtime-minestom-kotlin` | Coroutine adapters, covered in the Minestom README          |
 
 The [Gradle plugin](../gradle-plugin/README.md) adds the right one to each app.
 

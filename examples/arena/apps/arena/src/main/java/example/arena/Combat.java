@@ -1,6 +1,6 @@
 package example.arena;
 
-import dev.chunkzero.runtime.SessionScope;
+import com.chunkzero.chunk.runtime.SessionScope;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;

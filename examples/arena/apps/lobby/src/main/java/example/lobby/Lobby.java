@@ -1,9 +1,9 @@
 package example.lobby;
 
-import dev.chunkzero.runtime.ChunkMinestom;
-import dev.chunkzero.runtime.ChunkProcess;
-import dev.chunkzero.runtime.SessionProvider;
-import dev.chunkzero.runtime.SessionType;
+import com.chunkzero.chunk.runtime.ChunkMinestom;
+import com.chunkzero.chunk.runtime.ChunkProcess;
+import com.chunkzero.chunk.runtime.SessionProvider;
+import com.chunkzero.chunk.runtime.SessionType;
 
 import net.minestom.server.ServerProcess;
 

@@ -1,4 +1,4 @@
-group = "dev.chunkzero"
+group = "com.chunkzero.chunk"
 version = libs.versions.chunk.get()
 
 listOf("test", "assemble", "build").forEach { task ->

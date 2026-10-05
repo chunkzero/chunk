@@ -1,4 +1,4 @@
-import dev.chunkzero.gradle.ChunkSettingsExtension
+import com.chunkzero.chunk.gradle.ChunkSettingsExtension
 
 pluginManagement {
     includeBuild("../../jvm/gradle-plugin") { name = "chunk-gradle-plugin" }
@@ -9,7 +9,7 @@ pluginManagement {
 }
 
 plugins {
-    id("dev.chunkzero.chunk.settings")
+    id("com.chunkzero.chunk.settings")
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 

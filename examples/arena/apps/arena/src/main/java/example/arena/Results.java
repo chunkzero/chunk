@@ -1,9 +1,9 @@
 package example.arena;
 
-import dev.chunkzero.backend.api.PlayerId;
-import dev.chunkzero.backend.client.OperationId;
-import dev.chunkzero.generated.BackendClient;
-import dev.chunkzero.generated.BackendTypes.Shared.Stats.RecordMatchArgs;
+import com.chunkzero.chunk.backend.api.PlayerId;
+import com.chunkzero.chunk.backend.client.OperationId;
+import com.chunkzero.chunk.generated.BackendClient;
+import com.chunkzero.chunk.generated.BackendTypes.Shared.Stats.RecordMatchArgs;
 
 import java.util.List;
 import java.util.Locale;

@@ -96,7 +96,7 @@ def main():
                     properties.write(f"\nchunk.mavenRepository={url}\n")
                 subprocess.run([str(executable), "codegen", str(project)], cwd=root, env=environment, check=True)
                 subprocess.run([str(executable), "build", str(project)], cwd=root, env=environment, check=True)
-                consumers["verify_release"](project, "dev.chunkzero.generated", {"lobby"}, language == "kotlin")
+                consumers["verify_release"](project, "com.chunkzero.chunk.generated", {"lobby"}, language == "kotlin")
         finally:
             server.shutdown()
             thread.join()

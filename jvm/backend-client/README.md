@@ -70,7 +70,7 @@ wait.
 
 `jvm/backend-client-kotlin` wraps a `BackendSession` as `CoroutineBackend`, with suspending calls, actions included, and
 `Flow<WatchState<R>>` watches, bound to an owned `CoroutineScope` that closes its calls and watches when it ends. With
-the `dev.chunkzero.chunk.kotlin` plugin, projects also get a generated `CoroutineBackendClient` with property-style
+the `com.chunkzero.chunk.kotlin` plugin, projects also get a generated `CoroutineBackendClient` with property-style
 namespaces:
 
 ```kotlin

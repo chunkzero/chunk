@@ -173,9 +173,9 @@ jobs:
           maven-r2 publish --repository default/releases -- \
             python3 scripts/publish-maven.py artifact/dist/maven "$SDK_VERSION"
           curl --fail --retry 5 --retry-all-errors --retry-delay 2 \
-            "https://maven.chunkzero.com/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom" \
+            "https://maven.chunkzero.com/com/chunkzero/chunk/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom" \
             -o published.pom
-          cmp published.pom "artifact/dist/maven/dev/chunkzero/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom"
+          cmp published.pom "artifact/dist/maven/com/chunkzero/chunk/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom"
           if [[ "$SDK_VERSION" == *-* ]]; then
             gh release edit "v$SDK_VERSION" --draft=false --prerelease --latest=false
           else

@@ -1,11 +1,11 @@
 package example.arena;
 
-import dev.chunkzero.generated.ArenaSessionProviders;
-import dev.chunkzero.generated.SessionConfigs;
-import dev.chunkzero.runtime.ChunkMinestom;
-import dev.chunkzero.runtime.ChunkProcess;
-import dev.chunkzero.runtime.SessionCreation;
-import dev.chunkzero.runtime.SessionType;
+import com.chunkzero.chunk.generated.ArenaSessionProviders;
+import com.chunkzero.chunk.generated.SessionConfigs;
+import com.chunkzero.chunk.runtime.ChunkMinestom;
+import com.chunkzero.chunk.runtime.ChunkProcess;
+import com.chunkzero.chunk.runtime.SessionCreation;
+import com.chunkzero.chunk.runtime.SessionType;
 
 import net.minestom.server.ServerProcess;
 

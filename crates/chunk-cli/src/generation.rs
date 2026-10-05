@@ -19,7 +19,7 @@ pub(crate) struct Options {
     /// Compiler artifact/cache directory (defaults to PROJECT/.chunk/build/backend).
     #[arg(long)]
     backend_output: Option<PathBuf>,
-    /// Shared JVM package (defaults to dev.chunkzero.generated for Java/Kotlin targets).
+    /// Shared JVM package (defaults to com.chunkzero.chunk.generated for Java/Kotlin targets).
     #[arg(long)]
     java_package: Option<String>,
     /// Fail instead of recording additive schema changes in server/migrations/.
@@ -38,11 +38,15 @@ pub(crate) fn run(options: Options) -> io::Result<()> {
     chunk_build::project::inspect(&options.project)?;
     let (target, directory) = match options.target {
         Target::Java => (
-            GenerationTarget::Java { package: options.java_package.as_deref().unwrap_or("dev.chunkzero.generated") },
+            GenerationTarget::Java {
+                package: options.java_package.as_deref().unwrap_or("com.chunkzero.chunk.generated"),
+            },
             "java",
         ),
         Target::Kotlin => (
-            GenerationTarget::Kotlin { package: options.java_package.as_deref().unwrap_or("dev.chunkzero.generated") },
+            GenerationTarget::Kotlin {
+                package: options.java_package.as_deref().unwrap_or("com.chunkzero.chunk.generated"),
+            },
             "kotlin",
         ),
         Target::Typescript => {

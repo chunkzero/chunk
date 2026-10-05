@@ -118,8 +118,8 @@ for the project, and never follows a symlink.
 `.chunk/generated/`, so editors resolve `#chunk` imports. `chunk gen --target java|kotlin|typescript` compiles the
 backend into `--backend-output` (default `PROJECT/.chunk/build/backend`) and generates a client into `--output` (default
 `PROJECT/.chunk/generated/<target>`); `--java-package` sets the Java and Kotlin package, by default
-`dev.chunkzero.generated`. The Gradle plugin runs `chunk gen` during `chunk build`, so projects rarely call it directly.
-`chunk inspect` prints what the build tools read from `chunk.toml` and the `app.ts` declarations. See
+`com.chunkzero.chunk.generated`. The Gradle plugin runs `chunk gen` during `chunk build`, so projects rarely call it
+directly. `chunk inspect` prints what the build tools read from `chunk.toml` and the `app.ts` declarations. See
 [`chunk-build`](../chunk-build/README.md) for the output of each.
 
 ### `players` and `nodes`

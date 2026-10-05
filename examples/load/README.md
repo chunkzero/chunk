@@ -5,13 +5,13 @@ lobby of 128-player sessions, one per JVM. Each player's profile loads from the 
 seconds, and each JVM logs its average and slowest tick, with the players online, every 200 ticks
 (`ticks: players=...`).
 
-| Path                                                                         | Contents                                           |
-| ---------------------------------------------------------------------------- | -------------------------------------------------- |
-| [`chunk.toml`](chunk.toml)                                                   | Local environment: up to eight JVMs of 1024 MiB    |
-| [`apps/scope.ts`](apps/scope.ts)                                             | Routes every login to the lobby                    |
-| [`apps/lobby/app.ts`](apps/lobby/app.ts)                                     | The `lobby` app, 128 players per session           |
-| [`server/players.ts`](server/players.ts)                                     | `load` and `save`, keyed by the calling player     |
-| [`Lobby.kt`](apps/lobby/src/main/kotlin/dev/chunkzero/example/load/Lobby.kt) | The session, its per-player saves and the tick log |
+| Path                                                                               | Contents                                           |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------- |
+| [`chunk.toml`](chunk.toml)                                                         | Local environment: up to eight JVMs of 1024 MiB    |
+| [`apps/scope.ts`](apps/scope.ts)                                                   | Routes every login to the lobby                    |
+| [`apps/lobby/app.ts`](apps/lobby/app.ts)                                           | The `lobby` app, 128 players per session           |
+| [`server/players.ts`](server/players.ts)                                           | `load` and `save`, keyed by the calling player     |
+| [`Lobby.kt`](apps/lobby/src/main/kotlin/com/chunkzero/chunk/example/load/Lobby.kt) | The session, its per-player saves and the tick log |
 
 ## Run it locally
 

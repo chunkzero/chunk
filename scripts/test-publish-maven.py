@@ -16,7 +16,7 @@ class PublishingTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.repository = Path(self.temporary.name)
-        self.artifact = self.repository / "dev/chunkzero/runtime/0.1.0/runtime-0.1.0.jar"
+        self.artifact = self.repository / "com/chunkzero/chunk/runtime/0.1.0/runtime-0.1.0.jar"
         self.artifact.parent.mkdir(parents=True)
         self.artifact.write_bytes(b"verified jar")
         self.checksum = self.artifact.with_suffix(".jar.sha256")
@@ -68,8 +68,8 @@ class PublishingTest(unittest.TestCase):
                 self.assertEqual(len(self.requests), 1)
 
     def test_invalid_artifacts_are_rejected_before_any_upload(self):
-        for key in ("other/group/0.1.0/a.jar", "dev/chunkzero/runtime/0.2.0/a.jar",
-                    "dev/chunkzero/runtime/0.1.0/invalid name.jar"):
+        for key in ("other/group/0.1.0/a.jar", "com/chunkzero/chunk/runtime/0.2.0/a.jar",
+                    "com/chunkzero/chunk/runtime/0.1.0/invalid name.jar"):
             with self.subTest(key=key):
                 invalid = self.repository / key
                 invalid.parent.mkdir(parents=True, exist_ok=True)

@@ -26,7 +26,7 @@ dokka {
             suppress.set(true)
         }
         perPackageOption {
-            matchingRegex.set("dev\\.chunkzero\\.runtime\\.(bootstrap|control)(\\..*)?")
+            matchingRegex.set("com\\.chunkzero\\.chunk\\.runtime\\.(bootstrap|control)(\\..*)?")
             suppress.set(true)
         }
     }

@@ -67,14 +67,14 @@ fn create(options: &Options, executable: &Path) -> io::Result<()> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "project directory must have a UTF-8 name"))?;
     let (plugin, settings, app_build, gameplay, gameplay_path) = match options.language {
         Language::Java => (
-            "dev.chunkzero.chunk",
+            "com.chunkzero.chunk",
             include_str!("../templates/java/settings.gradle.kts"),
             include_str!("../templates/java/app.gradle.kts"),
             include_str!("../templates/java/Lobby.java"),
             "apps/lobby/src/main/java/example/Lobby.java",
         ),
         Language::Kotlin => (
-            "dev.chunkzero.chunk.kotlin",
+            "com.chunkzero.chunk.kotlin",
             include_str!("../templates/kotlin/settings.gradle.kts"),
             include_str!("../templates/kotlin/app.gradle.kts"),
             include_str!("../templates/kotlin/Lobby.kt"),
