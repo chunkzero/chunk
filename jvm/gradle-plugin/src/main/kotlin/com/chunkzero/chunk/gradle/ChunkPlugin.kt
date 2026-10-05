@@ -87,6 +87,9 @@ internal fun Project.configuration(): BuildConfiguration =
     }
 
 internal fun framework(module: String): String {
-    val version = ChunkPlugin::class.java.`package`.implementationVersion ?: "0.1.0"
+    val version =
+        checkNotNull(ChunkPlugin::class.java.`package`.implementationVersion) {
+            "The Chunk Gradle plugin JAR has no Implementation-Version"
+        }
     return "com.chunkzero.chunk:$module:$version"
 }

@@ -25,11 +25,6 @@ on:
       - Cargo.lock
       - licenses/**
   workflow_dispatch:
-    inputs:
-      publish:
-        description: Publish this SDK version publicly to Maven and GitHub Releases
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -128,64 +123,10 @@ jobs:
           SDK_VERSION: ${{ needs.package.outputs.version }}
         run: python3 scripts/check-sdk.py "artifact/dist/chunk-$SDK_VERSION-linux-x64.tar.gz" artifact/dist/maven
 
-  publish:
-    if: github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main'
-    needs: [package, verify]
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 15
-    environment: sdk-release
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
-        with:
-          name: chunk-sdk-linux-x64
-          path: artifact
-      - uses: chunkzero/maven-r2@v1
-        with:
-          version: v0.1.0
-      - name: Prepare draft release and publish matching Maven artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SDK_VERSION: ${{ needs.package.outputs.version }}
-          MAVEN_R2_SERVER: https://maven.chunkzero.com
-          MAVEN_R2_TOKEN: ${{ secrets.MAVEN_R2_TOKEN }}
-        run: |
-          : "${MAVEN_R2_TOKEN:?Set the Maven R2 publishing token secret}"
-          name="chunk-$SDK_VERSION-linux-x64"
-          archive="artifact/dist/$name.tar.gz"
-          (cd artifact/dist && sha256sum --check "$name.tar.gz.sha256")
-          git fetch --tags --quiet origin
-          tag_commit=$(git rev-parse --verify --quiet "refs/tags/v$SDK_VERSION^{commit}" || true)
-          if [ -n "$tag_commit" ]; then test "$tag_commit" = "$GITHUB_SHA"; fi
-          if gh release view "v$SDK_VERSION" --json isDraft,targetCommitish > release-state.json; then
-            python3 - <<'PYTHON'
-          import json, os
-          with open('release-state.json') as source:
-              release = json.load(source)
-          assert release['isDraft'] and release['targetCommitish'] == os.environ['GITHUB_SHA'], 'Release version already belongs to another commit or is public'
-          PYTHON
-          else
-            gh release create "v$SDK_VERSION" --draft --target "$GITHUB_SHA" --title "Chunk $SDK_VERSION" --generate-notes
-          fi
-          gh release upload "v$SDK_VERSION" "$archive" "$archive.sha256" artifact/scripts/install.sh --clobber
-          maven-r2 publish --repository default/releases -- \
-            python3 scripts/publish-maven.py artifact/dist/maven "$SDK_VERSION"
-          curl --fail --retry 5 --retry-all-errors --retry-delay 2 \
-            "https://maven.chunkzero.com/com/chunkzero/chunk/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom" \
-            -o published.pom
-          cmp published.pom "artifact/dist/maven/com/chunkzero/chunk/runtime/$SDK_VERSION/runtime-$SDK_VERSION.pom"
-          if [[ "$SDK_VERSION" == *-* ]]; then
-            gh release edit "v$SDK_VERSION" --draft=false --prerelease --latest=false
-          else
-            gh release edit "v$SDK_VERSION" --draft=false --prerelease=false --latest
-          fi
-
   # The artifact only hands the SDK between jobs; keeping it counts against Actions storage.
   cleanup:
     if: always() && needs.package.outputs.artifact-id != ''
-    needs: [package, verify, publish]
+    needs: [package, verify]
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 5
     permissions:

@@ -9,7 +9,8 @@ plugins {
 }
 
 group = "com.chunkzero.chunk"
-version = libs.versions.chunk.get()
+// Release builds pass the full version, e.g. -Pchunk.version=0.1.0-nightly.20261004120000.g0123456789ab.
+version = providers.gradleProperty("chunk.version").getOrElse(libs.versions.chunk.get())
 
 kotlin {
     jvmToolchain(21)

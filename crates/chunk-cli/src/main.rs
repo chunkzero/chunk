@@ -12,7 +12,8 @@ mod nodes;
 mod platform;
 mod players;
 
-// Nightly builds report their full version; created projects still use the workspace version's JVM libraries.
+// Release builds set the full version, e.g. `0.1.0-nightly.20261004120000.g0123456789ab`; created projects pin the JVM
+// libraries published with it.
 const RELEASE_VERSION: &str = match option_env!("CHUNK_RELEASE_VERSION") {
     Some(version) => version,
     None => env!("CARGO_PKG_VERSION"),

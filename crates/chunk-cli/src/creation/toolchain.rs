@@ -23,6 +23,15 @@ struct Catalog {
 }
 
 impl Toolchain {
+    /// Maven repository serving the pinned Chunk version; nightlies are published apart from releases.
+    pub fn repository(&self) -> &'static str {
+        if self.versions.chunk.contains("-nightly.") {
+            "https://maven.chunkzero.com/nightlies"
+        } else {
+            "https://maven.chunkzero.com"
+        }
+    }
+
     pub fn resolve(source: Option<&Path>) -> io::Result<Self> {
         let source = source.map(Path::canonicalize).transpose()?;
         let catalog = if let Some(source) = &source {
@@ -49,6 +58,11 @@ impl Toolchain {
                 format!("CLI and {origin} versions must match: CLI {cli_version}, {origin} {}", catalog.versions.chunk),
             ));
         }
-        Ok(Self { source, versions: catalog.versions })
+        let mut versions = catalog.versions;
+        // A checkout's included builds replace the published plugin and libraries, whatever their version.
+        if source.is_none() {
+            crate::RELEASE_VERSION.clone_into(&mut versions.chunk);
+        }
+        Ok(Self { source, versions })
     }
 }
