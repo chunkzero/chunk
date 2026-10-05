@@ -10,23 +10,14 @@ inputs:
 runs:
   using: composite
   steps:
-    # Follows Cargo's CARGO_TARGET_DIR and CARGO_BUILD_TARGET, so set them before this action.
-    - id: paths
-      shell: bash
-      run: |
-        target="${CARGO_TARGET_DIR:-target}"
-        profile="$target/${CARGO_BUILD_TARGET:+$CARGO_BUILD_TARGET/}${{ inputs.profile }}"
-        echo "target=$target" >> "$GITHUB_OUTPUT"
-        echo "gn-out=$profile/gn_out" >> "$GITHUB_OUTPUT"
     - uses: Swatinem/rust-cache@v2
       with:
         key: ${{ inputs.key }}
-        workspaces: . -> ${{ steps.paths.outputs.target }}
     # rust-cache removes gn_out during cleanup; this later action saves it first.
     - uses: actions/cache@v5
       id: v8
       with:
-        path: ${{ steps.paths.outputs.gn-out }}
+        path: target/${{ inputs.profile }}/gn_out
         key: >-
           v8-${{ inputs.key || format('{0}-{1}', runner.os, runner.arch) }}-${{ inputs.profile }}-${{
           hashFiles('Cargo.lock') }}

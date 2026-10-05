@@ -71,11 +71,8 @@ jobs:
             platform: linux-arm64
           - runner: macos-15
             platform: darwin-arm64
-          # Cross-compiled on Apple Silicon, which builds faster than the Intel runner that smoke-tests it.
-          - runner: macos-15
+          - runner: macos-15-intel
             platform: darwin-x64
-            target: x86_64-apple-darwin
-            node-arch: x64
           - runner: windows-2025
             platform: windows-x64
     runs-on: ${{ matrix.runner }}
@@ -85,30 +82,18 @@ jobs:
         shell: bash
     env:
       CHUNK_RELEASE_VERSION: ${{ needs.version.outputs.version }}
-      PLATFORM: ${{ matrix.platform }}
     steps:
       - name: Free disk space
         if: runner.os == 'Linux'
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-      # A Dev Drive speeds up Windows builds; its cleanup runs after the Rust cache saves.
-      - uses: samypr100/setup-dev-drive@v4
-        if: runner.os == 'Windows'
-        with:
-          drive-size: 20GB
-          env-mapping: |
-            CARGO_HOME,{{ DEV_DRIVE }}/.cargo
-            RUSTUP_HOME,{{ DEV_DRIVE }}/.rustup
-            CARGO_TARGET_DIR,{{ DEV_DRIVE }}/target
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: pnpm/action-setup@v4
-      # The archive's TypeScript compiler matches Node.js's architecture.
       - uses: actions/setup-node@v5
         with:
           node-version: 24
-          architecture: ${{ matrix.node-arch }}
       - name: Install the pinned TypeScript compiler
         run: pnpm install --frozen-lockfile --filter chunk-monorepo
       - uses: actions/setup-java@v5
@@ -119,11 +104,6 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
         if: matrix.maven
       - run: rustup toolchain install --no-self-update
-      - name: Cross-compile for ${{ matrix.target }}
-        if: matrix.target
-        run: |
-          rustup target add ${{ matrix.target }}
-          echo "CARGO_BUILD_TARGET=${{ matrix.target }}" >> "$GITHUB_ENV"
       - uses: ./.github/actions/rust-cache
         with:
           profile: release
@@ -133,13 +113,11 @@ jobs:
         # Git's MSYS Perl, first on the bash PATH, cannot configure OpenSSL for MSVC.
         run: echo 'OPENSSL_SRC_PERL=C:/Strawberry/perl/bin/perl.exe' >> "$GITHUB_ENV"
       - run: cargo build --release --locked -p chunk-cli
-      - run: >-
-          python scripts/package-sdk.py --output dist --platform ${{ matrix.platform }} ${{ !matrix.maven &&
-          '--no-maven' || '' }}
+      - run: python scripts/package-sdk.py --output dist ${{ !matrix.maven && '--no-maven' || '' }}
       - name: Compile and type-check a project with the extracted CLI
-        if: runner.os != 'Windows' && !matrix.target
-        run: &smoke-test |
-          name="chunk-$CHUNK_RELEASE_VERSION-$PLATFORM"
+        if: runner.os != 'Windows'
+        run: |
+          name="chunk-$CHUNK_RELEASE_VERSION-${{ matrix.platform }}"
           mkdir -p "$RUNNER_TEMP/sdk"
           tar -xzf "dist/$name.tar.gz" -C "$RUNNER_TEMP/sdk"
           chunk="$RUNNER_TEMP/sdk/$name/chunk"
@@ -166,23 +144,6 @@ jobs:
           path: dist/maven
           if-no-files-found: error
           retention-days: 1
-
-  # V8 crashes under Rosetta, so the cross-compiled darwin-x64 CLI runs on Intel.
-  smoke-darwin-x64:
-    needs: [version, package]
-    runs-on: macos-15-intel
-    timeout-minutes: 15
-    env:
-      CHUNK_RELEASE_VERSION: ${{ needs.version.outputs.version }}
-      PLATFORM: darwin-x64
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v4
-        with:
-          name: archive-darwin-x64
-          path: dist
-      - name: Compile and type-check a project with the extracted CLI
-        run: *smoke-test
 
   verify:
     needs: [version, package]
@@ -221,7 +182,7 @@ jobs:
   # Maven first: a published CLI pins JVM artifacts that must already resolve.
   publish:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    needs: [version, package, smoke-darwin-x64, verify]
+    needs: [version, package, verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -291,9 +252,8 @@ jobs:
   cleanup:
     if: >-
       always() && (needs.publish.result == 'success' || (github.event_name == 'pull_request' && needs.verify.result ==
-      'success' && needs.smoke-darwin-x64.result == 'success' && github.event.pull_request.head.repo.full_name ==
-      github.repository))
-    needs: [smoke-darwin-x64, verify, publish]
+      'success' && github.event.pull_request.head.repo.full_name == github.repository))
+    needs: [verify, publish]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
