@@ -104,6 +104,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
         if: matrix.maven
       - run: rustup toolchain install --no-self-update
+      - uses: ./.github/actions/rust-cache
+        with:
+          profile: release
+          key: ${{ matrix.platform }}
       - name: Configure the vendored OpenSSL with Strawberry Perl
         if: runner.os == 'Windows'
         # Git's MSYS Perl, first on the bash PATH, cannot configure OpenSSL for MSVC.
