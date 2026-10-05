@@ -7,9 +7,9 @@ repository's root build.
 
 | Plugin                         | Apply in                        | Does                                                            |
 | ------------------------------ | ------------------------------- | --------------------------------------------------------------- |
-| `dev.chunkzero.chunk.settings` | `settings.gradle.kts`           | Runs `chunk inspect` and includes every app as a Gradle project |
-| `dev.chunkzero.chunk`          | The root build and Java modules | Shared Java bindings, app packaging and indexing                |
-| `dev.chunkzero.chunk.kotlin`   | The root build and Kotlin apps  | Everything above, plus Kotlin and the coroutine backend facade  |
+| `com.chunkzero.chunk.settings` | `settings.gradle.kts`           | Runs `chunk inspect` and includes every app as a Gradle project |
+| `com.chunkzero.chunk`          | The root build and Java modules | Shared Java bindings, app packaging and indexing                |
+| `com.chunkzero.chunk.kotlin`   | The root build and Kotlin apps  | Everything above, plus Kotlin and the coroutine backend facade  |
 
 ## Setup
 
@@ -26,7 +26,7 @@ pluginManagement {
 
 plugins {
     id("org.jetbrains.kotlin.jvm") version "2.4.10" apply false // Kotlin projects only
-    id("dev.chunkzero.chunk.settings") version "0.1.0"
+    id("com.chunkzero.chunk.settings") version "0.1.0"
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
@@ -48,7 +48,7 @@ also name their main class:
 
 ```kotlin
 // apps/lobby/build.gradle.kts
-plugins { id("dev.chunkzero.chunk") }
+plugins { id("com.chunkzero.chunk") }
 
 java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
 
@@ -58,26 +58,26 @@ application { mainClass = "example.Lobby" }
 - Every module that applies a Chunk plugin must set its Java toolchain explicitly, to Java 25 or newer (the Minestom
   runtime's requirement), and compile for that same version. `validateChunkJvm` fails the build otherwise; Chunk never
   falls back to the Gradle daemon's JVM.
-- The root applies the same plugin as the apps before they do. For Kotlin apps that is `dev.chunkzero.chunk.kotlin`, and
+- The root applies the same plugin as the apps before they do. For Kotlin apps that is `com.chunkzero.chunk.kotlin`, and
   the Kotlin Gradle plugin's version must be declared in the settings `plugins` block, as above, so that Chunk's
-  settings plugin can see it. Java apps in a Kotlin project keep `dev.chunkzero.chunk`.
+  settings plugin can see it. Java apps in a Kotlin project keep `com.chunkzero.chunk`.
 - A library module (such as a `:shared` project with common gameplay code) applies a Chunk plugin too if it declares
   `@Component` factories, so its factories are indexed.
 
 The project plugins add the Chunk libraries at the plugin's own version: the root exports
-`dev.chunkzero:backend-client`, Java apps get `runtime-minestom` and Kotlin apps `runtime-minestom-kotlin`.
+`com.chunkzero.chunk:backend-client`, Java apps get `runtime-minestom` and Kotlin apps `runtime-minestom-kotlin`.
 
 ### Settings
 
 The settings plugin adds a `chunk` extension:
 
 ```kotlin
-import dev.chunkzero.gradle.ChunkSettingsExtension
+import com.chunkzero.chunk.gradle.ChunkSettingsExtension
 
 extensions.configure<ChunkSettingsExtension> {
     projectDirectory.set(settingsDir) // default; the directory with chunk.toml
     executable.set("chunk") // default; a CLI on PATH or an absolute path
-    javaPackage.set("dev.chunkzero.generated") // default; the package of generated bindings
+    javaPackage.set("com.chunkzero.chunk.generated") // default; the package of generated bindings
 }
 ```
 
@@ -116,9 +116,9 @@ never builds Rust tools or installs Node packages.
 The app's compiled classes are scanned for `@SessionType("id")`. Each annotated class must be public, concrete, have a
 public no-argument constructor and implement `SessionProvider`; an app has 1 to 128 of them, with distinct IDs, and its
 main class needs a `public static void main(String[])`. `generateChunkSessionRegistry` writes
-`META-INF/services/dev.chunkzero.runtime.SessionProvider`, from which the runtime loads the providers, and a catalog of
-the session type IDs for release assembly. Packaging fails unless those IDs exactly match the app's `implementations` in
-`app.ts` (by default just `default`).
+`META-INF/services/com.chunkzero.chunk.runtime.SessionProvider`, from which the runtime loads the providers, and a
+catalog of the session type IDs for release assembly. Packaging fails unless those IDs exactly match the app's
+`implementations` in `app.ts` (by default just `default`).
 
 An implementation with a `config` validator must implement its generated interface, for example
 `LobbySessionProviders.Default`, and receives the validated configuration in `create(SessionCreation<Config>)`; one

@@ -9,9 +9,10 @@ dependency. Apps don't use it directly: they call functions through the generate
 ## Generated bindings
 
 `chunk gen PROJECT --target java` compiles the project's backend and writes JVM sources to
-`PROJECT/.chunk/generated/java`, in the package set by `--java-package` (default `dev.chunkzero.generated`). In an app
-project the [Gradle plugin](../gradle-plugin/README.md) does this before compilation, so running it by hand is rarely
-needed. `--target kotlin` adds the coroutine client, and `--target typescript` writes TypeScript references instead.
+`PROJECT/.chunk/generated/java`, in the package set by `--java-package` (default `com.chunkzero.chunk.generated`). In an
+app project the [Gradle plugin](../gradle-plugin/README.md) does this before compilation, so running it by hand is
+rarely needed. `--target kotlin` adds the coroutine client, and `--target typescript` writes TypeScript references
+instead.
 
 Public queries, mutations and actions get a reference and argument and result types in `BackendTypes`, nested by
 function path: `shared/players/stats` becomes `BackendTypes.Shared.Players.stats`, with `StatsArgs` and `StatsResult`

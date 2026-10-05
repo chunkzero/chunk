@@ -27,7 +27,7 @@ def publish(repository, version, url, username, password):
             raise ValueError(f"Symlink in Maven repository: {key}")
         if path.is_dir():
             continue
-        if (not path.is_file() or not key.startswith("dev/chunkzero/") or path.parent.name != version
+        if (not path.is_file() or not key.startswith("com/chunkzero/chunk/") or path.parent.name != version
                 or not all(re.fullmatch(r"[A-Za-z0-9_+.-]+", part) for part in path.relative_to(repository).parts)):
             raise ValueError(f"Expected an immutable versioned Chunk artifact: {key}")
         paths.append((path, key))

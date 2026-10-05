@@ -5,7 +5,7 @@ use chunk_contract::{Destination, DestinationManifest};
 use super::{container, names, quote, schema};
 
 /// Fully qualified, since an app's class may share its simple name.
-const DESTINATION: &str = "dev.chunkzero.backend.api.Destination";
+const DESTINATION: &str = "com.chunkzero.chunk.backend.api.Destination";
 
 /// `Destinations`, each app's declared destinations as `Destination` constants, as `#chunk/apps` exposes them.
 pub(super) fn sources(manifest: Option<&DestinationManifest>, package: &str) -> io::Result<(String, String)> {

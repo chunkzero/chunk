@@ -8,7 +8,7 @@ plugins {
     `maven-publish`
 }
 
-group = "dev.chunkzero"
+group = "com.chunkzero.chunk"
 version = libs.versions.chunk.get()
 
 kotlin {
@@ -32,16 +32,16 @@ dependencies {
 gradlePlugin {
     plugins {
         create("chunkSettings") {
-            id = "dev.chunkzero.chunk.settings"
-            implementationClass = "dev.chunkzero.gradle.ChunkSettingsPlugin"
+            id = "com.chunkzero.chunk.settings"
+            implementationClass = "com.chunkzero.chunk.gradle.ChunkSettingsPlugin"
         }
         create("chunk") {
-            id = "dev.chunkzero.chunk"
-            implementationClass = "dev.chunkzero.gradle.ChunkPlugin"
+            id = "com.chunkzero.chunk"
+            implementationClass = "com.chunkzero.chunk.gradle.ChunkPlugin"
         }
         create("chunkKotlin") {
-            id = "dev.chunkzero.chunk.kotlin"
-            implementationClass = "dev.chunkzero.gradle.ChunkKotlinPlugin"
+            id = "com.chunkzero.chunk.kotlin"
+            implementationClass = "com.chunkzero.chunk.gradle.ChunkKotlinPlugin"
         }
     }
 }

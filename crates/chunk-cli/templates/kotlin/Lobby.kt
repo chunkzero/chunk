@@ -1,15 +1,15 @@
 package example
 
-import dev.chunkzero.generated.BackendTypes.Shared.Greetings.MessageArgs
-import dev.chunkzero.generated.CoroutineBackendClient
-import dev.chunkzero.runtime.ChunkMinestom
-import dev.chunkzero.runtime.ChunkProcess
-import dev.chunkzero.runtime.CoroutineSession
-import dev.chunkzero.runtime.Session
-import dev.chunkzero.runtime.SessionProvider
-import dev.chunkzero.runtime.SessionScope
-import dev.chunkzero.runtime.SessionType
-import dev.chunkzero.runtime.coroutines
+import com.chunkzero.chunk.generated.BackendTypes.Shared.Greetings.MessageArgs
+import com.chunkzero.chunk.generated.CoroutineBackendClient
+import com.chunkzero.chunk.runtime.ChunkMinestom
+import com.chunkzero.chunk.runtime.ChunkProcess
+import com.chunkzero.chunk.runtime.CoroutineSession
+import com.chunkzero.chunk.runtime.Session
+import com.chunkzero.chunk.runtime.SessionProvider
+import com.chunkzero.chunk.runtime.SessionScope
+import com.chunkzero.chunk.runtime.SessionType
+import com.chunkzero.chunk.runtime.coroutines
 import net.kyori.adventure.text.Component
 import net.minestom.server.ServerProcess
 import net.minestom.server.entity.Player

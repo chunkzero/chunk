@@ -1,14 +1,14 @@
 package example.arena;
 
-import dev.chunkzero.backend.client.OperationId;
-import dev.chunkzero.generated.BackendClient;
-import dev.chunkzero.generated.Destinations;
-import dev.chunkzero.generated.SessionMethods;
-import dev.chunkzero.generated.Worlds;
-import dev.chunkzero.runtime.MoveResult;
-import dev.chunkzero.runtime.Session;
-import dev.chunkzero.runtime.SessionScope;
-import dev.chunkzero.runtime.assets.Assets;
+import com.chunkzero.chunk.backend.client.OperationId;
+import com.chunkzero.chunk.generated.BackendClient;
+import com.chunkzero.chunk.generated.Destinations;
+import com.chunkzero.chunk.generated.SessionMethods;
+import com.chunkzero.chunk.generated.Worlds;
+import com.chunkzero.chunk.runtime.MoveResult;
+import com.chunkzero.chunk.runtime.Session;
+import com.chunkzero.chunk.runtime.SessionScope;
+import com.chunkzero.chunk.runtime.assets.Assets;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;

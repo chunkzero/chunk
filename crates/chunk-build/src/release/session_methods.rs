@@ -79,7 +79,7 @@ pub(super) fn validate(
             if actual.is_empty() {
                 return Ok(());
             }
-            let registration = read_registration(archive, "dev.chunkzero.runtime.SessionMethodProvider")?;
+            let registration = read_registration(archive, "com.chunkzero.chunk.runtime.SessionMethodProvider")?;
             let providers: Vec<_> = registration.lines().filter(|line| !line.trim().is_empty()).collect();
             if registration.len() > 65_536
                 || providers.len() != 1

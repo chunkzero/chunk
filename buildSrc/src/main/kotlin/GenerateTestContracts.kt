@@ -59,7 +59,7 @@ abstract class GenerateTestContracts
                 root.dir("crates/chunk-contract/src"),
             )
             outputDirectory.convention(project.layout.buildDirectory.dir("generated/contracts"))
-            packageName.convention("dev.chunkzero.generated")
+            packageName.convention("com.chunkzero.chunk.generated")
         }
 
         @TaskAction

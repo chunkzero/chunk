@@ -1,8 +1,8 @@
 package example.lobby;
 
-import dev.chunkzero.backend.client.BackendSession;
-import dev.chunkzero.generated.BackendClient;
-import dev.chunkzero.runtime.Component;
+import com.chunkzero.chunk.backend.client.BackendSession;
+import com.chunkzero.chunk.generated.BackendClient;
+import com.chunkzero.chunk.runtime.Component;
 
 public final class LobbyComponents {
     private LobbyComponents() {}

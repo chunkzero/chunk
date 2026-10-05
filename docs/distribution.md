@@ -6,7 +6,7 @@ How the chunk SDK is packaged, installed and published. A release of the SDK has
   holds the `chunk` executable, the native TypeScript compiler it type-checks projects with (under `toolchain/`), and
   the license. The CLI embeds the TypeScript SDK, the project templates, the Gradle wrapper and the version pins that
   `chunk create` writes.
-- **The JVM artifacts**, published to `https://maven.chunkzero.com` under `dev.chunkzero`: `proto`, `backend-api`,
+- **The JVM artifacts**, published to `https://maven.chunkzero.com` under `com.chunkzero.chunk`: `proto`, `backend-api`,
   `backend-client`, `backend-client-kotlin`, `runtime`, `runtime-minestom`, `runtime-minestom-kotlin`, the Gradle plugin
   and its three plugin markers. Each library has `-sources.jar` and `-javadoc.jar` (Dokka HTML) artifacts. Projects
   resolve these through Gradle; the CLI archive contains no JARs.
@@ -85,7 +85,7 @@ artifact is deleted when the run ends.
 
 1. The Maven repository is a [Maven R2](https://github.com/chunkzero/maven-r2) deployment at
    `https://maven.chunkzero.com`, whose `default/releases` repository is public and served from the origin root.
-2. In its console, create a publishing token restricted to `default/releases`, the `dev/chunkzero/` prefix and the
+2. In its console, create a publishing token restricted to `default/releases`, the `com/chunkzero/chunk/` prefix and the
    publishing operations.
 3. Create the GitHub environment `sdk-release`, restricted to `main` with a required reviewer, and add the token as the
    environment secret `MAVEN_R2_TOKEN`.

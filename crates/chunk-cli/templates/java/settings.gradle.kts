@@ -13,7 +13,7 @@ pluginManagement {
 }
 
 plugins {
-    id("dev.chunkzero.chunk.settings") version "@CHUNK_VERSION@"
+    id("com.chunkzero.chunk.settings") version "@CHUNK_VERSION@"
     id("org.gradle.toolchains.foojay-resolver-convention") version "@FOOJAY_VERSION@"
 }
 

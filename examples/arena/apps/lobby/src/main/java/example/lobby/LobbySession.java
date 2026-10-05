@@ -1,12 +1,12 @@
 package example.lobby;
 
-import dev.chunkzero.backend.api.PlayerId;
-import dev.chunkzero.generated.BackendClient;
-import dev.chunkzero.generated.BackendTypes.Shared.Stats.MineResult;
-import dev.chunkzero.generated.Worlds;
-import dev.chunkzero.runtime.Session;
-import dev.chunkzero.runtime.SessionScope;
-import dev.chunkzero.runtime.assets.Assets;
+import com.chunkzero.chunk.backend.api.PlayerId;
+import com.chunkzero.chunk.generated.BackendClient;
+import com.chunkzero.chunk.generated.BackendTypes.Shared.Stats.MineResult;
+import com.chunkzero.chunk.generated.Worlds;
+import com.chunkzero.chunk.runtime.Session;
+import com.chunkzero.chunk.runtime.SessionScope;
+import com.chunkzero.chunk.runtime.assets.Assets;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
