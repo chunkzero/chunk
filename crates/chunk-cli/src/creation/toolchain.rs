@@ -61,7 +61,7 @@ impl Toolchain {
         let mut versions = catalog.versions;
         // A checkout's included builds replace the published plugin and libraries, whatever their version.
         if source.is_none() {
-            versions.chunk = crate::RELEASE_VERSION.to_owned();
+            crate::RELEASE_VERSION.clone_into(&mut versions.chunk);
         }
         Ok(Self { source, versions })
     }

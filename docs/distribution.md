@@ -47,6 +47,9 @@ Install with [mise](https://mise.jdx.dev). Releases come from GitHub; nightlies 
 [chunkzero/mise-registry](https://github.com/chunkzero/mise-registry):
 
 ```toml
+[plugins]
+chunkzero = "https://github.com/chunkzero/mise-chunkzero"
+
 [tools]
 "github:chunkzero/chunk" = "latest"
 # or the newest nightly:
