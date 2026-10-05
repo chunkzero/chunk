@@ -33,8 +33,8 @@ plugins {
 dependencyResolutionManagement {
     repositories {
         maven("https://maven.chunkzero.com")
-        maven("https://maven.chunkzero.com/snapshots") {
-            mavenContent { includeModule("net.minestom", "minestom") }
+        maven("https://maven.chunkzero.com/nightlies") {
+            mavenContent { includeGroup("com.chunkzero.multistom") }
         }
         mavenCentral()
     }
