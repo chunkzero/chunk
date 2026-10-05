@@ -24,8 +24,8 @@ dependencyResolutionManagement {
             url = uri(providers.gradleProperty("chunk.mavenRepository").orElse("@CHUNK_REPOSITORY@").get())
             isAllowInsecureProtocol = url.scheme == "http"
         }
-        maven("https://maven.chunkzero.com/snapshots") {
-            mavenContent { includeModule("net.minestom", "minestom") }
+        maven("https://maven.chunkzero.com/nightlies") {
+            mavenContent { includeGroup("com.chunkzero.multistom") }
         }
         mavenCentral()
     }

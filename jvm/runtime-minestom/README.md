@@ -5,8 +5,8 @@ The session API gameplay code is written against, and the adapter that runs it o
 sessions when core asks, admits the players core delivers, and runs session methods. `jvm/runtime-minestom-kotlin` adds
 coroutine adapters, described [below](#kotlin).
 
-Minestom comes from [chunkzero/minestom-me](https://github.com/chunkzero/minestom-me), published as
-`net.minestom:minestom:master-SNAPSHOT` in `https://maven.chunkzero.com/snapshots`. It and the gateway target Minecraft
+Minestom comes from [chunkzero/multistom](https://github.com/chunkzero/multistom), pinned to a nightly of
+`com.chunkzero.multistom:multistom` from `https://maven.chunkzero.com/nightlies`. It and the gateway target Minecraft
 Java Edition 26.2.
 
 ## Sessions

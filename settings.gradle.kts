@@ -13,8 +13,8 @@ plugins {
 dependencyResolutionManagement {
     repositoriesMode = RepositoriesMode.FAIL_ON_PROJECT_REPOS
     repositories {
-        maven("https://maven.chunkzero.com/snapshots") {
-            mavenContent { includeModule("net.minestom", "minestom") }
+        maven("https://maven.chunkzero.com/nightlies") {
+            mavenContent { includeGroup("com.chunkzero.multistom") }
         }
         mavenCentral()
     }

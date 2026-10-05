@@ -15,8 +15,8 @@ How the chunk SDK is packaged, installed and published. A release of the SDK has
 Linux archives are built on Ubuntu 24.04 and need its glibc and OpenSSL 3; macOS and Windows archives link OpenSSL
 statically. Users need Java to run Gradle; the Minestom runtime needs Java 25, which the generated projects download
 through Gradle's toolchain resolver. Building a project needs no Rust, Node, pnpm or chunk checkout. Minestom itself is
-the `net.minestom:minestom:master-SNAPSHOT` build of [chunkzero/minestom-me](https://github.com/chunkzero/minestom-me),
-served from `https://maven.chunkzero.com/snapshots`.
+a pinned nightly of [chunkzero/multistom](https://github.com/chunkzero/multistom), `com.chunkzero.multistom:multistom`,
+served from `https://maven.chunkzero.com/nightlies`.
 
 ## Versions
 

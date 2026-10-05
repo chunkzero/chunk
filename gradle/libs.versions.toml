@@ -9,7 +9,7 @@ dokka = "2.2.0"
 
 protobuf = "4.36.1"
 grpc = "1.84.0"
-minestom = "master-SNAPSHOT"
+multistom = "0.1.0-nightly.20261005021334.g24a253a8ad29"
 
 [libraries]
 jetbrains-annotations = { module = "org.jetbrains:annotations", version = "26.0.2-1" }
@@ -22,7 +22,7 @@ grpc-protobuf = { module = "io.grpc:grpc-protobuf", version.ref = "grpc" }
 grpc-api = { module = "io.grpc:grpc-api", version.ref = "grpc" }
 grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
 grpc-netty = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
-minestom = { module = "net.minestom:minestom", version.ref = "minestom" }
+minestom = { module = "com.chunkzero.multistom:multistom", version.ref = "multistom" }
 polar = { module = "dev.hollowcube:polar", version = "1.16.0" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
