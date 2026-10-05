@@ -40,9 +40,10 @@ def main():
     cargo = tomllib.loads((repository / "Cargo.toml").read_text())
     versions = tomllib.loads((repository / "gradle/libs.versions.toml").read_text())["versions"]
     base = cargo["workspace"]["package"]["version"]
-    # Nightlies extend the workspace version with a prerelease suffix; the JVM catalog keeps the workspace version.
+    # Releases use the workspace version; nightlies extend its X.Y.Z with a `-nightly.<time>.g<commit>` suffix.
     version = os.environ.get("CHUNK_RELEASE_VERSION") or base
-    if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", version) or version.split("-")[0] != base.split("-")[0]:
+    nightly = re.fullmatch(r"(\d+\.\d+\.\d+)-nightly\.\d{14}\.g[0-9a-f]{12}", version)
+    if version != base and not (nightly and nightly[1] == base.split("-")[0]):
         raise ValueError(f"SDK releases require a semantic version of {base}, got {version}")
     if versions["chunk"] != base:
         raise ValueError("Cargo and JVM SDK versions differ")
@@ -68,6 +69,7 @@ def main():
         if not args.no_maven:
             subprocess.run([
                 str(repository / "gradlew"), "publishSdk", f"-Pchunk.sdkRepository={staged_maven}",
+                f"-Pchunk.version={version}",
                 "--max-workers=2", "--console=plain", "--no-daemon",
             ], cwd=repository, check=True)
             # Exact versions need no mutable repository-level Maven version indexes.

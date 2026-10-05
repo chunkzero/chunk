@@ -4,7 +4,7 @@ pluginManagement {
     }
     repositories {
         maven {
-            url = uri(providers.gradleProperty("chunk.mavenRepository").orElse("https://maven.chunkzero.com").get())
+            url = uri(providers.gradleProperty("chunk.mavenRepository").orElse("@CHUNK_REPOSITORY@").get())
             isAllowInsecureProtocol = url.scheme == "http"
         }
         gradlePluginPortal()
@@ -20,7 +20,7 @@ plugins {
 dependencyResolutionManagement {
     repositories {
         maven {
-            url = uri(providers.gradleProperty("chunk.mavenRepository").orElse("https://maven.chunkzero.com").get())
+            url = uri(providers.gradleProperty("chunk.mavenRepository").orElse("@CHUNK_REPOSITORY@").get())
             isAllowInsecureProtocol = url.scheme == "http"
         }
         maven("https://maven.chunkzero.com/snapshots") {

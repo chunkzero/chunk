@@ -86,6 +86,7 @@ fn create(options: &Options) -> io::Result<()> {
     }
     let settings = settings
         .replace("\"@CHUNK_VERSION@\"", &kotlin(&toolchain.versions.chunk))
+        .replace("\"@CHUNK_REPOSITORY@\"", &kotlin(toolchain.repository()))
         .replace("\"@KOTLIN_VERSION@\"", &kotlin(&toolchain.versions.kotlin))
         .replace("\"@FOOJAY_VERSION@\"", &kotlin(&toolchain.versions.foojay))
         .replace("\"@PROJECT_NAME@\"", &kotlin(name));
