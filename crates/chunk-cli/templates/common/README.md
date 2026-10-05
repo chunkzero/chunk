@@ -8,12 +8,10 @@ TypeScript backend.
 From this directory:
 
 ```sh
-@CHUNK_COMMAND@ codegen
-@CHUNK_COMMAND@ build
-@CHUNK_COMMAND@ dev
+chunk codegen
+chunk build
+chunk dev
 ```
-
-`@CHUNK_COMMAND@` is the CLI that created this project; once `chunk` is on your `PATH`, use that instead.
 
 - `codegen` sets up editor support for the TypeScript backend. It generates the SDK and typed bindings under `.chunk/`
   and adds import mappings to `package.json` (plus a `tsconfig.json` if there is none). Commit those two files.
@@ -62,8 +60,7 @@ Gradle downloads the chunk libraries and plugins from `maven.chunkzero.com`, at 
 `settings.gradle.kts` when the CLI created the project. A newer CLI does not change those pins, so keep the CLI and the
 pins on the same version.
 
-`gradle.properties` records `chunk.executable`, the CLI that `./gradlew` and IDE builds run; update it if the CLI moves,
-or pass `-Pchunk.executable=...`. `chunk build` and `chunk dev` always use the CLI you run them with. To build against
-unpublished chunk libraries, set the `chunk.mavenRepository` Gradle property to another Maven repository, or set
-`chunk.source` to a chunk checkout at the CLI's revision to build them from source (`chunk create --chunk-source` does
-this).
+`./gradlew` and IDE builds run the `chunk` on your `PATH`; pass `-Pchunk.executable=...` to use another. `chunk build`
+and `chunk dev` always use the CLI you run them with. To build against unpublished chunk libraries, set the
+`chunk.mavenRepository` Gradle property to another Maven repository, or set `chunk.source` to a chunk checkout at the
+CLI's revision to build them from source (`chunk create --chunk-source` does this).

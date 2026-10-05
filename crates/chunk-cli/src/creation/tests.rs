@@ -23,7 +23,6 @@ fn source(root: &Path) -> PathBuf {
 #[test]
 fn cli_creates_both_languages_without_adjacent_sdk_files() {
     let root = tempfile::tempdir().unwrap();
-    let executable = root.path().join("chunk");
     let catalog: toml::Table = toml::from_str(include_str!("../../../../gradle/libs.versions.toml")).unwrap();
     let versions = &catalog["versions"];
     for (language, name) in [(Language::Java, "new java server"), (Language::Kotlin, "new kotlin server")] {
@@ -31,7 +30,7 @@ fn cli_creates_both_languages_without_adjacent_sdk_files() {
         if matches!(language, Language::Kotlin) {
             fs::create_dir(&options.directory).unwrap();
         }
-        create(&options, &executable).unwrap();
+        create(&options).unwrap();
         let metadata = chunk_build::project::inspect(&options.directory).unwrap();
         assert_eq!(metadata.apps.len(), 1);
         assert_eq!(metadata.apps[0].id, "lobby");
@@ -58,7 +57,8 @@ fn cli_creates_both_languages_without_adjacent_sdk_files() {
         }
         let readme = fs::read_to_string(options.directory.join("README.md")).unwrap();
         assert!(readme.starts_with(&format!("# {name}\n")));
-        assert!(readme.contains(&format!("{} dev", shell(&executable).unwrap())));
+        assert!(readme.contains("\nchunk dev\n"));
+        assert!(!properties.contains("chunk.executable"));
     }
 }
 
@@ -68,7 +68,7 @@ fn source_override_has_discoverable_apps_and_refuses_nonempty_directories() {
     let source = source(root.path());
     for (language, name) in [(Language::Java, "java"), (Language::Kotlin, "kotlin")] {
         let options = Options { directory: root.path().join(name), language, chunk_source: Some(source.clone()) };
-        create(&options, Path::new("/prepared tools/chunk")).unwrap();
+        create(&options).unwrap();
         let metadata = chunk_build::project::inspect(&options.directory).unwrap();
         assert_eq!(metadata.apps.len(), 1);
         assert_eq!(metadata.apps[0].id, "lobby");
@@ -82,13 +82,13 @@ fn source_override_has_discoverable_apps_and_refuses_nonempty_directories() {
             assert_eq!(fs::read(options.directory.join(name)).unwrap(), fs::read(source.join(name)).unwrap());
         }
         fs::write(options.directory.join("server/greetings.ts"), "user code").unwrap();
-        assert_eq!(create(&options, Path::new("chunk")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(create(&options).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(fs::read_to_string(options.directory.join("server/greetings.ts")).unwrap(), "user code");
     }
     let empty = root.path().join("empty");
     fs::create_dir(&empty).unwrap();
     let options = Options { directory: empty, language: Language::Java, chunk_source: Some(source) };
-    create(&options, Path::new("chunk")).unwrap();
+    create(&options).unwrap();
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn invalid_toolchain_leaves_no_project_and_paths_are_properties_not_code() {
     fs::remove_file(source.join("gradle/wrapper/gradle-wrapper.jar")).unwrap();
     let options =
         Options { directory: root.path().join("project"), language: Language::Java, chunk_source: Some(source) };
-    assert!(create(&options, Path::new("chunk")).unwrap_err().to_string().contains("gradle-wrapper.jar"));
+    assert!(create(&options).unwrap_err().to_string().contains("gradle-wrapper.jar"));
     assert!(!options.directory.exists());
     assert_eq!(
         property(Path::new("C:\\tools here\\é😀\nchunk")).unwrap(),
@@ -106,12 +106,13 @@ fn invalid_toolchain_leaves_no_project_and_paths_are_properties_not_code() {
     );
     assert_eq!(kotlin("a\"$b\n"), "\"a\\\"\\$b\\n\"");
     assert_eq!(shell(Path::new("/tools/it's chunk")).unwrap(), "'/tools/it'\"'\"'s chunk'");
+    assert_eq!(shell(Path::new("../my-server")).unwrap(), "../my-server");
+    assert_eq!(shell(Path::new("-server")).unwrap(), "./-server");
 }
 
 #[test]
 fn mismatched_checkout_leaves_the_destination_untouched() {
     let root = tempfile::tempdir().unwrap();
-    let executable = root.path().join("chunk");
     let options = Options { directory: root.path().join("project"), language: Language::Java, chunk_source: None };
     let source = source(root.path());
     fs::write(
@@ -121,7 +122,7 @@ fn mismatched_checkout_leaves_the_destination_untouched() {
     .unwrap();
     let options = Options { chunk_source: Some(source), ..options };
     assert_eq!(
-        create(&options, &executable).unwrap_err().to_string(),
+        create(&options).unwrap_err().to_string(),
         format!("CLI and checkout versions must match: CLI {}, checkout 999.0.0", env!("CARGO_PKG_VERSION")),
     );
     assert!(!options.directory.exists());
@@ -130,10 +131,9 @@ fn mismatched_checkout_leaves_the_destination_untouched() {
 #[test]
 fn invalid_destinations_report_missing_parents_and_symlinks_without_creating_files() {
     let root = tempfile::tempdir().unwrap();
-    let executable = root.path().join("chunk");
     let parent = root.path().join("missing/parent");
     let options = Options { directory: parent.join("project"), language: Language::Java, chunk_source: None };
-    let error = create(&options, &executable).unwrap_err();
+    let error = create(&options).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     assert_eq!(error.to_string(), format!("project parent directory does not exist: {}", parent.display()));
     assert!(!root.path().join("missing").exists());
@@ -146,7 +146,7 @@ fn invalid_destinations_report_missing_parents_and_symlinks_without_creating_fil
         std::os::unix::fs::symlink(&empty, &link).unwrap();
         let options = Options { directory: link.clone(), ..options };
         assert_eq!(
-            create(&options, &executable).unwrap_err().to_string(),
+            create(&options).unwrap_err().to_string(),
             format!("project directory must not be a symlink: {}", link.display()),
         );
         assert_eq!(fs::read_link(link).unwrap(), empty);
@@ -160,7 +160,6 @@ fn existing_project_needs_no_write_access_to_its_parent() {
     use std::os::unix::fs::PermissionsExt;
 
     let root = tempfile::tempdir().unwrap();
-    let executable = root.path().join("chunk");
     let parent = root.path().join("readonly");
     let project = parent.join("project");
     fs::create_dir_all(&project).unwrap();
@@ -168,7 +167,7 @@ fn existing_project_needs_no_write_access_to_its_parent() {
     let permissions = fs::metadata(&parent).unwrap().permissions();
     fs::set_permissions(&parent, fs::Permissions::from_mode(0o555)).unwrap();
     let options = Options { directory: project.join("."), language: Language::Kotlin, chunk_source: None };
-    let result = create(&options, &executable);
+    let result = create(&options);
     fs::set_permissions(&parent, permissions).unwrap();
     result.unwrap();
     assert!(project.join("settings.gradle.kts").is_file());
