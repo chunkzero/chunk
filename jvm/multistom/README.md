@@ -11,13 +11,14 @@ Java Edition 26.2.
 
 ## Sessions
 
-A session is one gameplay instance of a session type, and one JVM runs several. Each session type is a `SessionProvider`
-annotated with its ID, which must match an implementation in the app's `app.ts` (`default` unless it declares others).
-The provider creates fresh state for every session. From the Java project template:
+A session is one gameplay instance of a session type, and one JVM runs several. Each session type is a runtime
+`SessionProvider<S>` annotated with its ID, which must match an implementation in the app's `app.ts` (`default` unless
+it declares others). The provider creates fresh state for every session, and on multistom `S` must be a `Session`. From
+the Java project template:
 
 ```java
 @SessionType("default")
-public final class Lobby implements SessionProvider {
+public final class Lobby implements SessionProvider<Session> {
     @Override
     public Session create() {
         return new GreetingSession();
@@ -58,7 +59,7 @@ does:
 
 ```kotlin
 @SessionType("default")
-class ArenaSessions : ArenaSessionProviders.Default {
+class ArenaSessions : ArenaSessionProviders.Default<Session> {
     override fun create(creation: SessionCreation<SessionConfigs.Arena.Default.Config>) =
         ExampleSessions.arena("${creation.config().label()} (${creation.maxPlayers()} slots)")
 }

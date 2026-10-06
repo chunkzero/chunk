@@ -397,7 +397,7 @@ fn session_methods_publish_with_the_runtime_contract_and_reject_stale_jars() {
             ("sample/lobby/Provider.class", class(25, 1)),
             ("sample/Method.class", class(25, 1)),
             (
-                "META-INF/services/com.chunkzero.chunk.multistom.SessionMethodProvider",
+                "META-INF/services/com.chunkzero.chunk.runtime.SessionMethodProvider",
                 b"sample.lobby.Provider\n".to_vec(),
             ),
             (
@@ -460,7 +460,7 @@ fn session_configurations_require_matching_packaged_schemas_and_registered_provi
             ("META-INF/MANIFEST.MF", b"Manifest-Version: 1.0\r\nMain-Class: sample.lobby.Provider\r\n\r\n".to_vec()),
             ("sample/lobby/Provider.class", class(25, 1)),
             ("sample/ConfigProvider.class", class(25, 1)),
-            ("META-INF/services/com.chunkzero.chunk.multistom.SessionProvider", provider.as_bytes().to_vec()),
+            ("META-INF/services/com.chunkzero.chunk.runtime.SessionProvider", provider.as_bytes().to_vec()),
             (
                 "META-INF/chunk/session-configurations.json",
                 serde_json::to_vec(&json!({"version":1,"app":"lobby","configurations":[configuration]})).unwrap(),

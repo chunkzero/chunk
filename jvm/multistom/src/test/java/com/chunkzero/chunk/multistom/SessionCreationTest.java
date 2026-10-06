@@ -10,6 +10,11 @@ import com.chunkzero.chunk.backend.api.JsonType;
 import com.chunkzero.chunk.multistom.bootstrap.FlatSession;
 import com.chunkzero.chunk.multistom.event.SessionCreateEvent;
 import com.chunkzero.chunk.runtime.ChunkSessions;
+import com.chunkzero.chunk.runtime.ConfiguredSessionProvider;
+import com.chunkzero.chunk.runtime.SessionCreation;
+import com.chunkzero.chunk.runtime.SessionMethodRegistry;
+import com.chunkzero.chunk.runtime.SessionProvider;
+import com.chunkzero.chunk.runtime.SessionRegistry;
 import com.chunkzero.chunk.runtime.TestHosts;
 import com.google.protobuf.ByteString;
 
@@ -47,7 +52,7 @@ class SessionCreationTest {
         var ticks = new TickExecutor();
         var settings = new ArrayList<SessionCreation<Config>>();
         var provider =
-                new ConfiguredSessionProvider<Config>() {
+                new ConfiguredSessionProvider<Config, Session>() {
                     @Override
                     public JsonType<Config> configurationType() {
                         return JsonType.of(new TypeReference<Config>() {}, Objects::requireNonNull);
@@ -63,12 +68,13 @@ class SessionCreationTest {
                 new SessionManager(
                         process,
                         ticks,
-                        Map.of(
-                                "arena/default",
-                                SessionRegistration.provider("arena", () -> provider),
-                                "arena/legacy",
-                                new SessionRegistration("arena", FlatSession::new)),
-                        Map.of());
+                        new SessionRegistry(
+                                Map.of(
+                                        "arena/default",
+                                        provider,
+                                        "arena/legacy",
+                                        (SessionProvider<Session>) FlatSession::new)),
+                        new SessionMethodRegistry(List.of(), List.of()));
         var host = TestHosts.detached(manager);
         try {
             var first = session(16, "{\"map\":\"forest\",\"mode\":\"solo\"}");
@@ -159,24 +165,37 @@ class SessionCreationTest {
                 new SessionManager(
                         process,
                         ticks,
-                        Map.of(
-                                "arena/default",
-                                new SessionRegistration(
-                                        "arena",
-                                        () -> {
-                                            throw new IllegalStateException("provider failed");
-                                        })),
-                        Map.of());
+                        new SessionRegistry(
+                                Map.of(
+                                        "arena/default",
+                                        (SessionProvider<Session>)
+                                                () -> {
+                                                    throw new IllegalStateException(
+                                                            "provider failed");
+                                                },
+                                        "arena/foreign",
+                                        (SessionProvider<String>) () -> "not a session")),
+                        new SessionMethodRegistry(List.of(), List.of()));
         var host = TestHosts.detached(manager);
         try {
             var failed = TestHosts.create(host, "failed", session(16, "{}"));
+            var foreign =
+                    TestHosts.create(
+                            host,
+                            "foreign",
+                            session(16, "{}").toBuilder().setSessionType("arena/foreign").build());
             var unknown = TestHosts.finish(host, "unknown", session(16, "{}"));
             flush(ticks);
             assertTrue(failed.isCompletedExceptionally());
+            var error = assertThrows(CompletionException.class, foreign::join);
+            assertEquals(
+                    "Session type arena/foreign must create a " + Session.class.getName(),
+                    error.getCause().getMessage());
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_ENDED, unknown.join().getPhase());
             assertEquals(
                     Map.of(
                             "failed", JvmSessionPhase.JVM_SESSION_PHASE_FAILED,
+                            "foreign", JvmSessionPhase.JVM_SESSION_PHASE_FAILED,
                             "unknown", JvmSessionPhase.JVM_SESSION_PHASE_ENDED),
                     phases(host));
         } finally {
@@ -221,14 +240,7 @@ class SessionCreationTest {
                         };
         var manager =
                 new SessionManager(
-                        process,
-                        ticks,
-                        Map.of(
-                                "arena/default",
-                                new SessionRegistration("arena", failing),
-                                "arena/leaky",
-                                new SessionRegistration("arena", leaking)),
-                        Map.of());
+                        process, ticks, Map.of("arena/default", failing, "arena/leaky", leaking));
         var host = TestHosts.detached(manager);
         try {
             var leaky = session(16, "{}").toBuilder().setSessionType("arena/leaky").build();
@@ -260,20 +272,17 @@ class SessionCreationTest {
                 new SessionManager(
                         process,
                         ticks,
-                        Map.of(
+                        Map.<String, Supplier<Session>>of(
                                 "arena/default",
-                                new SessionRegistration(
-                                        "arena",
-                                        () ->
-                                                new Session() {
-                                                    @Override
-                                                    public CompletionStage<Void> onCreate(
-                                                            SessionScope scope) {
-                                                        instances.add(scope.createInstance());
-                                                        return creation;
-                                                    }
-                                                })),
-                        Map.of());
+                                () ->
+                                        new Session() {
+                                            @Override
+                                            public CompletionStage<Void> onCreate(
+                                                    SessionScope scope) {
+                                                instances.add(scope.createInstance());
+                                                return creation;
+                                            }
+                                        }));
         var clock = new AtomicLong();
         var host = TestHosts.withDeadline(manager, Duration.ofMillis(50), clock::get);
         try {
@@ -306,8 +315,7 @@ class SessionCreationTest {
                 new SessionManager(
                         process,
                         ticks,
-                        Map.of("arena/default", new SessionRegistration("arena", FlatSession::new)),
-                        Map.of());
+                        Map.<String, Supplier<Session>>of("arena/default", FlatSession::new));
         var clock = new AtomicLong();
         var host = TestHosts.withDeadline(manager, Duration.ofMillis(50), clock::get);
         var events = new ArrayList<SessionScope>();
@@ -336,8 +344,7 @@ class SessionCreationTest {
                 new SessionManager(
                         process,
                         ticks,
-                        Map.of("arena/default", new SessionRegistration("arena", FlatSession::new)),
-                        Map.of());
+                        Map.<String, Supplier<Session>>of("arena/default", FlatSession::new));
         var host = TestHosts.detached(manager);
         try {
             for (var index = 0; index < 300; index++) {

@@ -64,7 +64,7 @@ pub(super) fn validate(
             {
                 return Ok(None);
             }
-            let registration = read_registration(archive, "com.chunkzero.chunk.multistom.SessionProvider")?;
+            let registration = read_registration(archive, "com.chunkzero.chunk.runtime.SessionProvider")?;
             if registration.len() > 65_536 || !registration.lines().any(|line| line.trim() == configuration.provider) {
                 return Err(io::Error::other("unregistered configured session provider"));
             }

@@ -1,11 +1,11 @@
 package com.chunkzero.chunk.multistom;
 
-import com.chunkzero.chunk.multistom.internal.AppRegistry;
-import com.chunkzero.chunk.multistom.internal.ComponentRegistry;
 import com.chunkzero.chunk.multistom.internal.GameplayService;
-import com.chunkzero.chunk.multistom.internal.SessionMethodRegistry;
 import com.chunkzero.chunk.runtime.ChunkProcess;
 import com.chunkzero.chunk.runtime.ChunkSessions;
+import com.chunkzero.chunk.runtime.ComponentRegistry;
+import com.chunkzero.chunk.runtime.SessionMethodRegistry;
+import com.chunkzero.chunk.runtime.SessionRegistry;
 
 import net.minestom.server.MinecraftConstants;
 import net.minestom.server.ServerProcess;
@@ -34,19 +34,16 @@ public final class ChunkMinestom implements AutoCloseable {
     private ChunkMinestom(ChunkProcess chunk, ServerProcess server) {
         this.chunk = chunk;
         this.server = server;
-        var factories =
-                AppRegistry.load(chunk.app(), Thread.currentThread().getContextClassLoader());
-        components = ComponentRegistry.load(Thread.currentThread().getContextClassLoader());
+        var loader = Thread.currentThread().getContextClassLoader();
+        var types = SessionRegistry.load(chunk.app(), loader);
+        components = ComponentRegistry.load(loader);
         var manager =
                 new SessionManager(
                         server,
                         ticks,
-                        factories,
+                        types,
                         components,
-                        SessionMethodRegistry.load(
-                                chunk.app(),
-                                factories.keySet(),
-                                Thread.currentThread().getContextClassLoader()));
+                        SessionMethodRegistry.load(chunk.app(), types.types(), loader));
         server.setCompressionThreshold(0);
         server.connectionManager().setPlayerProvider(ManagedPlayer::new);
         sessions = chunk.host(manager);

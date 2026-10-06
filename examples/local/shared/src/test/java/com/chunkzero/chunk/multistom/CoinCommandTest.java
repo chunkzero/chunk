@@ -106,15 +106,11 @@ class CoinCommandTest {
                 new SessionManager(
                         process,
                         ticks,
-                        Map.of(
+                        Map.<String, Supplier<Session>>of(
                                 "lobby",
-                                        new SessionRegistration(
-                                                "lobby", ExampleSessions.INSTANCE::lobby),
+                                ExampleSessions.INSTANCE::lobby,
                                 "arena",
-                                        new SessionRegistration(
-                                                "arena",
-                                                () -> ExampleSessions.INSTANCE.arena("Arena"))),
-                        Map.of());
+                                () -> ExampleSessions.INSTANCE.arena("Arena")));
         var host =
                 TestHosts.detached(
                         manager,

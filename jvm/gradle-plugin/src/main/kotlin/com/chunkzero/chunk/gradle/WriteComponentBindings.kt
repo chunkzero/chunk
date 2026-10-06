@@ -69,7 +69,7 @@ abstract class WriteComponentBindings : DefaultTask() {
                     }
                 }
             }
-        val factories = validateComponents(componentFactories(methods))
+        val factories = validateComponents(componentFactories(methods), classLookup(locations))
         val sources = sourceDirectory.get().asFile
         val resources = resourceDirectory.get().asFile
         sources.deleteRecursively()
@@ -84,7 +84,7 @@ abstract class WriteComponentBindings : DefaultTask() {
             factories.map { factory ->
                 val dependencies = factory.dependencies.joinToString(", ") { "${sourceType(it)}.class" }
                 val arguments = factory.dependencies.mapIndexed { index, type -> "(${sourceType(type)}) args[$index]" }
-                "new com.chunkzero.chunk.multistom.ComponentBinding<>(${sourceType(factory.type)}.class, " +
+                "new com.chunkzero.chunk.runtime.ComponentBinding<>(${sourceType(factory.type)}.class, " +
                     "com.chunkzero.chunk.runtime.Component.Scope.${factory.scope}, java.util.List.of($dependencies), " +
                     "args -> ${sourceType(factory.owner)}.${factory.name}(${arguments.joinToString(", ")}))"
             }
@@ -93,20 +93,20 @@ abstract class WriteComponentBindings : DefaultTask() {
         source.writeText(
             """
             package $namespace;
-            public final class ChunkComponents implements com.chunkzero.chunk.multistom.ComponentProvider {
-                public java.util.Collection<com.chunkzero.chunk.multistom.ComponentBinding<?>> components() {
+            public final class ChunkComponents implements com.chunkzero.chunk.runtime.ComponentProvider {
+                public java.util.Collection<com.chunkzero.chunk.runtime.ComponentBinding<?>> components() {
                     return java.util.List.of(${bindings.joinToString(",\n")});
                 }
             }
             """.trimIndent() + "\n",
         )
-        val service = resources.resolve("META-INF/services/com.chunkzero.chunk.multistom.ComponentProvider")
+        val service = resources.resolve("META-INF/services/com.chunkzero.chunk.runtime.ComponentProvider")
         service.parentFile.mkdirs()
         service.writeText("$namespace.ChunkComponents\n")
     }
 }
 
-private fun sourceType(binary: String) = binary.replace('/', '.').replace('$', '.')
+internal fun sourceType(binary: String) = binary.replace('/', '.').replace('$', '.')
 
 private fun componentIndexes(file: File): List<String> {
     val prefix = "META-INF/chunk/components/"
@@ -137,17 +137,3 @@ private fun componentIndexes(file: File): List<String> {
         emptyList()
     }
 }
-
-private fun readClass(
-    file: File,
-    name: String,
-): ByteArray? =
-    if (file.isDirectory) {
-        file.resolve("$name.class").takeIf { it.isFile }?.readBytes()
-    } else if (file.isFile) {
-        JarFile(file).use { jar ->
-            jar.getJarEntry("$name.class")?.let { jar.getInputStream(it).use { input -> input.readAllBytes() } }
-        }
-    } else {
-        null
-    }

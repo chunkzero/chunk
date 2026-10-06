@@ -28,7 +28,7 @@ internal fun writeSessionConfigurations(
     }
     for ((session, provider) in providers) {
         val type = provider.replace('.', '/')
-        val configured = lookup.inherits(type, "com/chunkzero/chunk/multistom/ConfiguredSessionProvider")
+        val configured = lookup.inherits(type, "com/chunkzero/chunk/runtime/ConfiguredSessionProvider")
         val declared = declarations.any { it["session"].asString == session }
         require(
             configured == declared,

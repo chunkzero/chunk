@@ -5,10 +5,10 @@ import com.chunkzero.chunk.generated.CoroutineBackendClient
 import com.chunkzero.chunk.multistom.ChunkMinestom
 import com.chunkzero.chunk.multistom.CoroutineSession
 import com.chunkzero.chunk.multistom.Session
-import com.chunkzero.chunk.multistom.SessionProvider
 import com.chunkzero.chunk.multistom.SessionScope
 import com.chunkzero.chunk.multistom.coroutines
 import com.chunkzero.chunk.runtime.ChunkProcess
+import com.chunkzero.chunk.runtime.SessionProvider
 import com.chunkzero.chunk.runtime.SessionType
 import net.kyori.adventure.text.Component
 import net.minestom.server.ServerProcess
@@ -16,7 +16,7 @@ import net.minestom.server.entity.Player
 import net.minestom.server.instance.block.Block
 
 @SessionType("default")
-class Lobby : SessionProvider {
+class Lobby : SessionProvider<Session> {
     override fun create(): Session = GreetingSession()
 }
 

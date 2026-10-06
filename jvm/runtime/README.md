@@ -9,7 +9,7 @@ Apps use it together with an engine adapter:
 
 | Module                                    | Artifact                               | Contents                                                                |
 | ----------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------- |
-| `jvm/runtime`                             | `com.chunkzero.chunk:runtime`          | `ChunkProcess`, `@SessionType`, `@Component`                            |
+| `jvm/runtime`                             | `com.chunkzero.chunk:runtime`          | `ChunkProcess`, the session, method and component contracts             |
 | [`jvm/multistom`](../multistom/README.md) | `com.chunkzero.chunk:multistom`        | The session API and its runtime on the multistom Minestom fork          |
 | `jvm/multistom-kotlin`                    | `com.chunkzero.chunk:multistom-kotlin` | Coroutine adapters, covered in the multistom README                     |
 | [`jvm/minestom`](../minestom/README.md)   | `com.chunkzero.chunk:minestom`         | Login handling for apps running their own sessions on upstream Minestom |
@@ -98,6 +98,18 @@ try (var chunk = ChunkProcess.connect()) {
 - `Delivery.move(destination)` and `operationId(action)` work as `SessionScope`'s do. Session methods reach
   `SessionHandler.method`, which no session declares by default; a handler calls `SessionMethod.start()` right before
   running the method's effects and skips them if it returns false.
+
+The app build's contracts are engine-neutral, so a handler can use them too:
+
+- `SessionRegistry.load(app, loader)` loads the app's `SessionProvider<S>` services by qualified type (`app/type`).
+  `create(type, capacity, configurationJson)` decodes the creation config for a `ConfiguredSessionProvider` and requires
+  an empty one otherwise. `S` is whatever the handler accepts; check it before using the session.
+- `SessionMethodRegistry.load(app, registry.types(), loader)` loads the generated `SessionMethodBinding`s.
+  `invoke(type, method, session, argumentsJson)` validates JSON both ways and calls the session's implementation; call
+  it after `SessionMethod.start()`.
+- `ComponentRegistry.load(loader)` loads the generated `@Component` factories. `session(supplied)` opens one session's
+  components, given `BackendSession` and any types marked `@Component.Supplied`; close it when the session ends, and
+  close the registry when the process stops.
 
 [`minestom`](../minestom/README.md) handles the login side for upstream Minestom.
 

@@ -113,26 +113,27 @@ run as. The plugin runs that CLI; it never builds Rust tools or installs Node pa
 ## Session types
 
 The app's compiled classes are scanned for `@SessionType("id")`. Each annotated class must be public, concrete, have a
-public no-argument constructor and implement `SessionProvider`; an app has 1 to 128 of them, with distinct IDs, and its
-main class needs a `public static void main(String[])`. `generateChunkSessionRegistry` writes
-`META-INF/services/com.chunkzero.chunk.multistom.SessionProvider`, from which the runtime loads the providers, and a
+public no-argument constructor and implement `com.chunkzero.chunk.runtime.SessionProvider`; an app has 1 to 128 of them,
+with distinct IDs, and its main class needs a `public static void main(String[])`. `generateChunkSessionRegistry` writes
+`META-INF/services/com.chunkzero.chunk.runtime.SessionProvider`, from which the runtime loads the providers, and a
 catalog of the session type IDs for release assembly. Packaging fails unless those IDs exactly match the app's
 `implementations` in `app.ts` (by default just `default`).
 
 An implementation with a `config` validator must implement its generated interface, for example
-`LobbySessionProviders.Default`, and receives the validated configuration in `create(SessionCreation<Config>)`; one
-without must implement plain `SessionProvider`.
+`LobbySessionProviders.Default<LobbySession>`, and receives the validated configuration in
+`create(SessionCreation<Config>)`; one without must implement plain `SessionProvider<LobbySession>`. The type argument
+is the session class; the plugin only checks the contracts, while the engine decides which session classes it accepts.
 
 ## Session methods
 
 For each `sessionMethod` declared in TypeScript (see the [SDK](../../crates/chunk-build/sdk/README.md#session-methods)),
 the generated `SessionMethods` class has a single-method interface with `Args` and result types. The session class
-implements it, and the provider's `create` must declare that concrete class as its return type. From the
+implements it, and the provider's `create` must declare that public concrete class as its return type. From the
 [arena example](../../examples/arena/apps/arena/src/main/java/example/arena/Arena.java):
 
 ```java
 @SessionType("koth")
-public final class Arena implements ArenaSessionProviders.Koth {
+public final class Arena implements ArenaSessionProviders.Koth<ArenaSession> {
     @Override
     public ArenaSession create(SessionCreation<SessionConfigs.Arena.Koth.Config> creation) {
         var config = creation.config();
@@ -154,16 +155,23 @@ public final class ArenaSession extends Session implements SessionMethods.Arena.
 
 The signature is synchronous: futures and Kotlin `suspend` functions cannot implement it. Implementing a method that
 belongs to another app or session type is a build error. `generateChunkSessionRegistry` checks the implementations and
-writes `META-INF/chunk/session-methods.json` and a method provider service; `compileChunkSessionMethods` compiles
-direct-call adapters into the app, which the runtime loads without scanning the classpath.
+writes `META-INF/chunk/session-methods.json` and a `com.chunkzero.chunk.runtime.SessionMethodProvider` service;
+`compileChunkSessionMethods` compiles typed direct-call adapters into the app, such as
+`new SessionMethodBinding<>(Status.REF, ArenaSession.class, (session, args) -> session.status(args))`, which the runtime
+loads without scanning the classpath.
 
 ## Components
 
 Every module applying a Chunk plugin indexes its public static `@Component` factories after compilation
 (`generateChunkComponentIndex`). Each app then reads its own index and those in its dependencies' JARs, checks the graph
 for missing or duplicate providers, cycles and process components that depend on session ones
-(`generateChunkComponentBindings`), and compiles one provider that calls the factories directly
-(`compileChunkComponents`). See the [Minestom runtime](../multistom/README.md#components) for writing components.
+(`generateChunkComponentBindings`), and compiles one `com.chunkzero.chunk.runtime.ComponentProvider` that calls the
+factories directly (`compileChunkComponents`). See the [Minestom runtime](../multistom/README.md#components) for writing
+components.
+
+The host supplies some types to session-scoped factories itself: `BackendSession`, and any class on the app's runtime
+classpath annotated `@Component.Supplied`, such as an engine's session handle. A factory may take them only if it is
+session-scoped, and no factory may provide them.
 
 ## Testing
 

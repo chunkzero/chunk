@@ -164,22 +164,43 @@ class ChunkPluginTest {
             """
             package fixture.lobby;
             @com.chunkzero.chunk.runtime.SessionType("default")
-            public final class Duplicate implements com.chunkzero.chunk.multistom.SessionProvider {}
+            public final class Duplicate implements com.chunkzero.chunk.runtime.SessionProvider {}
         """,
         )
         assertTrue(runFailure(":apps:lobby:generateChunkSessionRegistry").output.contains("Duplicate session type"))
     }
 
     @Test
-    fun `Java methods compile after clean prerequisites and reject mismatched session contracts`() {
+    fun `Java methods compile after clean prerequisites, support generic sessions and reject mismatched contracts`() {
         methodFixture(kotlin = false)
+        run("chunkArtifacts")
+        assertMethodExecution()
+        write(
+            "apps/lobby/src/main/java/Base.java",
+            """
+            package fixture.lobby;
+            public abstract class Base<V> {
+                protected abstract V result(fixture.generated.Bindings args);
+                public V ping(fixture.generated.Bindings args) { return result(args); }
+            }
+        """,
+        )
+        write(
+            "apps/lobby/src/main/java/Game.java",
+            """
+            package fixture.lobby;
+            public final class Game<T> extends Base<String> implements fixture.generated.Ping {
+                protected String result(fixture.generated.Bindings args) { return "echo:" + args.value(); }
+            }
+        """,
+        )
         run("chunkArtifacts")
         assertMethodExecution()
         write(
             "apps/lobby/src/main/java/Game.java",
             """
             package fixture.lobby;
-            public final class Game extends com.chunkzero.chunk.multistom.Session {}
+            public final class Game {}
         """,
         )
         assertTrue(runFailure("chunkArtifacts").output.contains("must implement fixture.generated.Ping"))
@@ -219,8 +240,8 @@ class ChunkPluginTest {
             source
                 .readText()
                 .replace(
-                    "fixture.generated.LobbySessionProviders.Default",
-                    "com.chunkzero.chunk.multistom.ConfiguredSessionProvider<fixture.generated.Bindings>",
+                    "fixture.generated.LobbySessionProviders.Default<Game>",
+                    "com.chunkzero.chunk.runtime.ConfiguredSessionProvider<fixture.generated.Bindings, Game>",
                 ).replace(
                     "public Game create",
                     "public com.chunkzero.chunk.backend.api.JsonType<fixture.generated.Bindings> configurationType() { return null; } public Game create",
@@ -295,15 +316,10 @@ class ChunkPluginTest {
         fixture(kotlin)
         app("lobby", kotlin)
         val repository = File(System.getProperty("chunk.test.repository"))
-        for ((module, name) in listOf(
-            "runtime" to "Component",
-            "multistom" to "ComponentBinding",
-            "multistom" to "ComponentProvider",
-        )) {
-            val packagePath = "com/chunkzero/chunk/" + if (module == "runtime") "runtime" else "multistom"
+        for (name in listOf("Component", "ComponentBinding", "ComponentProvider")) {
             write(
-                "src/main/java/$packagePath/$name.java",
-                repository.resolve("jvm/$module/src/main/java/$packagePath/$name.java").readText(),
+                "src/main/java/com/chunkzero/chunk/runtime/$name.java",
+                repository.resolve("jvm/runtime/src/main/java/com/chunkzero/chunk/runtime/$name.java").readText(),
             )
         }
         write(
@@ -325,10 +341,10 @@ class ChunkPluginTest {
             """
             package fixture.lobby;
             public final class Verify {
-                private static java.util.Map<Class<?>, com.chunkzero.chunk.multistom.ComponentBinding<?>> bindings;
+                private static java.util.Map<Class<?>, com.chunkzero.chunk.runtime.ComponentBinding<?>> bindings;
                 public static void run() throws Exception {
                     bindings = new java.util.HashMap<>();
-                    var providers = java.util.ServiceLoader.load(com.chunkzero.chunk.multistom.ComponentProvider.class).stream().toList();
+                    var providers = java.util.ServiceLoader.load(com.chunkzero.chunk.runtime.ComponentProvider.class).stream().toList();
                     if (providers.size() != 1) throw new AssertionError("one generated app registry");
                     for (var binding : providers.getFirst().get().components()) bindings.put(binding.type(),binding);
                     if (bindings.size() != 3) throw new AssertionError("expected shared and app factories");
@@ -352,7 +368,7 @@ class ChunkPluginTest {
                 package fixture.lobby
                 import com.chunkzero.chunk.runtime.Component
                 @com.chunkzero.chunk.runtime.SessionType("default")
-                class Factory : com.chunkzero.chunk.multistom.SessionProvider
+                class Factory : com.chunkzero.chunk.runtime.SessionProvider
                 class Services {
                     companion object {
                         @JvmStatic
@@ -372,7 +388,7 @@ class ChunkPluginTest {
                 package fixture.lobby;
                 import com.chunkzero.chunk.runtime.Component;
                 @com.chunkzero.chunk.runtime.SessionType("default")
-                public final class App implements com.chunkzero.chunk.multistom.SessionProvider {
+                public final class App implements com.chunkzero.chunk.runtime.SessionProvider {
                     @Component(Component.Scope.PROCESS)
                     public static Extra extra() { return new Extra("app"); }
                     @Component(Component.Scope.SESSION)
@@ -401,10 +417,10 @@ class ChunkPluginTest {
         val repository = File(System.getProperty("chunk.test.repository"))
         for (name in listOf("SessionCreation", "ConfiguredSessionProvider", "SessionProvider")) {
             write(
-                "apps/lobby/src/main/java/com/chunkzero/chunk/multistom/$name.java",
+                "apps/lobby/src/main/java/com/chunkzero/chunk/runtime/$name.java",
                 repository
                     .resolve(
-                        "jvm/multistom/src/main/java/com/chunkzero/chunk/multistom/$name.java",
+                        "jvm/runtime/src/main/java/com/chunkzero/chunk/runtime/$name.java",
                     ).readText(),
             )
         }
@@ -417,14 +433,13 @@ class ChunkPluginTest {
                 "apps/lobby/src/main/kotlin/App.kt",
                 """
                 package fixture.lobby
-                import com.chunkzero.chunk.multistom.SessionCreation
+                import com.chunkzero.chunk.runtime.SessionCreation
                 import fixture.generated.Bindings
                 @com.chunkzero.chunk.runtime.SessionType("default")
-                class Factory : fixture.generated.LobbySessionProviders.Default {
+                class Factory : fixture.generated.LobbySessionProviders.Default<Game> {
                     override fun create(creation: SessionCreation<Bindings>) = Game()
-                    override fun create(): com.chunkzero.chunk.multistom.Session = Game()
                 }
-                class Game : com.chunkzero.chunk.multistom.Session(), fixture.generated.Ping {
+                class Game : fixture.generated.Ping {
                     override fun ping(args: Bindings): String = "echo:" + args.value()
                 }
                 fun main() { Verify.run(Factory().create(SessionCreation(32, Bindings("ok")))) }
@@ -436,11 +451,10 @@ class ChunkPluginTest {
                 """
                 package fixture.lobby;
                 @com.chunkzero.chunk.runtime.SessionType("default")
-                public final class App implements fixture.generated.LobbySessionProviders.Default {
-                    public Game create(com.chunkzero.chunk.multistom.SessionCreation<fixture.generated.Bindings> creation) { return new Game(); }
-                    public com.chunkzero.chunk.multistom.Session create() { return new Game(); }
+                public final class App implements fixture.generated.LobbySessionProviders.Default<Game> {
+                    public Game create(com.chunkzero.chunk.runtime.SessionCreation<fixture.generated.Bindings> creation) { return new Game(); }
                     public static void main(String[] args) {
-                        Verify.run(new App().create(new com.chunkzero.chunk.multistom.SessionCreation<>(32, new fixture.generated.Bindings("ok"))));
+                        Verify.run(new App().create(new com.chunkzero.chunk.runtime.SessionCreation<>(32, new fixture.generated.Bindings("ok"))));
                     }
                 }
                 """,
@@ -453,29 +467,23 @@ class ChunkPluginTest {
         app("lobby", kotlin)
         write("method-fixture", "")
         write(
-            "apps/lobby/src/main/java/com/chunkzero/chunk/multistom/Session.java",
+            "apps/lobby/src/main/java/com/chunkzero/chunk/runtime/SessionMethodBinding.java",
             """
-            package com.chunkzero.chunk.multistom;
-            public abstract class Session {}
-        """,
-        )
-        write(
-            "apps/lobby/src/main/java/com/chunkzero/chunk/multistom/SessionMethodBinding.java",
-            """
-            package com.chunkzero.chunk.multistom;
-            public final class SessionMethodBinding<A, R> {
-                private final java.util.function.BiFunction<Session,A,R> body;
-                public SessionMethodBinding(fixture.generated.Ping.Ref<A,R> ref, java.util.function.BiFunction<Session,A,R> body) { this.body=body; }
-                public R invoke(Session session, A args) { return body.apply(session,args); }
+            package com.chunkzero.chunk.runtime;
+            public final class SessionMethodBinding<S, A, R> {
+                private final Class<S> session;
+                private final java.util.function.BiFunction<S,A,R> body;
+                public SessionMethodBinding(fixture.generated.Ping.Ref<A,R> ref, Class<S> session, java.util.function.BiFunction<S,A,R> body) { this.session=session; this.body=body; }
+                public R invoke(Object target, A args) { return body.apply(session.cast(target),args); }
             }
         """,
         )
         write(
-            "apps/lobby/src/main/java/com/chunkzero/chunk/multistom/SessionMethodProvider.java",
+            "apps/lobby/src/main/java/com/chunkzero/chunk/runtime/SessionMethodProvider.java",
             """
-            package com.chunkzero.chunk.multistom;
+            package com.chunkzero.chunk.runtime;
             public interface SessionMethodProvider {
-                java.util.Collection<SessionMethodBinding<?,?>> methods();
+                java.util.Collection<SessionMethodBinding<?,?,?>> methods();
             }
         """,
         )
@@ -485,9 +493,9 @@ class ChunkPluginTest {
             package fixture.lobby;
             public final class Verify {
                 @SuppressWarnings("unchecked")
-                public static void run(com.chunkzero.chunk.multistom.Session session) {
-                    var provider=java.util.ServiceLoader.load(com.chunkzero.chunk.multistom.SessionMethodProvider.class).findFirst().orElseThrow();
-                    var method=(com.chunkzero.chunk.multistom.SessionMethodBinding<fixture.generated.Bindings,String>) provider.methods().iterator().next();
+                public static void run(Object session) {
+                    var provider=java.util.ServiceLoader.load(com.chunkzero.chunk.runtime.SessionMethodProvider.class).findFirst().orElseThrow();
+                    var method=(com.chunkzero.chunk.runtime.SessionMethodBinding<?,fixture.generated.Bindings,String>) provider.methods().iterator().next();
                     System.out.println(method.invoke(session,new fixture.generated.Bindings("ok")));
                 }
             }
@@ -499,10 +507,10 @@ class ChunkPluginTest {
                 """
                 package fixture.lobby
                 @com.chunkzero.chunk.runtime.SessionType("default")
-                class Factory : com.chunkzero.chunk.multistom.SessionProvider {
+                class Factory : com.chunkzero.chunk.runtime.SessionProvider {
                     fun create() = Game()
                 }
-                class Game : com.chunkzero.chunk.multistom.Session(), fixture.generated.Ping {
+                class Game : fixture.generated.Ping {
                     override fun ping(args: fixture.generated.Bindings): String = "echo:" + args.value()
                 }
                 fun main() { Verify.run(Factory().create()) }
@@ -514,7 +522,7 @@ class ChunkPluginTest {
                 """
                 package fixture.lobby;
                 @com.chunkzero.chunk.runtime.SessionType("default")
-                public final class App implements com.chunkzero.chunk.multistom.SessionProvider {
+                public final class App implements com.chunkzero.chunk.runtime.SessionProvider {
                     public Game create() { return new Game(); }
                     public static void main(String[] args) { Verify.run(new App().create()); }
                 }
@@ -524,7 +532,7 @@ class ChunkPluginTest {
                 "apps/lobby/src/main/java/Game.java",
                 """
                 package fixture.lobby;
-                public final class Game extends com.chunkzero.chunk.multistom.Session implements fixture.generated.Ping {
+                public final class Game implements fixture.generated.Ping {
                     public String ping(fixture.generated.Bindings args) { return "echo:" + args.value(); }
                 }
             """,
@@ -633,7 +641,7 @@ class ChunkPluginTest {
                     files['java/fixture/generated/Ping.java'] = 'package fixture.generated; public interface Ping { String ping(Bindings args); record Ref<A,R>() {} Ref<Bindings,String> REF = new Ref<>(); }'
                     methods = [{'app':'lobby','session':'default','name':'ping','interface':'fixture.generated.Ping','binary_interface':'fixture.generated.Ping','function':'ping','arguments':{'type':'object','fields':{}},'result':{'type':'string'}}]
                 if (root / 'configuration-fixture').is_file():
-                    files['java-session/lobby/fixture/generated/LobbySessionProviders.java'] = 'package fixture.generated; public final class LobbySessionProviders { public interface Default extends com.chunkzero.chunk.multistom.ConfiguredSessionProvider<Bindings> { default com.chunkzero.chunk.backend.api.JsonType<Bindings> configurationType() { return null; } } }'
+                    files['java-session/lobby/fixture/generated/LobbySessionProviders.java'] = 'package fixture.generated; public final class LobbySessionProviders { public interface Default<S> extends com.chunkzero.chunk.runtime.ConfiguredSessionProvider<Bindings, S> { default com.chunkzero.chunk.backend.api.JsonType<Bindings> configurationType() { return null; } } }'
                     configurations = [{'app':'lobby','session':'default','interface':'fixture.generated.LobbySessionProviders.Default','binary_interface':'fixture.generated.LobbySessionProviders${'$'}Default','configuration':{'type':'object','fields':{'value':{'schema':{'type':'string'}}}}}]
                 for name, content in files.items():
                     path = output / name
@@ -677,9 +685,9 @@ class ChunkPluginTest {
         """,
         )
         write(
-            "apps/$id/src/main/java/com/chunkzero/chunk/multistom/SessionProvider.java",
+            "apps/$id/src/main/java/com/chunkzero/chunk/runtime/SessionProvider.java",
             """
-            package com.chunkzero.chunk.multistom;
+            package com.chunkzero.chunk.runtime;
             public interface SessionProvider {}
         """,
         )
@@ -689,7 +697,7 @@ class ChunkPluginTest {
                 """
                 package fixture.$id
                 @com.chunkzero.chunk.runtime.SessionType("default")
-                class Factory : com.chunkzero.chunk.multistom.SessionProvider
+                class Factory : com.chunkzero.chunk.runtime.SessionProvider
                 fun main(args: Array<String>) {}
                 suspend fun result(): fixture.generated.Bindings = fixture.generated.value()
             """,
@@ -700,7 +708,7 @@ class ChunkPluginTest {
                 """
                 package fixture.$id;
                 @com.chunkzero.chunk.runtime.SessionType("default")
-                public final class App implements com.chunkzero.chunk.multistom.SessionProvider {
+                public final class App implements com.chunkzero.chunk.runtime.SessionProvider {
                     public static void main(String[] args) {}
                     public fixture.generated.Bindings value() { return fixture.generated.Client.value(); }
                 }
@@ -764,7 +772,7 @@ class ChunkPluginTest {
             JarFile(app.asJsonObject["jar"].asString).use { jar ->
                 assertTrue(jar.getJarEntry("META-INF/chunk/app.json") == null)
                 val entry =
-                    requireNotNull(jar.getJarEntry("META-INF/services/com.chunkzero.chunk.multistom.SessionProvider"))
+                    requireNotNull(jar.getJarEntry("META-INF/services/com.chunkzero.chunk.runtime.SessionProvider"))
                 val providers = jar.getInputStream(entry).bufferedReader().use { it.readLines() }
                 assertEquals(1, providers.size)
                 assertTrue(jar.getJarEntry(providers.single().replace('.', '/') + ".class") != null)

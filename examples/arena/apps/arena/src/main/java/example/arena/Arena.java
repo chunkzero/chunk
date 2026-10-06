@@ -3,14 +3,14 @@ package example.arena;
 import com.chunkzero.chunk.generated.ArenaSessionProviders;
 import com.chunkzero.chunk.generated.SessionConfigs;
 import com.chunkzero.chunk.multistom.ChunkMinestom;
-import com.chunkzero.chunk.multistom.SessionCreation;
 import com.chunkzero.chunk.runtime.ChunkProcess;
+import com.chunkzero.chunk.runtime.SessionCreation;
 import com.chunkzero.chunk.runtime.SessionType;
 
 import net.minestom.server.ServerProcess;
 
 @SessionType("koth")
-public final class Arena implements ArenaSessionProviders.Koth {
+public final class Arena implements ArenaSessionProviders.Koth<ArenaSession> {
     public static void main(String[] args) throws Exception {
         try (var chunk = ChunkProcess.connect();
                 var minestom = ChunkMinestom.attach(chunk, ServerProcess.create())) {

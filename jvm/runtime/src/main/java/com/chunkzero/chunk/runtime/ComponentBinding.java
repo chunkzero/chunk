@@ -1,6 +1,4 @@
-package com.chunkzero.chunk.multistom;
-
-import com.chunkzero.chunk.runtime.Component;
+package com.chunkzero.chunk.runtime;
 
 import org.jetbrains.annotations.ApiStatus;
 

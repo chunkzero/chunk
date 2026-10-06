@@ -14,6 +14,10 @@ import com.chunkzero.chunk.backend.api.JsonType
 import com.chunkzero.chunk.backend.api.SessionMethodRef
 import com.chunkzero.chunk.multistom.bootstrap.FlatSession
 import com.chunkzero.chunk.multistom.internal.GameplayService
+import com.chunkzero.chunk.runtime.SessionMethodBinding
+import com.chunkzero.chunk.runtime.SessionMethodRegistry
+import com.chunkzero.chunk.runtime.SessionProvider
+import com.chunkzero.chunk.runtime.SessionRegistry
 import com.chunkzero.chunk.runtime.TestHosts
 import com.google.protobuf.ByteString
 import net.minestom.server.ServerProcess
@@ -29,7 +33,6 @@ import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.function.Supplier
 
 class SessionMethodDisconnectTest {
     @Test
@@ -43,13 +46,14 @@ class SessionMethodDisconnectTest {
         val binding =
             SessionMethodBinding(
                 SessionMethodRef("lobby", "default", "record", number, number),
+                FlatSession::class.java,
             ) { _, input -> runs.incrementAndGet().toLong() + input }
         val manager =
             SessionManager(
                 minecraft,
                 ticks,
-                mapOf("lobby/default" to SessionRegistration("lobby", Supplier { FlatSession() })),
-                mapOf("lobby/default/record" to binding),
+                SessionRegistry(mapOf("lobby/default" to SessionProvider { FlatSession() })),
+                SessionMethodRegistry(listOf("lobby/default"), listOf(binding)),
             )
         val core = FakeCore()
         val host = TestHosts.linked(manager, core, System::nanoTime)
