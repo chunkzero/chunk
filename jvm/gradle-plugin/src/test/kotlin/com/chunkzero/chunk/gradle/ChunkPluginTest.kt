@@ -109,19 +109,59 @@ class ChunkPluginTest {
     }
 
     @Test
-    fun `Kotlin opt in builds a facade separately from shared Java classes`() {
+    fun `Kotlin root builds a facade separately from shared Java classes`() {
         fixture(kotlin = true)
         app("lobby", kotlin = true)
+        app("arena")
         run("chunkArtifacts")
         assertSessionRegistries(descriptor())
-        val executable = descriptor().getAsJsonArray("apps")[0].asJsonObject["jar"].asString
-        JarFile(executable).use {
+        val apps = descriptor().getAsJsonArray("apps").associate { it.asJsonObject["id"].asString to it.asJsonObject }
+        JarFile(apps.getValue("lobby")["jar"].asString).use {
             assertTrue(it.getEntry("fixture/generated/FacadeKt.class") != null)
             assertTrue(it.getEntry("fixture/generated/Bindings.class") != null)
+        }
+        JarFile(apps.getValue("arena")["jar"].asString).use {
+            assertTrue(it.getEntry("fixture/generated/FacadeKt.class") == null)
+            assertTrue(it.getEntry("kotlin/Unit.class") == null)
         }
         assertTrue(calls().contains("gen kotlin"))
         val reused = run("chunkArtifacts")
         assertTrue(reused.output.contains("Reusing configuration cache"), reused.output)
+    }
+
+    @Test
+    fun `Kotlin applied with a version in the root build enables the facade and checks compiler targets`() {
+        fixture(kotlin = true, kotlinInSettings = false)
+        app("lobby", kotlin = true)
+        run("chunkArtifacts")
+        val executable = descriptor().getAsJsonArray("apps")[0].asJsonObject["jar"].asString
+        JarFile(executable).use { assertTrue(it.getEntry("fixture/generated/FacadeKt.class") != null) }
+        directory.resolve("apps/lobby/build.gradle.kts").toFile().appendText(
+            "\nkotlin { compilerOptions { jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21 } }\n",
+        )
+        assertTrue(
+            runFailure(":apps:lobby:validateChunkJvm")
+                .output
+                .contains("compileKotlin targets Java 21 but the selected toolchain is 25"),
+        )
+    }
+
+    @Test
+    fun `Kotlin apps depend on the facade when the root applies Kotlin after they are evaluated`() {
+        fixture(kotlin = true)
+        app("lobby", kotlin = true)
+        write(
+            "build.gradle.kts",
+            """
+            plugins { id("com.chunkzero.chunk") }
+            java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
+            evaluationDependsOn(":apps:lobby")
+            apply(plugin = "org.jetbrains.kotlin.jvm")
+        """,
+        )
+        run("chunkArtifacts")
+        val executable = descriptor().getAsJsonArray("apps")[0].asJsonObject["jar"].asString
+        JarFile(executable).use { assertTrue(it.getEntry("fixture/generated/FacadeKt.class") != null) }
     }
 
     @Test
@@ -556,12 +596,27 @@ class ChunkPluginTest {
         assertEquals("echo:ok", output.trim())
     }
 
-    private fun fixture(kotlin: Boolean = false) {
+    private fun fixture(
+        kotlin: Boolean = false,
+        kotlinInSettings: Boolean = true,
+    ) {
         val kotlinVersion = System.getProperty("chunk.kotlin.version")
         val pluginVersion = System.getProperty("chunk.plugin.version")
         val pluginRepository = System.getProperty("chunk.test.plugin.repository")
-        val kotlinPlugin = if (kotlin) "id(\"org.jetbrains.kotlin.jvm\") version \"$kotlinVersion\" apply false" else ""
-        val plugin = if (kotlin) "com.chunkzero.chunk.kotlin" else "com.chunkzero.chunk"
+        val kotlinSettings =
+            if (kotlin &&
+                kotlinInSettings
+            ) {
+                "id(\"org.jetbrains.kotlin.jvm\") version \"$kotlinVersion\" apply false"
+            } else {
+                ""
+            }
+        val kotlinRoot =
+            when {
+                !kotlin -> ""
+                kotlinInSettings -> "id(\"org.jetbrains.kotlin.jvm\")"
+                else -> "id(\"org.jetbrains.kotlin.jvm\") version \"$kotlinVersion\""
+            }
         write(
             "settings.gradle.kts",
             """
@@ -572,7 +627,7 @@ class ChunkPluginTest {
                 mavenCentral()
             } }
             plugins {
-                $kotlinPlugin
+                $kotlinSettings
                 id("com.chunkzero.chunk.settings") version "$pluginVersion"
             }
             extensions.configure<ChunkSettingsExtension> {
@@ -587,7 +642,8 @@ class ChunkPluginTest {
             "build.gradle.kts",
             """
             plugins {
-                id("$plugin")
+                $kotlinRoot
+                id("com.chunkzero.chunk")
             }
             java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
         """,
@@ -603,12 +659,7 @@ class ChunkPluginTest {
         """,
         )
         write("chunk.toml", "")
-        listOf(
-            "backend-client",
-            "multistom",
-            "backend-client-kotlin",
-            "multistom-kotlin",
-        ).forEach(::module)
+        listOf("backend-client", "backend-client-kotlin").forEach(::module)
         write(
             "chunk-fixture",
             """
@@ -664,11 +715,14 @@ class ChunkPluginTest {
         toolchain: String = "java { toolchain.languageVersion = JavaLanguageVersion.of(25) }",
     ) {
         write("apps/$id/app.toml", "")
-        val plugin = if (kotlin) "com.chunkzero.chunk.kotlin" else "com.chunkzero.chunk"
+        val kotlinPlugin = if (kotlin) "id(\"org.jetbrains.kotlin.jvm\")" else ""
         write(
             "apps/$id/build.gradle.kts",
             """
-            plugins { id("$plugin") }
+            plugins {
+                $kotlinPlugin
+                id("com.chunkzero.chunk")
+            }
             $toolchain
             application { mainClass = "fixture.$id.App${if (kotlin) "Kt" else ""}" }
         """,

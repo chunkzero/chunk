@@ -5,11 +5,13 @@ backend bindings before JVM compilation, index each app's session types, session
 the finished app JARs for `chunk build` to package into a release. This is a separate Kotlin build, included by the
 repository's root build.
 
-| Plugin                         | Apply in                        | Does                                                            |
-| ------------------------------ | ------------------------------- | --------------------------------------------------------------- |
-| `com.chunkzero.chunk.settings` | `settings.gradle.kts`           | Runs `chunk inspect` and includes every app as a Gradle project |
-| `com.chunkzero.chunk`          | The root build and Java modules | Shared Java bindings, app packaging and indexing                |
-| `com.chunkzero.chunk.kotlin`   | The root build and Kotlin apps  | Everything above, plus Kotlin and the coroutine backend facade  |
+| Plugin                         | Apply in                               | Does                                                            |
+| ------------------------------ | -------------------------------------- | --------------------------------------------------------------- |
+| `com.chunkzero.chunk.settings` | `settings.gradle.kts`                  | Runs `chunk inspect` and includes every app as a Gradle project |
+| `com.chunkzero.chunk`          | The root build, apps and their modules | Shared bindings, app packaging and indexing                     |
+
+The plugins don't choose a game engine or configure Kotlin: each app adds its engine library and, for Kotlin, applies
+and configures the Kotlin plugin itself.
 
 ## Setup
 
@@ -43,8 +45,15 @@ dependencyResolutionManagement {
 rootProject.name = "my-server"
 ```
 
-The root `build.gradle.kts` and each app's `build.gradle.kts` apply a project plugin and choose a Java toolchain; apps
-also name their main class:
+The root `build.gradle.kts` and each app's `build.gradle.kts` apply `com.chunkzero.chunk` and choose a Java toolchain;
+apps also add their engine and name their main class:
+
+```kotlin
+// build.gradle.kts
+plugins { id("com.chunkzero.chunk") }
+
+java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
+```
 
 ```kotlin
 // apps/lobby/build.gradle.kts
@@ -52,20 +61,56 @@ plugins { id("com.chunkzero.chunk") }
 
 java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
 
+dependencies { implementation("com.chunkzero.chunk:multistom:0.1.0") }
+
 application { mainClass = "example.Lobby" }
 ```
 
-- Every module that applies a Chunk plugin must set its Java toolchain explicitly, to Java 25 or newer (the Minestom
-  runtime's requirement), and compile for that same version. `validateChunkJvm` fails the build otherwise; Chunk never
-  falls back to the Gradle daemon's JVM.
-- The root applies the same plugin as the apps before they do. For Kotlin apps that is `com.chunkzero.chunk.kotlin`, and
-  the Kotlin Gradle plugin's version must be declared in the settings `plugins` block, as above, so that Chunk's
-  settings plugin can see it. Java apps in a Kotlin project keep `com.chunkzero.chunk`.
-- A library module (such as a `:shared` project with common gameplay code) applies a Chunk plugin too if it declares
+- Every module that applies the Chunk plugin must set its Java toolchain explicitly, to Java 25 or newer (the Minestom
+  runtime's requirement), and compile Java and Kotlin for that same version. `validateChunkJvm` fails the build
+  otherwise; Chunk never falls back to the Gradle daemon's JVM.
+- The root applies the plugin before the apps do.
+- A library module (such as a `:shared` project with common gameplay code) applies the plugin too if it declares
   `@Component` factories, so its factories are indexed.
 
-The project plugins add the Chunk libraries at the plugin's own version: the root exports
-`com.chunkzero.chunk:backend-client`, Java apps get `multistom` and Kotlin apps `multistom-kotlin`.
+The root exports `com.chunkzero.chunk:backend-client` at the plugin's own version. The engine is the app's choice:
+`com.chunkzero.chunk:multistom` (or `multistom-kotlin` for coroutine sessions) runs sessions on the multistom fork,
+while [`com.chunkzero.chunk:minestom`](../minestom/README.md) with upstream `net.minestom:minestom` runs your own
+sessions on upstream Minestom.
+
+### Kotlin
+
+When the root project applies `org.jetbrains.kotlin.jvm`, the plugin also generates the coroutine backend facade,
+`CoroutineBackendClient`, and every module that applies Kotlin depends on it. Modules that don't apply Kotlin, such as
+Java apps in the same build, get no Kotlin dependency: the root's own classes are Java and it doesn't export the Kotlin
+standard library. Declare the Kotlin plugin's version either in the settings `plugins` block with `apply false` or in
+the root build's `plugins` block:
+
+```kotlin
+// build.gradle.kts
+plugins {
+    id("org.jetbrains.kotlin.jvm") // version in settings.gradle.kts: id("org.jetbrains.kotlin.jvm") version "2.4.10" apply false
+    id("com.chunkzero.chunk")
+}
+
+kotlin { jvmToolchain(25) }
+```
+
+```kotlin
+// apps/lobby/build.gradle.kts
+plugins {
+    id("org.jetbrains.kotlin.jvm")
+    id("com.chunkzero.chunk")
+}
+
+kotlin { jvmToolchain(25) }
+
+dependencies { implementation("com.chunkzero.chunk:multistom-kotlin:0.1.0") }
+
+application { mainClass = "example.LobbyKt" }
+```
+
+A Kotlin app in a build whose root doesn't apply Kotlin uses the Java `BackendClient`.
 
 ### Settings
 
@@ -89,22 +134,23 @@ run as. The plugin runs that CLI; it never builds Rust tools or installs Node pa
 1. Settings evaluation runs `chunk inspect` and includes each app directory as a Gradle project: `apps/games/arena`
    becomes `:apps:games:arena`. Adding an `app.ts` and a `build.gradle.kts` under `apps/` adds an app on the next build,
    including with the configuration cache. It also includes a reserved `:chunk:backend-kotlin` project under
-   `.chunk/gradle/`.
+   `.chunk/gradle/`, which stays empty unless the root applies Kotlin.
 2. `generateChunkBackend`, on the root, runs `chunk gen` before any JVM compilation. The compiled backend goes to
    `.chunk/build/backend` and JVM sources to `.chunk/generated/jvm`: `java/` (models, references, `SessionMethods`,
    `SessionConfigs`, `Destinations`, `Vars`), `java-client/` (`BackendClient`), `java-session/<app>/` (configured
    provider interfaces) and, for Kotlin, `kotlin/` (`CoroutineBackendClient`). The task always runs, since the compiler
    resolves TypeScript dependencies itself; unchanged output keeps JVM compilation incremental.
-3. The root compiles `java/` and `java-client/` once into the shared `chunk-backend` JAR. With the Kotlin plugin,
+3. The root compiles `java/` and `java-client/` once into the shared `chunk-backend` JAR. When the root applies Kotlin,
    `:chunk:backend-kotlin` compiles the coroutine facade into `chunk-backend-kotlin`. Apps depend on these JARs, so a
    Java app has no Kotlin dependency.
 4. Each app applies `application` and Shadow, compiles, and is indexed from its bytecode (below). Its `shadowJar` is an
    executable JAR with every dependency.
 5. Each app's Anvil worlds (`format: "anvil"` in `chunk inspect`) are converted to
    `.chunk/build/worlds/<app>/<name>.polar` by `convertChunkWorld_<name>`, cropped to the world's `chunks` if given. The
-   converter runs in the app's Java toolchain with the Minestom and Polar of its runtime classpath, leaving out the
-   build's own projects so code changes don't reconvert. It rejects a save whose data version isn't the runtime's
-   Minecraft version. The conversion is cacheable and its output is the same bytes for the same save.
+   converter, `com.chunkzero.chunk:world-converter` at the plugin's version, runs in the app's Java toolchain on the
+   app's runtime classpath, leaving out the build's own projects so code changes don't reconvert. It uses the app's
+   Minestom, upstream or multistom, and the app's Polar if it has one. It rejects a save whose data version isn't that
+   Minestom's Minecraft version. The conversion is cacheable and its output is the same bytes for the same save.
 6. `chunkArtifacts`, on the root, builds every app and writes `.chunk/build/jvm/artifacts.json`: each app's JAR, session
    types and Java version, and the Java executable of the newest toolchain. `chunk build` runs this task and packages
    the result into a release. `chunk dev` passes `-Pchunk.dev=true`, which skips the shadow JAR and lists each app's

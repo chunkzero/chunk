@@ -3,6 +3,10 @@ package com.chunkzero.chunk.gradle
 import org.gradle.api.DefaultTask
 import org.gradle.api.Project
 import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.gradle.api.attributes.Bundling
+import org.gradle.api.attributes.Category
+import org.gradle.api.attributes.LibraryElements
+import org.gradle.api.attributes.Usage
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.RegularFileProperty
@@ -24,7 +28,7 @@ import org.gradle.process.ExecOperations
 import java.io.File
 import javax.inject.Inject
 
-/** Converts an Anvil save to Polar with the converter in the app's runtime. */
+/** Converts an Anvil save to Polar with Chunk's world converter on the app's runtime classpath. */
 @CacheableTask
 abstract class ConvertAnvilWorld : DefaultTask() {
     @get:InputDirectory
@@ -55,7 +59,7 @@ abstract class ConvertAnvilWorld : DefaultTask() {
                     .get()
                     .executablePath.asFile.absolutePath
             classpath = this@ConvertAnvilWorld.classpath
-            mainClass.set("com.chunkzero.chunk.multistom.internal.AnvilConverter")
+            mainClass.set("com.chunkzero.chunk.worldconverter.AnvilConverter")
             jvmArgs("--enable-native-access=ALL-UNNAMED")
             args(source.get().asFile.absolutePath, output.get().asFile.absolutePath)
             args(chunks.get())
@@ -65,8 +69,10 @@ abstract class ConvertAnvilWorld : DefaultTask() {
 
 /**
  * Converts each of the app's Anvil worlds to `.chunk/build/worlds/<app>/<name>.polar`, as part of
- * `chunkArtifacts`. The converter runs on the app's resolved runtime classpath without the build's
- * own projects, so it matches the app's Minestom and Polar and app code changes don't reconvert.
+ * `chunkArtifacts`. The converter, `com.chunkzero.chunk:world-converter` at the plugin's version,
+ * runs on the app's resolved runtime classpath without the build's own projects, so it uses the
+ * app's Minestom (upstream or multistom) and app code changes don't reconvert. Its Polar resolves
+ * to the app's version when the app has one.
  */
 internal fun configureWorlds(
     project: Project,
@@ -74,8 +80,22 @@ internal fun configureWorlds(
     app: AppMetadata,
 ) {
     if (app.anvilWorlds.isEmpty()) return
+    val runtimeClasspath = project.configurations.named("runtimeClasspath")
+    val converter =
+        project.configurations.detachedConfiguration(project.dependencies.create(framework("world-converter"))).apply {
+            shouldResolveConsistentlyWith(runtimeClasspath.get())
+            attributes {
+                attribute(Usage.USAGE_ATTRIBUTE, project.objects.named(Usage::class.java, Usage.JAVA_RUNTIME))
+                attribute(Category.CATEGORY_ATTRIBUTE, project.objects.named(Category::class.java, Category.LIBRARY))
+                attribute(
+                    LibraryElements.LIBRARY_ELEMENTS_ATTRIBUTE,
+                    project.objects.named(LibraryElements::class.java, LibraryElements.JAR),
+                )
+                attribute(Bundling.BUNDLING_ATTRIBUTE, project.objects.named(Bundling::class.java, Bundling.EXTERNAL))
+            }
+        }
     val runtime =
-        project.configurations.named("runtimeClasspath").map { configuration ->
+        runtimeClasspath.map { configuration ->
             configuration.incoming
                 .artifactView {
                     componentFilter { it !is ProjectComponentIdentifier || it.build.buildPath != ":" }
@@ -90,7 +110,7 @@ internal fun configureWorlds(
                 description = "Convert the Anvil world ${world.name} to Polar"
                 source.set(directory.resolve(world.source))
                 chunks.set(world.chunks)
-                classpath.from(runtime)
+                classpath.from(converter, runtime)
                 this.launcher.set(launcher)
                 output.set(directory.resolve(".chunk/build/worlds/${app.id}/${world.name}.polar"))
             }

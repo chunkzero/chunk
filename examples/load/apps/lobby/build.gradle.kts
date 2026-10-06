@@ -1,8 +1,13 @@
 plugins {
-    id("com.chunkzero.chunk.kotlin")
+    id("org.jetbrains.kotlin.jvm")
+    id("com.chunkzero.chunk")
 }
 
-java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
-kotlin { compilerOptions { allWarningsAsErrors = true } }
+kotlin {
+    jvmToolchain(25)
+    compilerOptions { allWarningsAsErrors = true }
+}
+
+dependencies { implementation("com.chunkzero.chunk:multistom-kotlin:${libs.versions.chunk.get()}") }
 
 application { mainClass = "com.chunkzero.chunk.example.load.LobbyKt" }

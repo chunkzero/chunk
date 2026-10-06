@@ -1,4 +1,4 @@
-package com.chunkzero.chunk.multistom.internal;
+package com.chunkzero.chunk.worldconverter;
 
 import net.hollowcube.polar.PolarChunk;
 import net.hollowcube.polar.PolarDataConverter;
@@ -6,10 +6,7 @@ import net.hollowcube.polar.PolarSection;
 import net.hollowcube.polar.PolarWorld;
 import net.hollowcube.polar.PolarWriter;
 import net.kyori.adventure.nbt.BinaryTagIO;
-import net.minestom.server.MinecraftConstants;
-import net.minestom.server.ServerProcess;
 import net.minestom.server.instance.Chunk;
-import net.minestom.server.instance.InstanceContainer;
 import net.minestom.server.instance.anvil.AnvilLoader;
 import net.minestom.server.instance.block.Block;
 import net.minestom.server.instance.light.LightCompute;
@@ -29,14 +26,13 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.function.IntFunction;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Converts an Anvil save's overworld to a Polar world for the Gradle plugin, with this runtime's
- * Minestom and Polar. The same save converts to the same bytes.
+ * Converts an Anvil save's overworld to a Polar world for the Gradle plugin, with the Minestom
+ * (upstream or multistom) on the classpath. The same save converts to the same bytes.
  */
 @ApiStatus.Internal
 public final class AnvilConverter {
@@ -49,7 +45,7 @@ public final class AnvilConverter {
             new PolarDataConverter() {
                 @Override
                 public int dataVersion() {
-                    return MinecraftConstants.DATA_VERSION;
+                    return Engine.DATA_VERSION;
                 }
             };
 
@@ -94,14 +90,12 @@ public final class AnvilConverter {
                             : save + " has no dimensions/minecraft/overworld/region directory");
         }
         var chunks = new ArrayList<PolarChunk>();
-        try (var process = ServerProcess.create()) {
-            process.exceptionManager()
-                    .setExceptionHandler(
-                            error -> {
-                                throw new IllegalArgumentException(error.getMessage(), error);
-                            });
-            var instance =
-                    new InstanceContainer(process, UUID.randomUUID(), DimensionType.OVERWORLD);
+        try (var engine =
+                new Engine(
+                        error -> {
+                            throw new IllegalArgumentException(error.getMessage(), error);
+                        })) {
+            var instance = engine.overworld();
             var loader = new AnvilLoader(save, DimensionType.OVERWORLD.key());
             for (var region : regions(regions)) {
                 for (int z = 0; z < 32; z++) {
@@ -126,7 +120,7 @@ public final class AnvilConverter {
                                     "Chunk %d, %d of %s".formatted(chunkX, chunkZ, save));
                             chunk.lockReadLock();
                             try {
-                                chunks.add(polar(process.registries().biome(), chunk));
+                                chunks.add(polar(engine.process().registries().biome(), chunk));
                             } finally {
                                 chunk.unlockReadLock();
                             }
@@ -144,7 +138,7 @@ public final class AnvilConverter {
         var world =
                 new PolarWorld(
                         PolarWorld.LATEST_VERSION,
-                        MinecraftConstants.DATA_VERSION,
+                        Engine.DATA_VERSION,
                         PolarWorld.CompressionType.ZSTD,
                         (byte) MIN_SECTION,
                         (byte) MAX_SECTION,
@@ -165,20 +159,20 @@ public final class AnvilConverter {
     }
 
     private static void check(int version, String subject) {
-        if (version != MinecraftConstants.DATA_VERSION)
+        if (version != Engine.DATA_VERSION)
             throw new IllegalArgumentException(
                     "%s has data version %d, but the runtime targets Minecraft %s (data version %d). %s"
                             .formatted(
                                     subject,
                                     version,
-                                    MinecraftConstants.VERSION_NAME,
-                                    MinecraftConstants.DATA_VERSION,
+                                    Engine.VERSION_NAME,
+                                    Engine.DATA_VERSION,
                                     upgrade()));
     }
 
     private static String upgrade() {
         return "Open it in Minecraft "
-                + MinecraftConstants.VERSION_NAME
+                + Engine.VERSION_NAME
                 + ", save it and build again; Optimize World upgrades every chunk.";
     }
 

@@ -63,17 +63,17 @@ fn create(options: &Options) -> io::Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "project directory must have a UTF-8 name"))?;
-    let (plugin, settings, app_build, gameplay, gameplay_path) = match options.language {
+    let (settings, root_build, app_build, gameplay, gameplay_path) = match options.language {
         Language::Java => (
-            "com.chunkzero.chunk",
             include_str!("../templates/java/settings.gradle.kts"),
+            include_str!("../templates/java/build.gradle.kts"),
             include_str!("../templates/java/app.gradle.kts"),
             include_str!("../templates/java/Lobby.java"),
             "apps/lobby/src/main/java/example/Lobby.java",
         ),
         Language::Kotlin => (
-            "com.chunkzero.chunk.kotlin",
             include_str!("../templates/kotlin/settings.gradle.kts"),
+            include_str!("../templates/kotlin/build.gradle.kts"),
             include_str!("../templates/kotlin/app.gradle.kts"),
             include_str!("../templates/kotlin/Lobby.kt"),
             "apps/lobby/src/main/kotlin/example/Lobby.kt",
@@ -90,18 +90,16 @@ fn create(options: &Options) -> io::Result<()> {
         .replace("\"@KOTLIN_VERSION@\"", &kotlin(&toolchain.versions.kotlin))
         .replace("\"@FOOJAY_VERSION@\"", &kotlin(&toolchain.versions.foojay))
         .replace("\"@PROJECT_NAME@\"", &kotlin(name));
+    let app_build = app_build.replace("@CHUNK_VERSION@", &toolchain.versions.chunk);
     let readme = include_str!("../templates/common/README.md").replace("@PROJECT_NAME@", name);
-    let root_build = format!(
-        "plugins {{\n    id(\"{plugin}\")\n}}\n\njava {{ toolchain.languageVersion = JavaLanguageVersion.of(25) }}\n"
-    );
 
     let staging = tempfile::tempdir()?;
     for (name, content) in COMMON.iter().copied().chain([
         ("settings.gradle.kts", settings.as_str()),
         ("README.md", &readme),
-        ("build.gradle.kts", &root_build),
+        ("build.gradle.kts", root_build),
         ("gradle.properties", &properties),
-        ("apps/lobby/build.gradle.kts", app_build),
+        ("apps/lobby/build.gradle.kts", &app_build),
         (gameplay_path, gameplay),
     ]) {
         let target = staging.path().join(name);

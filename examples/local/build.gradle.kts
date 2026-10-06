@@ -1,5 +1,6 @@
 plugins {
-    id("com.chunkzero.chunk.kotlin")
+    id("org.jetbrains.kotlin.jvm")
+    id("com.chunkzero.chunk")
 }
 
-java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
+kotlin { jvmToolchain(25) }
