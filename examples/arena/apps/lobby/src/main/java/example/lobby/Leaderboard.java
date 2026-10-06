@@ -4,7 +4,7 @@ import com.chunkzero.chunk.backend.client.QueryResult;
 import com.chunkzero.chunk.backend.client.WatchState;
 import com.chunkzero.chunk.generated.BackendClient;
 import com.chunkzero.chunk.generated.BackendTypes.Shared.Stats.LeaderboardResultItem;
-import com.chunkzero.chunk.runtime.SessionScope;
+import com.chunkzero.chunk.multistom.SessionScope;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.TextComponent;

@@ -84,7 +84,7 @@ abstract class WriteComponentBindings : DefaultTask() {
             factories.map { factory ->
                 val dependencies = factory.dependencies.joinToString(", ") { "${sourceType(it)}.class" }
                 val arguments = factory.dependencies.mapIndexed { index, type -> "(${sourceType(type)}) args[$index]" }
-                "new com.chunkzero.chunk.runtime.ComponentBinding<>(${sourceType(factory.type)}.class, " +
+                "new com.chunkzero.chunk.multistom.ComponentBinding<>(${sourceType(factory.type)}.class, " +
                     "com.chunkzero.chunk.runtime.Component.Scope.${factory.scope}, java.util.List.of($dependencies), " +
                     "args -> ${sourceType(factory.owner)}.${factory.name}(${arguments.joinToString(", ")}))"
             }
@@ -93,14 +93,14 @@ abstract class WriteComponentBindings : DefaultTask() {
         source.writeText(
             """
             package $namespace;
-            public final class ChunkComponents implements com.chunkzero.chunk.runtime.ComponentProvider {
-                public java.util.Collection<com.chunkzero.chunk.runtime.ComponentBinding<?>> components() {
+            public final class ChunkComponents implements com.chunkzero.chunk.multistom.ComponentProvider {
+                public java.util.Collection<com.chunkzero.chunk.multistom.ComponentBinding<?>> components() {
                     return java.util.List.of(${bindings.joinToString(",\n")});
                 }
             }
             """.trimIndent() + "\n",
         )
-        val service = resources.resolve("META-INF/services/com.chunkzero.chunk.runtime.ComponentProvider")
+        val service = resources.resolve("META-INF/services/com.chunkzero.chunk.multistom.ComponentProvider")
         service.parentFile.mkdirs()
         service.writeText("$namespace.ChunkComponents\n")
     }

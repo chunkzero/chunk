@@ -8,7 +8,7 @@ How the chunk SDK is packaged, installed and published. A release of the SDK has
   TypeScript SDK, the project templates, the Gradle wrapper and the version pins that `chunk create` writes.
 - **The JVM artifacts**, published to `https://maven.chunkzero.com` (nightlies to
   `https://maven.chunkzero.com/nightlies`) under `com.chunkzero.chunk`: `proto`, `backend-api`, `backend-client`,
-  `backend-client-kotlin`, `runtime`, `runtime-minestom`, `runtime-minestom-kotlin`, the Gradle plugin and its three
+  `backend-client-kotlin`, `runtime`, `multistom`, `multistom-kotlin`, `minestom`, the Gradle plugin and its three
   plugin markers. Each library has `-sources.jar` and `-javadoc.jar` (Dokka HTML) artifacts. Projects resolve these
   through Gradle; the CLI archives contain no JARs.
 

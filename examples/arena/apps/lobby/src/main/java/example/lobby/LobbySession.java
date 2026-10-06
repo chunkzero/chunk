@@ -4,9 +4,9 @@ import com.chunkzero.chunk.backend.api.PlayerId;
 import com.chunkzero.chunk.generated.BackendClient;
 import com.chunkzero.chunk.generated.BackendTypes.Shared.Stats.MineResult;
 import com.chunkzero.chunk.generated.Worlds;
-import com.chunkzero.chunk.runtime.Session;
-import com.chunkzero.chunk.runtime.SessionScope;
-import com.chunkzero.chunk.runtime.assets.Assets;
+import com.chunkzero.chunk.multistom.Session;
+import com.chunkzero.chunk.multistom.SessionScope;
+import com.chunkzero.chunk.multistom.assets.Assets;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;

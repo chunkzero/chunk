@@ -38,7 +38,7 @@ impl Toolchain {
             for name in super::WRAPPER
                 .iter()
                 .map(|(name, _)| *name)
-                .chain(["jvm/gradle-plugin/settings.gradle.kts", "jvm/runtime-minestom/build.gradle.kts"])
+                .chain(["jvm/gradle-plugin/settings.gradle.kts", "jvm/multistom/build.gradle.kts"])
             {
                 if !source.join(name).is_file() {
                     return Err(io::Error::new(io::ErrorKind::NotFound, format!("Chunk checkout is missing {name}")));

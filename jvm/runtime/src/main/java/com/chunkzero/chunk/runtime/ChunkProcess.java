@@ -15,6 +15,7 @@ import com.chunkzero.chunk.runtime.control.ProcessState;
 
 import org.jetbrains.annotations.Nullable;
 
+import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -30,6 +31,7 @@ public final class ChunkProcess implements AutoCloseable {
     private final ProcessHealth health = new ProcessHealth(ticks);
     private final CompletableFuture<Void> shutdown = new CompletableFuture<>();
     private volatile @Nullable CoreLink link;
+    private volatile @Nullable ChunkSessions sessions;
     private @Nullable ProcessState state;
     private String playerEndpoint = "";
     private int protocol;
@@ -66,7 +68,8 @@ public final class ChunkProcess implements AutoCloseable {
         }
     }
 
-    String app() {
+    /** The ID of the app this process runs. */
+    public String app() {
         return environment.appId();
     }
 
@@ -108,6 +111,71 @@ public final class ChunkProcess implements AutoCloseable {
         health.tick(sessions, players);
     }
 
+    /** Records one engine tick; core watches tick progress to tell a stalled JVM. */
+    public void tick() {
+        var current = sessions;
+        if (current == null) progress(0, 0);
+        else progress(current.activeCount(), current.players());
+    }
+
+    /**
+     * Runs the sessions, deliveries and session methods core assigns this JVM through {@code
+     * handler}. Call it once, before {@link #bind(int, int)}.
+     */
+    public synchronized ChunkSessions host(SessionHandler handler) {
+        if (closed || sessions != null)
+            throw new IllegalStateException("Sessions already hosted or process closed");
+        var hosted =
+                ChunkSessions.linked(
+                        handler,
+                        new ChunkSessions.Link() {
+                            @Override
+                            public boolean acceptsWork() {
+                                return isReady();
+                            }
+
+                            @Override
+                            public BackendSession backend(String session) {
+                                return ChunkProcess.this.backend(session);
+                            }
+
+                            @Override
+                            public CompletionStage<MoveResult> move(
+                                    String delivery, Position generation, Destination destination) {
+                                return ChunkProcess.this.move(delivery, generation, destination);
+                            }
+
+                            @Override
+                            public void methodResult(String operation, JvmMethodResult result) {
+                                ChunkProcess.this.methodResult(operation, result);
+                            }
+
+                            @Override
+                            public void flush() {
+                                ChunkProcess.this.flush();
+                            }
+                        });
+        sessions = hosted;
+        return hosted;
+    }
+
+    /**
+     * Names the engine's player listener: it accepts the gateway on {@link #playerAddress()} at
+     * {@code port}, speaking Minecraft protocol {@code protocol}. The engine must leave compression
+     * and encryption to the gateway.
+     */
+    public synchronized void bind(int port, int protocol) {
+        var hosted = sessions;
+        if (hosted == null) throw new IllegalStateException("Host sessions before binding");
+        if (port < 1 || port > 65_535) throw new IllegalArgumentException("Invalid port");
+        var address = playerAddress();
+        var host =
+                address instanceof Inet6Address
+                        ? "[" + address.getHostAddress() + "]"
+                        : address.getHostAddress();
+        bind(host + ":" + port, protocol, hosted.state());
+    }
+
     /** Reports session and delivery changes to core. */
     void flush() {
         var current = link;
@@ -140,8 +208,8 @@ public final class ChunkProcess implements AutoCloseable {
         return health.acceptsWork();
     }
 
-    /** The address engine adapters serve players on. */
-    InetAddress playerAddress() {
+    /** The address the engine's player listener binds; only the gateway connects to it. */
+    public InetAddress playerAddress() {
         return environment.playerAddress();
     }
 
@@ -205,6 +273,8 @@ public final class ChunkProcess implements AutoCloseable {
         shutdown.complete(null);
         var current = link;
         if (current != null) current.close();
+        var hosted = sessions;
+        if (hosted != null) hosted.close();
         backend.close();
     }
 }

@@ -33,7 +33,7 @@ internal fun writeSessionMethods(
     val implementations =
         providers.mapValues { (_, provider) ->
             val type = provider.replace('.', '/')
-            creates(type, lookup.inherits(type, "com/chunkzero/chunk/runtime/ConfiguredSessionProvider"))
+            creates(type, lookup.inherits(type, "com/chunkzero/chunk/multistom/ConfiguredSessionProvider"))
         }
     val bindings =
         declarations.map { method ->
@@ -42,7 +42,7 @@ internal fun writeSessionMethods(
             val implementation = implementations[session]
             require(
                 implementation != null && lookup(implementation)?.publicConcrete == true &&
-                    lookup.inherits(implementation, "com/chunkzero/chunk/runtime/Session"),
+                    lookup.inherits(implementation, "com/chunkzero/chunk/multistom/Session"),
             ) {
                 "Session $app/$session method $name requires a provider creation method with a public concrete Session return type"
             }
@@ -51,7 +51,7 @@ internal fun writeSessionMethods(
                 "Session $app/$session must implement ${method["interface"].asString} for method $name"
             }
             val type = method["interface"].asString
-            "new com.chunkzero.chunk.runtime.SessionMethodBinding<>($type.REF, " +
+            "new com.chunkzero.chunk.multistom.SessionMethodBinding<>($type.REF, " +
                 "(session, args) -> (($type) session).${method["function"].asString}(args))"
         }
     for ((session, implementation) in implementations) {
@@ -62,7 +62,7 @@ internal fun writeSessionMethods(
     }
     sources.deleteRecursively()
     sources.mkdirs()
-    val service = resources.resolve("META-INF/services/com.chunkzero.chunk.runtime.SessionMethodProvider")
+    val service = resources.resolve("META-INF/services/com.chunkzero.chunk.multistom.SessionMethodProvider")
     service.delete()
     if (bindings.isNotEmpty()) {
         val type = "com.chunkzero.chunk.generated.sessions.a${app.toByteArray().joinToString(
@@ -73,8 +73,8 @@ internal fun writeSessionMethods(
         file.writeText(
             """
             package ${type.substringBeforeLast('.')};
-            public final class ChunkSessionMethods implements com.chunkzero.chunk.runtime.SessionMethodProvider {
-                public java.util.Collection<com.chunkzero.chunk.runtime.SessionMethodBinding<?, ?>> methods() {
+            public final class ChunkSessionMethods implements com.chunkzero.chunk.multistom.SessionMethodProvider {
+                public java.util.Collection<com.chunkzero.chunk.multistom.SessionMethodBinding<?, ?>> methods() {
                     return java.util.List.of(${bindings.joinToString(",\n")});
                 }
             }

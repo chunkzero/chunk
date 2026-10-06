@@ -20,7 +20,7 @@ class ChunkPlugin : Plugin<Project> {
                 "Apply com.chunkzero.chunk to the root project before its consumers"
             }
             project.dependencies.add("implementation", project.dependencies.project(mapOf("path" to ":")))
-            project.dependencies.add("implementation", framework("runtime-minestom"))
+            project.dependencies.add("implementation", framework("multistom"))
         }
         val app = configuration.apps.find { it.projectPath == project.path }
         configureModule(project, app?.id.orEmpty())

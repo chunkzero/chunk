@@ -65,7 +65,7 @@ application { mainClass = "example.Lobby" }
   `@Component` factories, so its factories are indexed.
 
 The project plugins add the Chunk libraries at the plugin's own version: the root exports
-`com.chunkzero.chunk:backend-client`, Java apps get `runtime-minestom` and Kotlin apps `runtime-minestom-kotlin`.
+`com.chunkzero.chunk:backend-client`, Java apps get `multistom` and Kotlin apps `multistom-kotlin`.
 
 ### Settings
 
@@ -115,7 +115,7 @@ run as. The plugin runs that CLI; it never builds Rust tools or installs Node pa
 The app's compiled classes are scanned for `@SessionType("id")`. Each annotated class must be public, concrete, have a
 public no-argument constructor and implement `SessionProvider`; an app has 1 to 128 of them, with distinct IDs, and its
 main class needs a `public static void main(String[])`. `generateChunkSessionRegistry` writes
-`META-INF/services/com.chunkzero.chunk.runtime.SessionProvider`, from which the runtime loads the providers, and a
+`META-INF/services/com.chunkzero.chunk.multistom.SessionProvider`, from which the runtime loads the providers, and a
 catalog of the session type IDs for release assembly. Packaging fails unless those IDs exactly match the app's
 `implementations` in `app.ts` (by default just `default`).
 
@@ -163,7 +163,7 @@ Every module applying a Chunk plugin indexes its public static `@Component` fact
 (`generateChunkComponentIndex`). Each app then reads its own index and those in its dependencies' JARs, checks the graph
 for missing or duplicate providers, cycles and process components that depend on session ones
 (`generateChunkComponentBindings`), and compiles one provider that calls the factories directly
-(`compileChunkComponents`). See the [Minestom runtime](../runtime-minestom/README.md#components) for writing components.
+(`compileChunkComponents`). See the [Minestom runtime](../multistom/README.md#components) for writing components.
 
 ## Testing
 

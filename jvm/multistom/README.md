@@ -1,0 +1,234 @@
+# Multistom runtime
+
+The session API gameplay code is written against, and the adapter that runs it on [Minestom](https://minestom.net).
+`ChunkMinestom` attaches an app-owned Minestom `ServerProcess` to a [`ChunkProcess`](../runtime/README.md), creates
+sessions when core asks, admits the players core delivers, and runs session methods. `jvm/multistom-kotlin` adds
+coroutine adapters, described [below](#kotlin).
+
+Minestom comes from [chunkzero/multistom](https://github.com/chunkzero/multistom), pinned to a nightly of
+`com.chunkzero.multistom:multistom` from `https://maven.chunkzero.com/nightlies`. It and the gateway target Minecraft
+Java Edition 26.2.
+
+## Sessions
+
+A session is one gameplay instance of a session type, and one JVM runs several. Each session type is a `SessionProvider`
+annotated with its ID, which must match an implementation in the app's `app.ts` (`default` unless it declares others).
+The provider creates fresh state for every session. From the Java project template:
+
+```java
+@SessionType("default")
+public final class Lobby implements SessionProvider {
+    @Override
+    public Session create() {
+        return new GreetingSession();
+    }
+
+    private static final class GreetingSession extends Session {
+        private SessionScope scope;
+        private BackendClient backend;
+
+        @Override
+        public CompletionStage<Void> onCreate(SessionScope scope) {
+            this.scope = scope;
+            backend = new BackendClient(Objects.requireNonNull(scope.getBackend()));
+            scope.createInstance()
+                    .setGenerator(unit -> unit.modifier().fillHeight(0, 40, Block.GRASS_BLOCK));
+            return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public CompletionStage<Void> onJoin(Player player) {
+            CompletableFuture<MessageResult> message =
+                    backend.shared().greetings().message(new MessageArgs(player.getUsername()));
+            return message.thenCompose(
+                    result ->
+                            scope.onTick(
+                                    () -> player.sendMessage(Component.text(result.message()))));
+        }
+    }
+}
+```
+
+The `main` method that starts the process is shown in the [runtime README](../runtime/README.md#process-lifecycle).
+
+An implementation with a `config` validator in `app.ts` implements its generated interface instead and receives the
+validated value, as the arena in the
+[local example](../../examples/local/apps/games/arena/src/main/kotlin/com/chunkzero/chunk/example/arena/ArenaSessions.kt)
+does:
+
+```kotlin
+@SessionType("default")
+class ArenaSessions : ArenaSessionProviders.Default {
+    override fun create(creation: SessionCreation<SessionConfigs.Arena.Default.Config>) =
+        ExampleSessions.arena("${creation.config().label()} (${creation.maxPlayers()} slots)")
+}
+```
+
+### Lifecycle
+
+`Session` has four hooks, each returning a `CompletionStage<Void>` and starting on the process tick thread. Never block
+that thread; continue asynchronous work on it with `scope.onTick(...)`.
+
+- `onCreate(scope)` builds the session. The session accepts players once the stage completes and it owns at least one
+  instance.
+- `onJoin(player)` runs after Minestom has spawned the player, so it can send UI and start backend calls. The player
+  counts as arrived once the stage completes and the client acknowledges its position.
+- `onLeave(player)` runs when a player leaves or moves elsewhere. The player stays the backend caller until it settles,
+  so saving on leave works.
+- `onFinish()` runs when the session ends and is awaited before its resources close; put final result writes here.
+
+`scope.finish()` asks for the session to end. Don't await it from a hook that ending itself waits for.
+
+### Session scope
+
+`SessionScope` owns everything a session creates and cleans it up when the session ends:
+
+| Method                                            | Use                                                                                            |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `createInstance()`, `getInstances()`              | Worlds owned by the session, unregistered with their entities at the end                       |
+| `registerSharedInstance(view)`                    | A view of a container the session doesn't own, unregistered at the end; the container stays    |
+| `getEvents()`                                     | This session's event node: its lifecycle events, its players' events and its instances' events |
+| `getScheduler()`, `repeatEvery(interval, action)` | Tasks on the tick thread, cancelled at the end                                                 |
+| `onTick(action)`                                  | Run code on the tick thread from any thread                                                    |
+| `own(closeable)`, `own(player, closeable)`        | Close a resource when the session ends, or when that player leaves                             |
+| `resource(type, factory)`                         | One owned resource per class, created on first use                                             |
+| `component(type)`                                 | A declared [component](#components)                                                            |
+| `getBackend()`                                    | The session's backend client                                                                   |
+| `operationId(player, action)`                     | A stable mutation ID for one action on this player's current delivery                          |
+| `move(player, destination)`                       | Send an admitted player to a destination; see [Moving players](#moving-players)                |
+| `finish()`                                        | Ask for the session to end                                                                     |
+| `getProcess()`                                    | The Minestom process shared by the app's sessions                                              |
+
+Scope methods run on the tick thread. Sessions share the process's memory, threads and failures: a scope cleans up after
+a session but does not isolate it. Anything registered directly on the process needs its own cleanup. A process runs at
+most 256 sessions.
+
+### Backend calls
+
+`scope.getBackend()` calls core as this session. Wrap it in the generated `BackendClient` (see
+[backend-client](../backend-client/README.md)) and resume on the tick thread before touching the world, as `onJoin`
+above does. For calls that name a player as the caller, bind a child client and let the player's departure close it:
+
+```java
+var playerBackend =
+        new BackendClient(
+                scope.own(player, scope.getBackend().forPlayer(new PlayerId(player.getUuid().toString()))));
+```
+
+Mutations need an `OperationId`. `scope.operationId(player, "coin-" + sequence)` gives one that stays the same for that
+action during the player's current delivery; retry an uncertain mutation with the same ID and arguments, within the 24
+hours the backend retains its outcome.
+
+### Moving players
+
+`scope.move(player, destination)` asks core to send a player this JVM hosts to a destination, through the destination's
+capacity and overflow policy like a command's `ctx.routing.enter`. The generated `Destinations` class names each app's
+destinations as declared in `app.ts`:
+
+```java
+scope.move(player, Destinations.Arena.large)
+        .thenAccept(result -> {
+            if (result != MoveResult.ACCEPTED) player.sendMessage("Can't go there: " + result);
+        });
+```
+
+Core fences the move to the player's current delivery here: it moves only a player whose arrived claim is on this JVM,
+at the generation this JVM admitted them with. `MoveResult` is `ACCEPTED` once the move is queued, and the player's
+gateway then carries it out, so the player leaves this session; the destination's login and `player.beforeMove` hooks
+may still turn them away. Otherwise it says why core queued nothing: `OFFLINE`, `STALE` (the player already left this
+delivery, is still arriving, or is already moving), `FULL` (a `"reject"` destination whose one session is full) or
+`UNKNOWN_DESTINATION` (the release declares no such destination). While core can't be reached, the runtime repeats the
+request for a few seconds, under the same operation so a repeat can't move the player twice, and then fails the stage.
+
+## Components
+
+Declare shared dependencies as public static `@Component` factories instead of wiring them by hand. The return type is
+the component's identity and the parameters are its dependencies. From the
+[arena example](../../examples/arena/apps/arena/src/main/java/example/arena/ArenaComponents.java), which gives each
+session its own backend client:
+
+```java
+public final class ArenaComponents {
+    private ArenaComponents() {}
+
+    @Component(Component.Scope.SESSION)
+    public static BackendClient backend(BackendSession session) {
+        return new BackendClient(session);
+    }
+}
+```
+
+Gameplay code gets it with `scope.component(BackendClient.class)` on the tick thread. `SESSION` components are created
+once per session and may take `SessionScope`, its `BackendSession` and other components. `PROCESS` components are shared
+by the app's sessions and may depend only on other process components. Factories run lazily; results that are
+`AutoCloseable` are closed in reverse creation order when their session ends or the process stops, and a failed factory
+closes only what that lookup created. Factories must be non-generic, take their dependencies as parameters, and return
+values they own. In Kotlin, use top-level functions or `@JvmStatic` functions in objects. The
+[Gradle plugin](../gradle-plugin/README.md#components) checks the graph at build time and generates direct calls.
+
+## Assets
+
+`com.chunkzero.chunk.multistom.assets.Assets` reads the deployment's assets from the read-only directory the platform
+names in `CHUNK_ASSETS`. `Assets.file("config/rules.json")` returns the app's `assets/config/rules.json`, or else the
+project's shared one. `Assets.world(Worlds.Arena.KOTH)` resolves a world the app declares in `app.ts`, by its generated
+handle; another app's world is an error. A `World` is resolved and parsed once per JVM:
+
+```java
+// A fresh copy per session, owned by the scope, once every chunk is loaded and lit.
+Assets.world(Worlds.Arena.KOTH).copy(scope).thenCompose(instance -> scope.onTick(this::open));
+// One read-only copy per JVM, loaded on first use; each session gets its own view and entities.
+Assets.world(Worlds.Lobby.HUB).shared(scope).thenCompose(view -> scope.onTick(() -> open(view)));
+```
+
+Call both on the tick thread. A shared world's blocks can't be changed, since every session sees them.
+
+## Events
+
+`com.chunkzero.chunk.multistom.event` has one event per lifecycle step. Listen on the process to see every session, or
+on `scope.getEvents()` for one:
+
+```java
+server.eventHandler().addListener(SessionJoinEvent.class, event -> {
+    System.out.printf("%s joined session %s%n",
+            event.getPlayer().getUsername(), event.getSession().getId());
+});
+```
+
+| Event                 | Fires when                                                        |
+| --------------------- | ----------------------------------------------------------------- |
+| `SessionCreateEvent`  | Creation succeeded and the session has an instance                |
+| `SessionJoinEvent`    | A player's `onJoin` succeeded                                     |
+| `SessionLeaveEvent`   | A joined player left and `onLeave` settled                        |
+| `SessionDestroyEvent` | The session's cleanup finished, including after a failed creation |
+
+Events are synchronous on the tick thread and cannot be cancelled. Listen to the concrete classes: Minestom does not
+deliver them to a listener on the `SessionEvent` interface.
+
+## Kotlin
+
+`jvm/multistom-kotlin` lets sessions use coroutines. Extend `CoroutineSession` and override its suspending `create`,
+`join`, `leave` and `finish`. `scope.coroutines` (import `com.chunkzero.chunk.multistom.coroutines`) is a
+`CoroutineScope` owned by the session and dispatched on the tick thread, so `launch`, `async` and `Flow.launchIn` resume
+there and are cancelled when the session ends. From the Kotlin project template:
+
+```kotlin
+private class GreetingSession : CoroutineSession() {
+    private lateinit var scope: SessionScope
+
+    override suspend fun create(scope: SessionScope) {
+        this.scope = scope
+        scope.createInstance().setGenerator { it.modifier().fillHeight(0, 40, Block.GRASS_BLOCK) }
+    }
+
+    override suspend fun join(player: Player) {
+        val backend = CoroutineBackendClient(scope.coroutines.backend(requireNotNull(scope.backend), player))
+        val result = backend.shared.greetings.message(MessageArgs(player.username))
+        player.sendMessage(Component.text(result.message()))
+    }
+}
+```
+
+`scope.coroutines.backend(client)` and `backend(client, player)` return a `CoroutineBackend` for suspending calls and
+`Flow` watches, closed with the session or when the player leaves. A watch collector that falls 64 updates behind fails
+instead of silently dropping states. The module also adds `scope.resource<T> { ... }`, `scope.own(task)`,
+`scope.own(player, task)` for Minestom tasks, and `scope.repeatEvery(1.seconds) { ... }` with Kotlin durations.
