@@ -1,5 +1,6 @@
 use super::ensure_inside;
-use super::plan::{Pull, Push, check_push, decide, entries, summary};
+use super::plan::{Entry, Pull, Push, check_push, decide, entries, locate, summary};
+use chunk_build::project::{AppMetadata, ProjectMetadata, World};
 use chunk_contract::{AssetBlob, AssetRevision};
 
 #[test]
@@ -57,4 +58,36 @@ fn a_pull_never_writes_through_a_symlink() {
     let error = ensure_inside(root.path(), &root.path().join("assets/config/new.json")).unwrap_err();
     assert!(error.to_string().contains("symlink"));
     assert!(ensure_inside(root.path(), &root.path().join("assets/../../x")).is_err());
+}
+
+#[test]
+fn a_pull_skips_a_world_whose_source_is_not_a_file() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join("apps/arena/assets/save.polar")).unwrap();
+    let world = |source: &str| World { source: source.into() };
+    let app = AppMetadata {
+        id: "arena".into(),
+        directory: "apps/arena".into(),
+        gradle_project: ":arena".into(),
+        domain: String::new(),
+        runtime: Default::default(),
+        sessions: Default::default(),
+        worlds: [
+            ("save".into(), world("apps/arena/assets/save.polar")),
+            ("lobby".into(), world("apps/arena/assets/lobby.polar")),
+        ]
+        .into(),
+        packs: Default::default(),
+    };
+    let metadata = ProjectMetadata { version: 1, apps: vec![app], local: None, scope_packs: Default::default() };
+    let locate = |entry: Entry| locate(&entry, root.path(), &metadata);
+    assert_eq!(
+        locate(Entry::World("arena".into(), "save".into())).unwrap_err(),
+        "world source apps/arena/assets/save.polar is not a file"
+    );
+    assert_eq!(
+        locate(Entry::World("arena".into(), "lobby".into())).unwrap(),
+        root.path().join("apps/arena/assets/lobby.polar")
+    );
+    assert_eq!(locate(Entry::Shared("a.txt".into())).unwrap(), root.path().join("assets/a.txt"));
 }

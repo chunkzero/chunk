@@ -142,7 +142,12 @@ pub(super) fn locate(entry: &Entry, root: &Path, metadata: &ProjectMetadata) -> 
         Entry::World(id, name) => {
             let world =
                 app(id)?.worlds.get(name).ok_or_else(|| format!("{id} declares no world {name} in this project"))?;
-            Ok(root.join(&world.source))
+            let path = root.join(&world.source);
+            // A missing source is created by the pull; an existing one must be a file.
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if !metadata.is_file() => Err(format!("world source {} is not a file", world.source)),
+                _ => Ok(path),
+            }
         }
         Entry::Pack(name) => {
             let mut declared = metadata.apps.iter().map(|app| &app.packs).chain(metadata.scope_packs.values());
