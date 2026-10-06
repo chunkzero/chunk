@@ -759,8 +759,7 @@ public final class ChunkSessions implements AutoCloseable {
                                             .build();
                     }
                     synchronized (this) {
-                        if (operation.started) complete(operation, outcome);
-                        else cancel(operation);
+                        complete(operation, operation.started ? outcome : failed);
                     }
                 });
     }
