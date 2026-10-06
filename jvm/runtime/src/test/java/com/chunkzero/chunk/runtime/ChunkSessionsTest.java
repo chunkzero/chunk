@@ -168,6 +168,36 @@ class ChunkSessionsTest {
     }
 
     @Test
+    void methodsQueuedBeforeAPlayerLeavesDoNotStartAndTheDeliveryStaysFenced() {
+        var handler = new Handler();
+        var host = host(handler, Duration.ofSeconds(10));
+        put("session/a", session(1, false));
+        host.apply(topic);
+        handler.created.getFirst().ready();
+        put("delivery/first", delivery("a", 1));
+        host.apply(topic);
+        var delivery =
+                host.admit(
+                        setup("first", status(host, "first").getCapability()),
+                        uuid,
+                        "player",
+                        () -> {});
+        delivery.arrived();
+
+        handler.gate = new CompletableFuture<>();
+        put("method/queued", call("first"));
+        host.apply(topic);
+        delivery.left();
+        delivery.left();
+        handler.gate.complete(null);
+        assertEquals(JvmMethodPhase.JVM_METHOD_PHASE_CANCELLED, results.get("queued").getPhase());
+        assertTrue(handler.effects.isEmpty());
+        assertEquals(JvmDeliveryPhase.JVM_DELIVERY_PHASE_ARRIVED, status(host, "first").getPhase());
+        delivery.release();
+        assertEquals(JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED, status(host, "first").getPhase());
+    }
+
+    @Test
     void methodsCancelledBeforeTheyStartDoNotRun() {
         var handler = new Handler();
         var host = host(handler, Duration.ofSeconds(10));

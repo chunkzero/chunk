@@ -37,6 +37,7 @@ public final class Delivery {
     boolean consumed;
     boolean arrived;
     boolean closed;
+    boolean left;
     boolean isReleased;
     @Nullable Runnable disconnect;
 
@@ -88,8 +89,16 @@ public final class Delivery {
 
     public boolean isArrived() {
         synchronized (owner) {
-            return arrived && !closed;
+            return arrived && !closed && !left;
         }
+    }
+
+    /**
+     * The player's connection closed: no further session methods run for them. The delivery stays
+     * fenced until {@link #release()}. Calling it again has no effect.
+     */
+    public void left() {
+        owner.left(this);
     }
 
     /**

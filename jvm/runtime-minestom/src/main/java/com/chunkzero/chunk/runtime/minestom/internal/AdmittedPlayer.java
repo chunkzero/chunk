@@ -89,6 +89,7 @@ final class AdmittedPlayer {
     synchronized CompletableFuture<Void> close() {
         if (closed) return released;
         closed = true;
+        delivery.thenAccept(Delivery::left);
         connection.disconnect();
         var ticks = manager.getTicks();
         var current = player;

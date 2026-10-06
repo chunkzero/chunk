@@ -684,6 +684,12 @@ public final class ChunkSessions implements AutoCloseable {
         link.flush();
     }
 
+    void left(Delivery delivery) {
+        synchronized (this) {
+            delivery.left = true;
+        }
+    }
+
     void release(Delivery delivery) {
         synchronized (this) {
             if (delivery.isReleased) return;
@@ -787,6 +793,7 @@ public final class ChunkSessions implements AutoCloseable {
         return delivery != null
                 && delivery.arrived
                 && !delivery.closed
+                && !delivery.left
                 && delivery.session().equals(session);
     }
 

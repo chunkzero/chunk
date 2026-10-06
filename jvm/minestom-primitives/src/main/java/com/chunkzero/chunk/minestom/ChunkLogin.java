@@ -116,6 +116,7 @@ public final class ChunkLogin implements AutoCloseable {
         admissions.forEach(
                 (connection, admission) -> {
                     if (connection.isOnline() || admission.leaving) return;
+                    admission.delivery.left();
                     var player = connection.getPlayer();
                     // Minestom removes a PLAY player's entity on a later tick; a player that left
                     // during configuration is never removed.
