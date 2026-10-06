@@ -16,7 +16,7 @@ class ComponentIndexTest {
                 listOf(factory("A", "SESSION", "B"), factory("B", "SESSION", "A")) to "Component dependency cycle",
                 listOf(factory("A", "PROCESS", "B"), factory("B", "PROCESS", "C"), factory("C")) to
                     "captures session dependency",
-                listOf(factory("A", "PROCESS", "com/chunkzero/chunk/runtime/SessionScope")) to
+                listOf(factory("A", "PROCESS", "com/chunkzero/chunk/multistom/SessionScope")) to
                     "captures session dependency",
                 listOf(
                     factory("com/chunkzero/chunk/backend/client/BackendSession"),
@@ -32,7 +32,7 @@ class ComponentIndexTest {
     fun `sessions can use process providers and session builtins without duplicate shared construction`() {
         val graph =
             listOf(
-                factory("View", "SESSION", "Clock", "Backend", "com/chunkzero/chunk/runtime/SessionScope"),
+                factory("View", "SESSION", "Clock", "Backend", "com/chunkzero/chunk/multistom/SessionScope"),
                 factory("Clock", "PROCESS"),
                 factory("Backend", "SESSION", "com/chunkzero/chunk/backend/client/BackendSession"),
             )

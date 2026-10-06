@@ -88,7 +88,9 @@ abstract class WriteSessionRegistry : DefaultTask() {
         for (type in found.values.filter { it.session != null }) {
             val id = requireNotNull(type.session)
             require(id.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,127}"))) { "Invalid session type ID: $id" }
-            require(type.constructible && ::lookup.inherits(type.name, "com/chunkzero/chunk/runtime/SessionProvider")) {
+            require(
+                type.constructible && ::lookup.inherits(type.name, "com/chunkzero/chunk/multistom/SessionProvider"),
+            ) {
                 "Session $id requires a public concrete SessionProvider with a public no-argument constructor"
             }
             require(sessions.put(id, type.name.replace('/', '.')) == null) { "Duplicate session type: $id" }
@@ -109,7 +111,12 @@ abstract class WriteSessionRegistry : DefaultTask() {
             outputDirectory.get().asFile,
             bindingSourceDirectory.get().asFile,
         )
-        val output = outputDirectory.file("META-INF/services/com.chunkzero.chunk.runtime.SessionProvider").get().asFile
+        val output =
+            outputDirectory
+                .file(
+                    "META-INF/services/com.chunkzero.chunk.multistom.SessionProvider",
+                ).get()
+                .asFile
         output.parentFile.mkdirs()
         output.writeText(sessions.values.joinToString("\n", postfix = "\n"))
         val catalog = catalogFile.get().asFile
@@ -174,7 +181,7 @@ private fun inspect(bytes: ByteArray): CompiledClass {
             ): MethodVisitor? {
                 val arguments = Type.getArgumentTypes(descriptor)
                 val creation =
-                    arguments.size == 1 && arguments[0].descriptor == "Lcom/chunkzero/chunk/runtime/SessionCreation;"
+                    arguments.size == 1 && arguments[0].descriptor == "Lcom/chunkzero/chunk/multistom/SessionCreation;"
                 if (name == "create" && (arguments.isEmpty() || creation) &&
                     access and Opcodes.ACC_PUBLIC != 0 &&
                     access and (Opcodes.ACC_STATIC or Opcodes.ACC_BRIDGE) == 0 &&

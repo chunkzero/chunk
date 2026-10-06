@@ -68,7 +68,8 @@ public final class ChunkProcess implements AutoCloseable {
         }
     }
 
-    String app() {
+    /** The ID of the app this process runs. */
+    public String app() {
         return environment.appId();
     }
 

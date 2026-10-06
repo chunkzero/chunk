@@ -115,7 +115,7 @@ run as. The plugin runs that CLI; it never builds Rust tools or installs Node pa
 The app's compiled classes are scanned for `@SessionType("id")`. Each annotated class must be public, concrete, have a
 public no-argument constructor and implement `SessionProvider`; an app has 1 to 128 of them, with distinct IDs, and its
 main class needs a `public static void main(String[])`. `generateChunkSessionRegistry` writes
-`META-INF/services/com.chunkzero.chunk.runtime.SessionProvider`, from which the runtime loads the providers, and a
+`META-INF/services/com.chunkzero.chunk.multistom.SessionProvider`, from which the runtime loads the providers, and a
 catalog of the session type IDs for release assembly. Packaging fails unless those IDs exactly match the app's
 `implementations` in `app.ts` (by default just `default`).
 

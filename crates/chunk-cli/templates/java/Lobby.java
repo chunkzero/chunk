@@ -3,11 +3,11 @@ package example;
 import com.chunkzero.chunk.generated.BackendClient;
 import com.chunkzero.chunk.generated.BackendTypes.Shared.Greetings.MessageArgs;
 import com.chunkzero.chunk.generated.BackendTypes.Shared.Greetings.MessageResult;
-import com.chunkzero.chunk.runtime.ChunkMinestom;
+import com.chunkzero.chunk.multistom.ChunkMinestom;
+import com.chunkzero.chunk.multistom.Session;
+import com.chunkzero.chunk.multistom.SessionProvider;
+import com.chunkzero.chunk.multistom.SessionScope;
 import com.chunkzero.chunk.runtime.ChunkProcess;
-import com.chunkzero.chunk.runtime.Session;
-import com.chunkzero.chunk.runtime.SessionProvider;
-import com.chunkzero.chunk.runtime.SessionScope;
 import com.chunkzero.chunk.runtime.SessionType;
 
 import net.kyori.adventure.text.Component;

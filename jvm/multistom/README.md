@@ -168,7 +168,7 @@ values they own. In Kotlin, use top-level functions or `@JvmStatic` functions in
 
 ## Assets
 
-`com.chunkzero.chunk.runtime.assets.Assets` reads the deployment's assets from the read-only directory the platform
+`com.chunkzero.chunk.multistom.assets.Assets` reads the deployment's assets from the read-only directory the platform
 names in `CHUNK_ASSETS`. `Assets.file("config/rules.json")` returns the app's `assets/config/rules.json`, or else the
 project's shared one. `Assets.world(Worlds.Arena.KOTH)` resolves a world the app declares in `app.ts`, by its generated
 handle; another app's world is an error. A `World` is resolved and parsed once per JVM:
@@ -184,8 +184,8 @@ Call both on the tick thread. A shared world's blocks can't be changed, since ev
 
 ## Events
 
-`com.chunkzero.chunk.runtime.minestom.event` has one event per lifecycle step. Listen on the process to see every
-session, or on `scope.getEvents()` for one:
+`com.chunkzero.chunk.multistom.event` has one event per lifecycle step. Listen on the process to see every session, or
+on `scope.getEvents()` for one:
 
 ```java
 server.eventHandler().addListener(SessionJoinEvent.class, event -> {
@@ -207,9 +207,9 @@ deliver them to a listener on the `SessionEvent` interface.
 ## Kotlin
 
 `jvm/multistom-kotlin` lets sessions use coroutines. Extend `CoroutineSession` and override its suspending `create`,
-`join`, `leave` and `finish`. `scope.coroutines` (import `com.chunkzero.chunk.runtime.coroutines`) is a `CoroutineScope`
-owned by the session and dispatched on the tick thread, so `launch`, `async` and `Flow.launchIn` resume there and are
-cancelled when the session ends. From the Kotlin project template:
+`join`, `leave` and `finish`. `scope.coroutines` (import `com.chunkzero.chunk.multistom.coroutines`) is a
+`CoroutineScope` owned by the session and dispatched on the tick thread, so `launch`, `async` and `Flow.launchIn` resume
+there and are cancelled when the session ends. From the Kotlin project template:
 
 ```kotlin
 private class GreetingSession : CoroutineSession() {

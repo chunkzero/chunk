@@ -1,8 +1,8 @@
 package example.lobby;
 
 import com.chunkzero.chunk.generated.Destinations;
+import com.chunkzero.chunk.multistom.SessionScope;
 import com.chunkzero.chunk.runtime.MoveResult;
-import com.chunkzero.chunk.runtime.SessionScope;
 
 import net.kyori.adventure.sound.Sound;
 import net.kyori.adventure.text.Component;

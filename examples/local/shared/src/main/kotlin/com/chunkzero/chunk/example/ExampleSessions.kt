@@ -4,11 +4,11 @@ import com.chunkzero.chunk.backend.client.QueryResult
 import com.chunkzero.chunk.example.generated.CoroutineBackendClient
 import com.chunkzero.chunk.example.generated.Destinations
 import com.chunkzero.chunk.example.generated.SessionMethods
-import com.chunkzero.chunk.runtime.CoroutineSession
+import com.chunkzero.chunk.multistom.CoroutineSession
+import com.chunkzero.chunk.multistom.Session
+import com.chunkzero.chunk.multistom.SessionScope
+import com.chunkzero.chunk.multistom.coroutines
 import com.chunkzero.chunk.runtime.MoveResult
-import com.chunkzero.chunk.runtime.Session
-import com.chunkzero.chunk.runtime.SessionScope
-import com.chunkzero.chunk.runtime.coroutines
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.launch
 import net.kyori.adventure.text.Component

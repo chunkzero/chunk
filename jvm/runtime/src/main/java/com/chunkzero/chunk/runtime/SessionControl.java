@@ -107,9 +107,12 @@ public final class SessionControl {
         owner.ended(this, error);
     }
 
-    JvmSessionPhase phase() {
+    /**
+     * Whether the session is ready: {@link #ready()} took effect and it has not started finishing.
+     */
+    public boolean isReady() {
         synchronized (owner) {
-            return phase;
+            return phase == JvmSessionPhase.JVM_SESSION_PHASE_READY;
         }
     }
 

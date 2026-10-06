@@ -55,7 +55,7 @@ abstract class ConvertAnvilWorld : DefaultTask() {
                     .get()
                     .executablePath.asFile.absolutePath
             classpath = this@ConvertAnvilWorld.classpath
-            mainClass.set("com.chunkzero.chunk.runtime.minestom.internal.AnvilConverter")
+            mainClass.set("com.chunkzero.chunk.multistom.internal.AnvilConverter")
             jvmArgs("--enable-native-access=ALL-UNNAMED")
             args(source.get().asFile.absolutePath, output.get().asFile.absolutePath)
             args(chunks.get())

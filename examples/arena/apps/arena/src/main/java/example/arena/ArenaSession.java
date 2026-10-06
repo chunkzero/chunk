@@ -5,10 +5,10 @@ import com.chunkzero.chunk.generated.BackendClient;
 import com.chunkzero.chunk.generated.Destinations;
 import com.chunkzero.chunk.generated.SessionMethods;
 import com.chunkzero.chunk.generated.Worlds;
+import com.chunkzero.chunk.multistom.Session;
+import com.chunkzero.chunk.multistom.SessionScope;
+import com.chunkzero.chunk.multistom.assets.Assets;
 import com.chunkzero.chunk.runtime.MoveResult;
-import com.chunkzero.chunk.runtime.Session;
-import com.chunkzero.chunk.runtime.SessionScope;
-import com.chunkzero.chunk.runtime.assets.Assets;
 
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;

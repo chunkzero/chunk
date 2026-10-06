@@ -17,7 +17,7 @@ INPUTS = (
     "gradlew", "gradlew.bat", "gradle", "gradle.properties", "settings.gradle.kts", "build.gradle.kts",
     "buildSrc", "jvm", "proto", "examples/arena", "examples/local",
 )
-PROVIDER = "META-INF/services/com.chunkzero.chunk.runtime.SessionProvider"
+PROVIDER = "META-INF/services/com.chunkzero.chunk.multistom.SessionProvider"
 
 
 def require(condition, message):
@@ -90,7 +90,7 @@ def verify_release(project, package, app_ids, kotlin):
             require(len(providers) == len(app["sessions"]), "Session registry differs from deployment capabilities")
             for provider in providers:
                 require(provider.replace(".", "/") + ".class" in names, "Session factory missing")
-            for entry in ("com/chunkzero/chunk/runtime/ChunkProcess.class", "com/chunkzero/chunk/runtime/ChunkMinestom.class",
+            for entry in ("com/chunkzero/chunk/runtime/ChunkProcess.class", "com/chunkzero/chunk/multistom/ChunkMinestom.class",
                           "net/minestom/server/ServerProcess.class", package.replace(".", "/") + "/BackendTypes.class",
                           package.replace(".", "/") + "/BackendClient.class"):
                 require(entry in names, f"App executable missing {entry}")

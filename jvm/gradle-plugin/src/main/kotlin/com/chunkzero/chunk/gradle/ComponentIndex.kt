@@ -120,7 +120,7 @@ internal fun validateComponents(factories: List<ComponentFactory>): List<Compone
     require(factories.size <= 256) { "App supports at most 256 component factories" }
     val byType = mutableMapOf<String, ComponentFactory>()
     val builtins =
-        setOf("com/chunkzero/chunk/runtime/SessionScope", "com/chunkzero/chunk/backend/client/BackendSession")
+        setOf("com/chunkzero/chunk/multistom/SessionScope", "com/chunkzero/chunk/backend/client/BackendSession")
     for (factory in factories) {
         require(factory.type !in builtins) { "Component cannot replace session builtin: ${factory.type}" }
         require(byType.put(factory.type, factory) == null) { "Duplicate component identity: ${factory.type}" }

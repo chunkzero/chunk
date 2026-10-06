@@ -2,14 +2,14 @@ package com.chunkzero.chunk.example.load
 
 import com.chunkzero.chunk.example.load.generated.BackendTypes
 import com.chunkzero.chunk.example.load.generated.CoroutineBackendClient
-import com.chunkzero.chunk.runtime.ChunkMinestom
+import com.chunkzero.chunk.multistom.ChunkMinestom
+import com.chunkzero.chunk.multistom.CoroutineSession
+import com.chunkzero.chunk.multistom.SessionProvider
+import com.chunkzero.chunk.multistom.SessionScope
+import com.chunkzero.chunk.multistom.coroutines
+import com.chunkzero.chunk.multistom.own
 import com.chunkzero.chunk.runtime.ChunkProcess
-import com.chunkzero.chunk.runtime.CoroutineSession
-import com.chunkzero.chunk.runtime.SessionProvider
-import com.chunkzero.chunk.runtime.SessionScope
 import com.chunkzero.chunk.runtime.SessionType
-import com.chunkzero.chunk.runtime.coroutines
-import com.chunkzero.chunk.runtime.own
 import kotlinx.coroutines.launch
 import net.minestom.server.ServerProcess
 import net.minestom.server.entity.Player
