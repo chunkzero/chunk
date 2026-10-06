@@ -57,8 +57,8 @@ downloads it if needed. Node is not needed: the CLI includes its TypeScript comp
 `gradle/wrapper/` in version control.
 
 Gradle downloads the chunk libraries and plugins from `maven.chunkzero.com`, at the versions pinned in
-`settings.gradle.kts` when the CLI created the project. A newer CLI does not change those pins, so keep the CLI and the
-pins on the same version.
+`settings.gradle.kts` and `apps/lobby/build.gradle.kts` when the CLI created the project. A newer CLI does not change
+those pins, so keep the CLI and the pins on the same version.
 
 `./gradlew` and IDE builds run the `chunk` on your `PATH`; pass `-Pchunk.executable=...` to use another. `chunk build`
 and `chunk dev` always use the CLI you run them with. To build against unpublished chunk libraries, set the

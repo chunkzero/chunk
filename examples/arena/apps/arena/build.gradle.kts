@@ -8,6 +8,7 @@ tasks.withType<JavaCompile>().configureEach {
 }
 
 dependencies {
+    implementation("com.chunkzero.chunk:multistom:${libs.versions.chunk.get()}")
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)

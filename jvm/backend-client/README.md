@@ -68,9 +68,9 @@ wait.
 ## Kotlin
 
 `jvm/backend-client-kotlin` wraps a `BackendSession` as `CoroutineBackend`, with suspending calls, actions included, and
-`Flow<WatchState<R>>` watches, bound to an owned `CoroutineScope` that closes its calls and watches when it ends. With
-the `com.chunkzero.chunk.kotlin` plugin, projects also get a generated `CoroutineBackendClient` with property-style
-namespaces:
+`Flow<WatchState<R>>` watches, bound to an owned `CoroutineScope` that closes its calls and watches when it ends. When
+the root build applies Kotlin, Kotlin projects also get a generated `CoroutineBackendClient` with property-style
+namespaces (see the [Gradle plugin](../gradle-plugin/README.md#kotlin)):
 
 ```kotlin
 val backend = CoroutineBackendClient(scope.coroutines.backend(requireNotNull(scope.backend), player))

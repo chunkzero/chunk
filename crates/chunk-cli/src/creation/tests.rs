@@ -44,6 +44,14 @@ fn cli_creates_both_languages_without_adjacent_sdk_files() {
             matches!(language, Language::Kotlin),
         );
         assert!(settings.contains(&format!("rootProject.name = {name:?}")));
+        let engine = match language {
+            Language::Java => "multistom",
+            Language::Kotlin => "multistom-kotlin",
+        };
+        let app_build = fs::read_to_string(options.directory.join("apps/lobby/build.gradle.kts")).unwrap();
+        assert!(app_build.contains(&format!("\"com.chunkzero.chunk:{engine}:{}\"", crate::RELEASE_VERSION)));
+        let root_build = fs::read_to_string(options.directory.join("build.gradle.kts")).unwrap();
+        assert_eq!(root_build.contains("org.jetbrains.kotlin.jvm"), matches!(language, Language::Kotlin));
         let properties = fs::read_to_string(options.directory.join("gradle.properties")).unwrap();
         assert!(!properties.contains("chunk.source="));
         assert!(!properties.contains("sdk/maven"));

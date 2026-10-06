@@ -23,7 +23,6 @@ dependencies {
     implementation(libs.gson)
     implementation(libs.shadow.gradle.plugin)
     implementation(libs.asm)
-    compileOnly(libs.kotlin.gradle.plugin)
     testImplementation(gradleTestKit())
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
@@ -39,10 +38,6 @@ gradlePlugin {
         create("chunk") {
             id = "com.chunkzero.chunk"
             implementationClass = "com.chunkzero.chunk.gradle.ChunkPlugin"
-        }
-        create("chunkKotlin") {
-            id = "com.chunkzero.chunk.kotlin"
-            implementationClass = "com.chunkzero.chunk.gradle.ChunkKotlinPlugin"
         }
     }
 }
