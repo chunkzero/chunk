@@ -76,7 +76,7 @@ class SessionMethodTest {
     }
 
     private static SessionMethod call(String name, String argumentsJson) {
-        return new SessionMethod(name, argumentsJson, () -> true);
+        return new SessionMethod(name, argumentsJson, null, () -> true);
     }
 
     private static void settle(TickExecutor ticks, CompletableFuture<?> future) {

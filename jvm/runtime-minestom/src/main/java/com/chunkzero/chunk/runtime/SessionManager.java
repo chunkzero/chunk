@@ -132,8 +132,10 @@ public final class SessionManager implements SessionHandler {
                     new IllegalArgumentException("Undeclared session method"));
         return ticks.submit(
                 () -> {
-                    if (!call.start()) return null;
                     var managed = sessions.get(control.id());
+                    if (managed != null && managed.isDisconnected(call.delivery()))
+                        call.delivery().left();
+                    if (!call.start()) return null;
                     if (managed == null
                             || control.phase() != JvmSessionPhase.JVM_SESSION_PHASE_READY)
                         throw new IllegalStateException("Session unavailable");
@@ -185,6 +187,14 @@ public final class SessionManager implements SessionHandler {
 
         public SessionScope getScope() {
             return scope;
+        }
+
+        boolean isDisconnected(Delivery delivery) {
+            return scope.getPlayers().stream()
+                    .anyMatch(
+                            player ->
+                                    ((ManagedPlayer) player).getDelivery() == delivery
+                                            && !player.getPlayerConnection().isOnline());
         }
 
         void start() {

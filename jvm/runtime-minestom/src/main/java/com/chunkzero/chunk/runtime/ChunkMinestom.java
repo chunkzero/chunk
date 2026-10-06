@@ -71,8 +71,8 @@ public final class ChunkMinestom implements AutoCloseable {
                     server.schedulerManager()
                             .buildTask(
                                     () -> {
-                                        ticks.flush();
                                         gameplay.flush();
+                                        ticks.flush();
                                         chunk.tick();
                                     })
                             .repeat(TaskSchedule.tick(1))

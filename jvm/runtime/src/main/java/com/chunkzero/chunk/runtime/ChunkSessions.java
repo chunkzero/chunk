@@ -724,6 +724,7 @@ public final class ChunkSessions implements AutoCloseable {
     private void execute(MethodCall operation) {
         var call = operation.call;
         SessionControl session;
+        Delivery delivery;
         synchronized (this) {
             if (operation.done || methods.get(operation.id) != operation) return;
             session = sessions.get(call.getSession());
@@ -735,6 +736,7 @@ public final class ChunkSessions implements AutoCloseable {
                 cancel(operation);
                 return;
             }
+            delivery = deliveries.get(call.getDelivery());
         }
         CompletionStage<String> result;
         try {
@@ -744,6 +746,7 @@ public final class ChunkSessions implements AutoCloseable {
                             new SessionMethod(
                                     call.getMethod(),
                                     call.getArgumentsJson().toStringUtf8(),
+                                    delivery,
                                     () -> start(operation)));
         } catch (RuntimeException error) {
             result = CompletableFuture.failedFuture(error);
