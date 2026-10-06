@@ -14,7 +14,7 @@ use crate::{MachineProfile, valid_id};
 pub(crate) mod assets;
 pub(crate) mod authoring;
 
-pub use assets::{ChunkRange, Pack, World, WorldFormat};
+pub use assets::{Pack, World};
 
 /// Apps, domain scopes and authored modules found in one pass over the project tree.
 #[derive(Default)]

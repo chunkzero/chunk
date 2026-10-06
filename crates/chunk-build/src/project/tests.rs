@@ -220,7 +220,7 @@ fn asset_declarations_resolve_sources_inside_assets_and_order_packs_by_scope() {
     write("apps/scope.ts", "export default defineScope({packs:{base:{source:'packs/base'}}});");
     write("apps/games/scope.ts", "export default defineScope({packs:{games:{source:'games.zip',prompt:'Games'}}});");
     write("apps/games/arena/build.gradle.kts", "");
-    let app = "export default defineApp({id:'arena',worlds:{koth:{source:'worlds/koth',chunks:{from:[-8,-8],to:[7,7]}},lobby:{source:'lobby.polar'}},packs:{ui:{source:'ui',required:true},hud:{source:'hud'}}});";
+    let app = "export default defineApp({id:'arena',worlds:{koth:{source:'worlds/koth.polar'},lobby:{source:'lobby.polar'}},packs:{ui:{source:'ui',required:true},hud:{source:'hud'}}});";
     write("apps/games/arena/app.ts", app);
     for path in [
         "assets/packs/base/pack.mcmeta",
@@ -231,14 +231,14 @@ fn asset_declarations_resolve_sources_inside_assets_and_order_packs_by_scope() {
     }
     write("assets/games.zip", "");
     write("apps/games/arena/assets/lobby.polar", "");
-    write("apps/games/arena/assets/worlds/koth/level.dat", "");
+    write("apps/games/arena/assets/worlds/koth.polar", "");
+    fs::create_dir_all(root.join("apps/games/arena/assets/save.polar")).unwrap();
     let metadata = serde_json::to_value(inspect(root).unwrap()).unwrap();
     assert_eq!(
         metadata["apps"][0]["worlds"],
         json!({
-            "koth": {"source": "apps/games/arena/assets/worlds/koth", "format": "anvil",
-                     "chunks": {"from": [-8, -8], "to": [7, 7]}},
-            "lobby": {"source": "apps/games/arena/assets/lobby.polar", "format": "polar"}
+            "koth": {"source": "apps/games/arena/assets/worlds/koth.polar"},
+            "lobby": {"source": "apps/games/arena/assets/lobby.polar"}
         })
     );
     let contract = assets::contract(&inspect_inventory(root).unwrap());
@@ -249,10 +249,18 @@ fn asset_declarations_resolve_sources_inside_assets_and_order_packs_by_scope() {
     for (from, to, expected) in [
         ("source:'lobby.polar'", "source:'../lobby.polar'", "relative path inside apps/games/arena/assets/"),
         ("source:'lobby.polar'", "source:'missing.polar'", "missing.polar"),
-        ("source:'lobby.polar'", "source:'worlds'", "requires a .polar file or an Anvil save"),
-        ("source:'lobby.polar'", "source:'lobby.polar',chunks:{from:[0,0],to:[1,1]}", "only crop Anvil"),
-        ("from:[-8,-8]", "from:[8,-8]", "from <= to"),
-        ("source:'ui'", "source:'worlds/koth'", "pack.mcmeta or a .zip"),
+        (
+            "source:'lobby.polar'",
+            "source:'worlds'",
+            "world lobby must be a .polar file; Chunk no longer converts Anvil",
+        ),
+        ("source:'lobby.polar'", "source:'save.polar'", "world lobby must be a .polar file"),
+        (
+            "source:'lobby.polar'",
+            "source:'lobby.polar',chunks:{from:[0,0],to:[1,1]}",
+            "unsupported option of world lobby",
+        ),
+        ("source:'ui'", "source:'worlds/koth.polar'", "pack.mcmeta or a .zip"),
         ("ui:{", "base:{", "pack base is declared more than once"),
     ] {
         write("apps/games/arena/app.ts", &app.replace(from, to));
@@ -286,19 +294,11 @@ fn declarations_can_be_inspected_before_their_sources_exist() {
     assert!(inspect(root).is_err());
     let metadata = inspect_declarations(root).unwrap();
     let lobby = &metadata.apps[0];
-    assert_eq!(lobby.worlds["main"].format, WorldFormat::Polar);
     assert_eq!(lobby.worlds["main"].source, "apps/lobby/assets/main.polar");
     assert_eq!(lobby.packs["ui"].source, "apps/lobby/assets/ui.zip");
 
-    write(
-        "apps/lobby/app.ts",
-        &app.replace("main.polar", "save.polar")
-            .replace("{source:'save.polar'}", "{source:'save.polar',chunks:{from:[0,0],to:[1,1]}}"),
-    );
-    assert_eq!(inspect_declarations(root).unwrap().apps[0].worlds["main"].format, WorldFormat::Anvil);
-    fs::create_dir_all(root.join("apps/lobby/assets/save.polar")).unwrap();
-    write("apps/lobby/assets/save.polar/level.dat", "");
-    assert_eq!(inspect_declarations(root).unwrap().apps[0].worlds["main"].format, WorldFormat::Anvil);
+    write("apps/lobby/app.ts", &app.replace("main.polar", "worlds/main"));
+    assert!(inspect_declarations(root).unwrap_err().to_string().contains("must be a .polar file"));
 
     write("apps/lobby/app.ts", &app.replace("main.polar", "../main.polar"));
     assert!(inspect_declarations(root).unwrap_err().to_string().contains("relative path inside"));

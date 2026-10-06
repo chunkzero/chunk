@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use chunk_build::project::{ProjectMetadata, WorldFormat};
+use chunk_build::project::ProjectMetadata;
 use chunk_contract::AssetRevision;
 
 /// One world, pack or file of a revision.
@@ -142,9 +142,11 @@ pub(super) fn locate(entry: &Entry, root: &Path, metadata: &ProjectMetadata) -> 
         Entry::World(id, name) => {
             let world =
                 app(id)?.worlds.get(name).ok_or_else(|| format!("{id} declares no world {name} in this project"))?;
-            match world.format {
-                WorldFormat::Polar => Ok(root.join(&world.source)),
-                WorldFormat::Anvil => Err(format!("built from the Anvil save {}", world.source)),
+            let path = root.join(&world.source);
+            // A missing source is created by the pull; an existing one must be a file.
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if !metadata.is_file() => Err(format!("world source {} is not a file", world.source)),
+                _ => Ok(path),
             }
         }
         Entry::Pack(name) => {

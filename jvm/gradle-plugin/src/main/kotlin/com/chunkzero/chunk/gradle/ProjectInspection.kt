@@ -38,14 +38,6 @@ internal data class AppMetadata(
     val id: String,
     val directory: String,
     val projectPath: String,
-    val anvilWorlds: List<AnvilWorld> = emptyList(),
-)
-
-/** An app's Anvil world, converted to Polar; [chunks] is `[fromX, fromZ, toX, toZ]` or empty. */
-internal data class AnvilWorld(
-    val name: String,
-    val source: String,
-    val chunks: List<Int>,
 )
 
 internal data class BuildConfiguration(
@@ -76,22 +68,7 @@ internal fun readApps(
                     projectPath == segments.joinToString(":", prefix = ":"),
             ) { "App inventory mapping mismatch: $id" }
             require(directory.resolve(path).isDirectory) { "App directory missing: $path" }
-            AppMetadata(
-                id,
-                path,
-                projectPath,
-                app["worlds"]?.asJsonObject?.entrySet().orEmpty().mapNotNull { (name, value) ->
-                    val world = value.asJsonObject
-                    if (world["format"]?.asString != "anvil") return@mapNotNull null
-                    require(name.matches(Regex("[A-Za-z_][A-Za-z0-9_]{0,127}"))) { "Invalid world name: $name" }
-                    val source = requireNotNull(world["source"]?.asString) { "World source missing: $id/$name" }
-                    val chunks =
-                        world["chunks"]?.asJsonObject?.let { range ->
-                            listOf("from", "to").flatMap { end -> range.getAsJsonArray(end).map { it.asInt } }
-                        }
-                    AnvilWorld(name, source, chunks.orEmpty())
-                },
-            )
+            AppMetadata(id, path, projectPath)
         }
     require(apps.map { it.id.lowercase() }.distinct().size == apps.size) { "Duplicate app IDs in chunk inspect" }
     require(apps.map { it.projectPath.lowercase() }.distinct().size == apps.size) {
