@@ -4,6 +4,7 @@ import com.chunkzero.chunk.backend.client.BackendSession;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -11,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.ServiceLoader;
+import java.util.Set;
 
 /**
  * Owns generated factory instances for one app process and its independent sessions. Session
@@ -101,7 +103,9 @@ public final class ComponentRegistry implements AutoCloseable {
         var value =
                 Objects.requireNonNull(
                         binding.factory().create(dependencies), "Component factory returned null");
-        if (value instanceof BackendSession || builtin(value.getClass()))
+        if (value instanceof BackendSession
+                || builtin(value.getClass())
+                || session.borrowed.contains(value))
             throw new IllegalStateException(
                     "Component factory returned a borrowed session capability");
         if (owned.containsKey(value))
@@ -222,11 +226,13 @@ public final class ComponentRegistry implements AutoCloseable {
 
     private static final class Store {
         final Map<Class<?>, Object> supplied;
+        final Set<Object> borrowed = Collections.newSetFromMap(new IdentityHashMap<>());
         final Map<Class<?>, Entry> values = new LinkedHashMap<>();
         boolean closed;
 
         Store(Map<Class<?>, Object> supplied) {
             this.supplied = supplied;
+            borrowed.addAll(supplied.values());
         }
     }
 

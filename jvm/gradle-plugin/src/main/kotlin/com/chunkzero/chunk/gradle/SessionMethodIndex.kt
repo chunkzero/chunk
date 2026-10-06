@@ -49,7 +49,7 @@ internal fun writeSessionMethods(
             }
             val type = method["interface"].asString
             "new com.chunkzero.chunk.runtime.SessionMethodBinding<>($type.REF, ${sourceType(implementation)}.class, " +
-                "(session, args) -> session.${method["function"].asString}(args))"
+                "(session, args) -> (($type) session).${method["function"].asString}(args))"
         }
     for ((session, implementation) in implementations) {
         if (implementation == null) continue

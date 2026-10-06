@@ -171,8 +171,29 @@ class ChunkPluginTest {
     }
 
     @Test
-    fun `Java methods compile after clean prerequisites and reject mismatched session contracts`() {
+    fun `Java methods compile after clean prerequisites, support generic sessions and reject mismatched contracts`() {
         methodFixture(kotlin = false)
+        run("chunkArtifacts")
+        assertMethodExecution()
+        write(
+            "apps/lobby/src/main/java/Base.java",
+            """
+            package fixture.lobby;
+            public abstract class Base<V> {
+                protected abstract V result(fixture.generated.Bindings args);
+                public V ping(fixture.generated.Bindings args) { return result(args); }
+            }
+        """,
+        )
+        write(
+            "apps/lobby/src/main/java/Game.java",
+            """
+            package fixture.lobby;
+            public final class Game<T> extends Base<String> implements fixture.generated.Ping {
+                protected String result(fixture.generated.Bindings args) { return "echo:" + args.value(); }
+            }
+        """,
+        )
         run("chunkArtifacts")
         assertMethodExecution()
         write(

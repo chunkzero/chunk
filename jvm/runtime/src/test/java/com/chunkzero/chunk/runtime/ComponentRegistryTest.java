@@ -48,8 +48,42 @@ class ComponentRegistryTest {
                                                 deps -> new Handle()))));
     }
 
+    @Test
+    void factoryReturningSuppliedInstanceIsRejectedWithoutClosingIt() {
+        var binding =
+                new ComponentBinding<>(
+                        Resource.class,
+                        Component.Scope.SESSION,
+                        List.of(Channel.class),
+                        deps -> (Resource) deps[0]);
+        var socket = new Socket();
+        try (var registry = new ComponentRegistry(List.of(binding))) {
+            try (var components = registry.session(Map.of(Channel.class, socket))) {
+                assertThrows(IllegalStateException.class, () -> components.get(Resource.class));
+            }
+        }
+        assertFalse(socket.closed);
+    }
+
     @Component.Supplied
     private static final class Handle {}
+
+    @Component.Supplied
+    private interface Channel {}
+
+    private interface Resource extends AutoCloseable {
+        @Override
+        void close();
+    }
+
+    private static final class Socket implements Channel, Resource {
+        boolean closed;
+
+        @Override
+        public void close() {
+            closed = true;
+        }
+    }
 
     private record Greeting(Handle handle) {}
 }
