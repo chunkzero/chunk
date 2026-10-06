@@ -14,10 +14,12 @@ import com.chunkzero.chunk.minestom.ChunkLogin;
 import com.google.protobuf.ByteString;
 
 import net.minestom.server.MinecraftServer;
+import net.minestom.server.event.player.AsyncPlayerConfigurationEvent;
 import net.minestom.server.network.ConnectionState;
 import net.minestom.server.network.NetworkBuffer;
 import net.minestom.server.network.packet.PacketVanilla;
 import net.minestom.server.network.packet.client.handshake.ClientHandshakePacket;
+import net.minestom.server.network.packet.client.login.ClientLoginAcknowledgedPacket;
 import net.minestom.server.network.packet.client.login.ClientLoginPluginResponsePacket;
 import net.minestom.server.network.packet.client.login.ClientLoginStartPacket;
 import net.minestom.server.network.packet.server.ServerPacket;
@@ -34,6 +36,7 @@ import java.util.ArrayList;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 class ChunkLoginTest {
@@ -45,20 +48,7 @@ class ChunkLoginTest {
             throws Exception {
         MinecraftServer.setCompressionThreshold(0);
         var server = MinecraftServer.init();
-        var host =
-                ChunkSessions.detached(
-                        new SessionHandler() {
-                            @Override
-                            public void create(SessionControl session) {
-                                session.ready();
-                            }
-
-                            @Override
-                            public void finish(SessionControl session) {
-                                session.ended();
-                            }
-                        },
-                        session -> null);
+        var host = host();
         var sockets = new ArrayList<Socket>();
         try (var login = ChunkLogin.create(host)) {
             MinecraftServer.getGlobalEventHandler().addChild(login.events());
@@ -106,6 +96,70 @@ class ChunkLoginTest {
             host.close();
             MinecraftServer.stopCleanly();
         }
+    }
+
+    @Test
+    void releasesPlayersWhoDisconnectDuringConfiguration() throws Exception {
+        MinecraftServer.setCompressionThreshold(0);
+        var server = MinecraftServer.init();
+        var host = host();
+        try (var login = ChunkLogin.create(host)) {
+            MinecraftServer.getGlobalEventHandler().addChild(login.events());
+            server.start(new InetSocketAddress("127.0.0.1", 0));
+            var port = MinecraftServer.getServer().getPort();
+            topic.put(
+                    "session/game",
+                    JvmSession.newBuilder()
+                            .setSessionType("app/default")
+                            .setCapacity(4)
+                            .build()
+                            .toByteString());
+            var setup = prepare(host, "first", 1);
+            var configuring = new CountDownLatch(1);
+            var proceed = new CountDownLatch(1);
+            // Holds the player in configuration until the test is done with them.
+            MinecraftServer.getGlobalEventHandler()
+                    .addListener(
+                            AsyncPlayerConfigurationEvent.class,
+                            event -> {
+                                configuring.countDown();
+                                try {
+                                    proceed.await(10, TimeUnit.SECONDS);
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                }
+                            });
+            try (var socket = login(port, "player", setup)) {
+                assertInstanceOf(LoginSuccessPacket.class, packet(socket));
+                send(
+                        socket,
+                        3,
+                        ClientLoginAcknowledgedPacket.SERIALIZER,
+                        new ClientLoginAcknowledgedPacket());
+                assertTrue(configuring.await(10, TimeUnit.SECONDS));
+            }
+            await(host, "first", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED);
+            proceed.countDown();
+        } finally {
+            host.close();
+            MinecraftServer.stopCleanly();
+        }
+    }
+
+    private static ChunkSessions host() {
+        return ChunkSessions.detached(
+                new SessionHandler() {
+                    @Override
+                    public void create(SessionControl session) {
+                        session.ready();
+                    }
+
+                    @Override
+                    public void finish(SessionControl session) {
+                        session.ended();
+                    }
+                },
+                session -> null);
     }
 
     private PlayerSetup prepare(ChunkSessions host, String operation, long revision) {

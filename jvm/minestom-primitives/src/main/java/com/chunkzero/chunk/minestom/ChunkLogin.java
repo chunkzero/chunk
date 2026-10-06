@@ -10,6 +10,7 @@ import net.minestom.server.entity.Player;
 import net.minestom.server.event.Event;
 import net.minestom.server.event.EventNode;
 import net.minestom.server.event.player.AsyncPlayerPreLoginEvent;
+import net.minestom.server.network.ConnectionState;
 import net.minestom.server.network.player.GameProfile;
 import net.minestom.server.network.player.PlayerConnection;
 import net.minestom.server.timer.Task;
@@ -116,7 +117,11 @@ public final class ChunkLogin implements AutoCloseable {
                 (connection, admission) -> {
                     if (connection.isOnline() || admission.leaving) return;
                     var player = connection.getPlayer();
-                    if (player != null && !player.isRemoved()) return;
+                    // Minestom removes a PLAY player's entity on a later tick; a player that left
+                    // during configuration is never removed.
+                    if (player != null
+                            && connection.getServerState() == ConnectionState.PLAY
+                            && !player.isRemoved()) return;
                     admission.leaving = true;
                     CompletionStage<Void> left;
                     try {
