@@ -147,6 +147,24 @@ class ChunkPluginTest {
     }
 
     @Test
+    fun `Kotlin apps depend on the facade when the root applies Kotlin after they are evaluated`() {
+        fixture(kotlin = true)
+        app("lobby", kotlin = true)
+        write(
+            "build.gradle.kts",
+            """
+            plugins { id("com.chunkzero.chunk") }
+            java { toolchain.languageVersion = JavaLanguageVersion.of(25) }
+            evaluationDependsOn(":apps:lobby")
+            apply(plugin = "org.jetbrains.kotlin.jvm")
+        """,
+        )
+        run("chunkArtifacts")
+        val executable = descriptor().getAsJsonArray("apps")[0].asJsonObject["jar"].asString
+        JarFile(executable).use { assertTrue(it.getEntry("fixture/generated/FacadeKt.class") != null) }
+    }
+
+    @Test
     fun `requires explicit compatible toolchains and matching compiler targets`() {
         fixture()
         app("lobby", toolchain = "")

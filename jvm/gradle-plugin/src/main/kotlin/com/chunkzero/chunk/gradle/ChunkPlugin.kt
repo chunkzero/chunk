@@ -24,7 +24,7 @@ class ChunkPlugin : Plugin<Project> {
                 "Apply com.chunkzero.chunk to the root project before its consumers"
             }
             project.dependencies.add("implementation", project.dependencies.project(mapOf("path" to ":")))
-            if (project.rootProject.pluginManager.hasPlugin(KOTLIN_PLUGIN)) {
+            project.rootProject.pluginManager.withPlugin(KOTLIN_PLUGIN) {
                 project.pluginManager.withPlugin(KOTLIN_PLUGIN) {
                     project.dependencies.add(
                         "implementation",
