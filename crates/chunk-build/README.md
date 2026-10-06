@@ -70,16 +70,15 @@ composes down the directory tree. An app's own backend functions live in its `se
 `apps/<name>/app.toml` are still read and belong to the root scope; an app can't have both.
 
 An app's `worlds` and the `packs` of apps and scopes name assets by `source`: a path inside the app's `assets/`, or for
-a scope the project's `assets/`, with no symlinks. A world is a `.polar` file or an Anvil save directory, optionally
-cropped with `chunks: { from: [x, z], to: [x, z] }`; a pack is a directory with `pack.mcmeta` or a `.zip`, optionally
-`required` and with a `prompt`. Pack names are unique in the project, and an app's players hold the packs of its scopes,
-outermost first, then its own. Gameplay code names worlds through the generated `Worlds`, such as `Worlds.Arena.KOTH`.
+a scope the project's `assets/`, with no symlinks. A world is a `.polar` file; Chunk doesn't convert Anvil saves. A pack
+is a directory with `pack.mcmeta` or a `.zip`, optionally `required` and with a `prompt`. Pack names are unique in the
+project, and an app's players hold the packs of its scopes, outermost first, then its own. Gameplay code names worlds
+through the generated `Worlds`, such as `Worlds.Arena.KOTH`.
 
 Manifests are read without running any code: the default export must be a direct `defineApp({...})` or
 `defineScope({...})` call, and IDs, runtime settings, implementation keys and destination identities must be literals.
 `chunk inspect` prints what the tools read, as JSON with `version: 1`, `apps` and `local`; each app lists its `worlds`
-with their project-relative `source`, `format` (`anvil` or `polar`) and `chunks`. `inspect`, `gen`, `build` and `dev`
-need `chunk.toml`; `codegen` doesn't.
+with their project-relative `source`. `inspect`, `gen`, `build` and `dev` need `chunk.toml`; `codegen` doesn't.
 
 ## Backend compilation
 
@@ -128,9 +127,8 @@ A release holds:
 
 A release holds no assets. `chunk build` then builds the project's asset revision into `dist/assets/`
 (`.chunk/local/assets/` for `chunk dev`): the files of `assets/` and each app's `assets/`, each app's worlds and every
-pack, stored once by SHA-256 under `blobs/`, and the revision's manifest under `revisions/<id>.json`. Anvil worlds are
-read as Gradle converted them to `.chunk/build/worlds/<app>/<name>.polar`, and pack directories are zipped reproducibly.
-A deployment pairs a release with a revision holding every world and pack the release declares.
+pack, stored once by SHA-256 under `blobs/`, and the revision's manifest under `revisions/<id>.json`. Pack directories
+are zipped reproducibly. A deployment pairs a release with a revision holding every world and pack the release declares.
 
 The release ID is one SHA-256 over the sorted payload names and bytes plus the normalized manifest, so identical inputs
 give the same ID and archive bytes on any machine; archives use fixed ordering, permissions and timestamps. Local paths,

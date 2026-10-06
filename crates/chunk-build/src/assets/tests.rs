@@ -10,18 +10,18 @@ fn write(root: &Path, path: &str, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
 }
 
-/// A project whose arena app has a Polar and an Anvil world and a pack, below a root scope with another pack.
+/// A project whose arena app has two worlds and a pack, below a root scope with another pack.
 fn project(root: &Path) {
     write(root, "chunk.toml", b"");
     write(root, "apps/scope.ts", b"export default defineScope({packs:{base:{source:'packs/base.zip'}}});");
     write(
         root,
         "apps/arena/app.ts",
-        b"export default defineApp({id:'arena',worlds:{lobby:{source:'worlds/lobby.polar'},koth:{source:'worlds/koth'}},packs:{ui:{source:'packs/ui',required:true}}});",
+        b"export default defineApp({id:'arena',worlds:{lobby:{source:'worlds/lobby.polar'},koth:{source:'worlds/koth.polar'}},packs:{ui:{source:'packs/ui',required:true}}});",
     );
     write(root, "apps/arena/build.gradle.kts", b"");
     write(root, "apps/arena/assets/worlds/lobby.polar", POLAR);
-    write(root, "apps/arena/assets/worlds/koth/level.dat", b"anvil");
+    write(root, "apps/arena/assets/worlds/koth.polar", b"Polr koth");
     write(root, "apps/arena/assets/packs/ui/pack.mcmeta", b"{}");
     write(root, "apps/arena/assets/packs/ui/assets/minecraft/lang/en_us.json", b"{}");
     write(root, "apps/arena/assets/kits/default.json", b"kit");
@@ -37,12 +37,6 @@ fn revisions_hold_plain_files_worlds_and_reproducible_packs() {
     let root = project_directory.path();
     project(root);
     let first = Store::new(root.join("dist/assets"));
-    let error = build_revision(root, &first).unwrap_err().to_string();
-    assert!(
-        error.contains("Anvil world koth of app arena is not converted") && error.contains("chunk build"),
-        "{error}"
-    );
-    write(root, ".chunk/build/worlds/arena/koth.polar", b"Polr converted");
 
     let revision = build_revision(root, &first).unwrap();
     assert_eq!(revision.shared.keys().collect::<Vec<_>>(), ["config/game.json"]);
@@ -63,7 +57,7 @@ fn revisions_hold_plain_files_worlds_and_reproducible_packs() {
     let second = build_revision(root, &Store::new(root.join("other"))).unwrap();
     assert_eq!(second.id(), revision.id());
 
-    write(root, ".chunk/build/worlds/arena/koth.polar", b"not polar");
+    write(root, "apps/arena/assets/worlds/koth.polar", b"not polar");
     let error = build_revision(root, &first).unwrap_err().to_string();
     assert!(error.contains("not a Polar world"), "{error}");
 }
@@ -73,7 +67,6 @@ fn materialized_directories_link_read_only_blobs_and_are_reused() {
     let project_directory = tempfile::tempdir().unwrap();
     let root = project_directory.path();
     project(root);
-    write(root, ".chunk/build/worlds/arena/koth.polar", b"Polr converted");
     let store = Store::new(root.join("store"));
     let revision = build_revision(root, &store).unwrap();
 
@@ -81,7 +74,7 @@ fn materialized_directories_link_read_only_blobs_and_are_reused() {
     assert_eq!(directory, store.root().join("apps").join(revision.id()).join("arena"));
     assert_eq!(fs::read(directory.join("revision.json")).unwrap(), revision.encode());
     assert_eq!(fs::read(directory.join("worlds/lobby.polar")).unwrap(), POLAR);
-    assert_eq!(fs::read(directory.join("worlds/koth.polar")).unwrap(), b"Polr converted");
+    assert_eq!(fs::read(directory.join("worlds/koth.polar")).unwrap(), b"Polr koth");
     assert_eq!(fs::read(directory.join("app/kits/default.json")).unwrap(), b"kit");
     assert_eq!(fs::read(directory.join("shared/config/game.json")).unwrap(), b"config");
     assert!(!directory.join("packs").exists() && !directory.join("app/worlds").exists());
@@ -102,7 +95,6 @@ fn incomplete_materialized_directories_are_rebuilt() {
     let project_directory = tempfile::tempdir().unwrap();
     let root = project_directory.path();
     project(root);
-    write(root, ".chunk/build/worlds/arena/koth.polar", b"Polr converted");
     let store = Store::new(root.join("store"));
     let revision = build_revision(root, &store).unwrap();
     let directory = materialize(&store, &revision, "arena").unwrap();

@@ -22,26 +22,6 @@ class ProjectInspectionTest {
     }
 
     @Test
-    fun `only Anvil worlds are converted, with their chunk range`() {
-        directory.resolve("apps/arena").toFile().mkdirs()
-        val worlds =
-            readApps(
-                """{"version":1,"apps":[{"id":"arena","directory":"apps/arena","gradle_project":":apps:arena","worlds":{
-                    "hub":{"source":"apps/arena/assets/worlds/hub","format":"anvil","chunks":{"from":[-8,-8],"to":[7,7]}},
-                    "koth":{"source":"apps/arena/assets/worlds/koth","format":"anvil"},
-                    "lobby":{"source":"apps/arena/assets/worlds/lobby.polar","format":"polar"}}}]}""",
-                directory.toFile(),
-            ).single().anvilWorlds
-        assertEquals(
-            listOf(
-                AnvilWorld("hub", "apps/arena/assets/worlds/hub", listOf(-8, -8, 7, 7)),
-                AnvilWorld("koth", "apps/arena/assets/worlds/koth", emptyList()),
-            ),
-            worlds,
-        )
-    }
-
-    @Test
     fun `app inventory rejects mismatched mappings and duplicate physical projects`() {
         directory.resolve("apps/duels").toFile().mkdirs()
         for (entries in listOf(

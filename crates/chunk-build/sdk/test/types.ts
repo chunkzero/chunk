@@ -438,7 +438,7 @@ defineApp({
 defineApp({ id: "lobby", destinations: { main: { implementation: "default", key: "lobby" } } });
 defineApp({
   id: "koth",
-  worlds: { hill: { source: "worlds/hill", chunks: { from: [-8, -8], to: [7, 7] } } },
+  worlds: { hill: { source: "worlds/hill.polar" } },
   packs: { hud: { source: "packs/hud", required: true, prompt: "Needed for the HUD" } },
 });
 defineScope({ packs: { base: { source: "packs/base" } } });

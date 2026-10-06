@@ -35,7 +35,6 @@ class ChunkPlugin : Plugin<Project> {
         }
         val app = configuration.apps.find { it.projectPath == project.path }
         configureModule(project, app?.id.orEmpty())
-        if (app != null) configureWorlds(project, configuration.directory, app)
     }
 }
 

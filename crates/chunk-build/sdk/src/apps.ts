@@ -19,11 +19,10 @@ export interface PackOptions {
   /** Plain text the client shows when it asks the player to accept the pack. */
   readonly prompt?: string;
 }
-/** A world in the app's `assets/`: a `.polar` file, or an Anvil save directory the build converts to Polar. */
+/** A world in the app's `assets/`. */
 export interface WorldOptions {
+  /** A `.polar` file, relative to the app's `assets/`. */
   readonly source: string;
-  /** The inclusive chunk coordinates an Anvil save is cropped to. */
-  readonly chunks?: { readonly from: readonly [number, number]; readonly to: readonly [number, number] };
 }
 export interface ScopeOptions {
   readonly hooks?: Readonly<Record<string, AnyHook>>;

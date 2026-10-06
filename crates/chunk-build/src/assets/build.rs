@@ -15,7 +15,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 
 use super::Store;
 use crate::{
-    project::{self, Pack, WorldFormat},
+    project::{self, Pack},
     publication::MAX_COMPONENTS,
 };
 
@@ -23,11 +23,11 @@ use crate::{
 const POLAR_MAGIC: &[u8; 4] = b"Polr";
 
 /// Builds the asset revision of the project at `root` into `store` and writes it there: the files of `assets/` and of
-/// each app's `assets/`, except declared world and pack sources; each app's worlds, Polar sources as they are and Anvil
-/// saves as the Gradle build converted them; and every pack, directories zipped reproducibly.
+/// each app's `assets/`, except declared world and pack sources; each app's Polar worlds; and every pack, directories
+/// zipped reproducibly.
 /// # Errors
-/// Rejects invalid declarations, symlinks, nonportable paths, unconverted Anvil worlds, sources of the wrong format,
-/// revisions over the limits of [`chunk_contract`], and filesystem failures.
+/// Rejects invalid declarations, symlinks, nonportable paths, sources of the wrong format, revisions over the limits of
+/// [`chunk_contract`], and filesystem failures.
 pub fn build_revision(root: &Path, store: &Store) -> io::Result<AssetRevision> {
     let inventory = project::inspect_inventory(root)?;
     let mut builder = Builder { store, entries: 0 };
@@ -39,20 +39,7 @@ pub fn build_revision(root: &Path, store: &Store) -> io::Result<AssetRevision> {
     for app in &inventory.apps {
         let mut assets = chunk_contract::AppAssets::default();
         for (name, world) in &app.worlds {
-            let path = match world.format {
-                WorldFormat::Polar => root.join(&world.source),
-                WorldFormat::Anvil => root.join(format!(".chunk/build/worlds/{}/{name}.polar", app.id)),
-            };
-            if world.format == WorldFormat::Anvil && fs::symlink_metadata(&path).is_err() {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!(
-                        "Anvil world {name} of app {} is not converted yet ({} is missing); run `chunk build`",
-                        app.id,
-                        path.display()
-                    ),
-                ));
-            }
+            let path = root.join(&world.source);
             let mut magic = [0; 4];
             regular(&path)?.read_exact(&mut magic).ok();
             if &magic != POLAR_MAGIC {

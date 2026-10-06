@@ -7,7 +7,7 @@ use std::{
 };
 
 use chunk_contract::{AssetContract, PackDeclaration};
-use oxc_ast::ast::{Expression, UnaryOperator};
+use oxc_ast::ast::Expression;
 use serde::Serialize;
 
 use super::{
@@ -19,26 +19,8 @@ use crate::valid_id;
 
 #[derive(Debug, Serialize)]
 pub struct World {
-    /// Project-relative path with forward slashes.
+    /// Project-relative path with forward slashes to a `.polar` file.
     pub source: String,
-    pub format: WorldFormat,
-    /// The inclusive chunk range an Anvil world is cropped to.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub chunks: Option<ChunkRange>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum WorldFormat {
-    /// A save directory with `level.dat`, converted to Polar by the Gradle build.
-    Anvil,
-    Polar,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ChunkRange {
-    pub from: [i32; 2],
-    pub to: [i32; 2],
 }
 
 #[derive(Debug)]
@@ -51,7 +33,7 @@ pub struct Pack {
 }
 
 /// The `assets/` directory a declaration's sources are relative to, and its project-relative path. Sources must
-/// exist unless `require_sources` is false, which classifies a missing world by its `chunks` and extension.
+/// exist unless `require_sources` is false.
 pub(super) struct Root<'a> {
     pub directory: &'a Path,
     pub prefix: &'a str,
@@ -65,32 +47,17 @@ pub(super) fn worlds(file: &Path, expression: &Expression<'_>, root: &Root<'_>) 
             return Err(invalid(file, "world names must be ASCII identifiers"));
         }
         let fields = object_fields(file, value)?;
-        if fields.keys().any(|key| !["source", "chunks"].contains(key)) {
+        if fields.keys().any(|key| *key != "source") {
             return Err(invalid(file, format!("unsupported option of world {name}")));
         }
-        let (source, mut found) = source(file, fields.get("source").copied(), root)?;
-        if found.is_none() && !root.require_sources {
-            let path = root.directory.join(source.strip_prefix(root.prefix).unwrap_or(&source).trim_start_matches('/'));
-            found = fs::symlink_metadata(&path).ok().map(|metadata| (path, metadata));
+        let (source, found) = source(file, fields.get("source").copied(), root)?;
+        if !extension(&source, "polar") || found.is_some_and(|(_, metadata)| !metadata.is_file()) {
+            return Err(invalid(
+                file,
+                format!("world {name} must be a .polar file; Chunk no longer converts Anvil saves"),
+            ));
         }
-        let chunks = fields.get("chunks").map(|value| chunk_range(file, value)).transpose()?;
-        let format = match found {
-            Some((_, metadata)) if metadata.is_file() && extension(&source, "polar") => WorldFormat::Polar,
-            Some((path, metadata))
-                if metadata.is_dir() && fs::symlink_metadata(path.join("level.dat")).is_ok_and(|l| l.is_file()) =>
-            {
-                WorldFormat::Anvil
-            }
-            Some(_) => {
-                return Err(invalid(file, format!("world {name} requires a .polar file or an Anvil save directory")));
-            }
-            None if chunks.is_none() && extension(&source, "polar") => WorldFormat::Polar,
-            None => WorldFormat::Anvil,
-        };
-        if chunks.is_some() && format == WorldFormat::Polar {
-            return Err(invalid(file, format!("world {name} can only crop Anvil saves to chunks")));
-        }
-        worlds.insert(name.into(), World { source, format, chunks });
+        worlds.insert(name.into(), World { source });
     }
     Ok(worlds)
 }
@@ -159,39 +126,6 @@ fn source(
 
 fn extension(source: &str, expected: &str) -> bool {
     Path::new(source).extension().is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
-}
-
-fn chunk_range(file: &Path, expression: &Expression<'_>) -> io::Result<ChunkRange> {
-    let error = || invalid(file, "chunks requires literal { from: [x, z], to: [x, z] } with from <= to");
-    let fields = object_fields(file, expression)?;
-    if fields.len() != 2 {
-        return Err(error());
-    }
-    let corner = |key| -> io::Result<[i32; 2]> {
-        let Some(Expression::ArrayExpression(array)) = fields.get(key) else { return Err(error()) };
-        let values = array
-            .elements
-            .iter()
-            .map(|element| element.as_expression().and_then(integer))
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(error)?;
-        values.try_into().map_err(|_| error())
-    };
-    let (from, to) = (corner("from")?, corner("to")?);
-    if from[0] > to[0] || from[1] > to[1] {
-        return Err(error());
-    }
-    Ok(ChunkRange { from, to })
-}
-
-fn integer(expression: &Expression<'_>) -> Option<i32> {
-    match expression {
-        Expression::NumericLiteral(number) => number.raw.as_ref()?.parse().ok(),
-        Expression::UnaryExpression(unary) if unary.operator == UnaryOperator::UnaryNegation => {
-            integer(&unary.argument)?.checked_neg()
-        }
-        _ => None,
-    }
 }
 
 /// Rejects pack names declared twice anywhere in the project.
