@@ -1,13 +1,9 @@
 package com.chunkzero.chunk.runtime;
 
-import chunk.sync.v1.Jvm.JvmSessionStatus;
-
 import com.chunkzero.chunk.runtime.minestom.internal.AppRegistry;
 import com.chunkzero.chunk.runtime.minestom.internal.ComponentRegistry;
 import com.chunkzero.chunk.runtime.minestom.internal.GameplayService;
-import com.chunkzero.chunk.runtime.minestom.internal.ProcessService;
 import com.chunkzero.chunk.runtime.minestom.internal.SessionMethodRegistry;
-import com.chunkzero.chunk.runtime.minestom.internal.SessionMethodService;
 
 import net.minestom.server.MinecraftConstants;
 import net.minestom.server.ServerProcess;
@@ -16,7 +12,6 @@ import net.minestom.server.timer.TaskSchedule;
 
 import org.jetbrains.annotations.Nullable;
 
-import java.net.Inet6Address;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -26,11 +21,9 @@ public final class ChunkMinestom implements AutoCloseable {
     private final ChunkProcess chunk;
     private final ServerProcess server;
     private final TickExecutor ticks = new TickExecutor();
-    private final SessionManager sessions;
     private final ComponentRegistry components;
+    private final ChunkSessions sessions;
     private final GameplayService gameplay;
-    private final SessionMethodService methods;
-    private final ProcessService service;
     private final AtomicBoolean closed = new AtomicBoolean();
     private final Thread shutdownHook;
     private @Nullable Task task;
@@ -42,28 +35,20 @@ public final class ChunkMinestom implements AutoCloseable {
         var factories =
                 AppRegistry.load(chunk.app(), Thread.currentThread().getContextClassLoader());
         components = ComponentRegistry.load(Thread.currentThread().getContextClassLoader());
-        sessions =
+        var manager =
                 new SessionManager(
                         server,
                         ticks,
                         factories,
-                        (session, appId) -> chunk.backend(session),
-                        components);
-        sessions.setMover(chunk::move);
-        server.setCompressionThreshold(0);
-        server.connectionManager().setPlayerProvider(ManagedPlayer::new);
-        gameplay = new GameplayService(sessions, System::nanoTime, chunk::isReady);
-        methods =
-                new SessionMethodService(
-                        sessions,
+                        components,
                         SessionMethodRegistry.load(
                                 chunk.app(),
                                 factories.keySet(),
-                                Thread.currentThread().getContextClassLoader()),
-                        gameplay::arrived,
-                        chunk::methodResult,
-                        System::currentTimeMillis);
-        service = new ProcessService(sessions, chunk::isReady, gameplay, methods);
+                                Thread.currentThread().getContextClassLoader()));
+        server.setCompressionThreshold(0);
+        server.connectionManager().setPlayerProvider(ManagedPlayer::new);
+        sessions = chunk.host(manager);
+        gameplay = new GameplayService(manager, sessions);
         shutdownHook = new Thread(this::close, "chunk-minestom-shutdown");
         Runtime.getRuntime().addShutdownHook(shutdownHook);
     }
@@ -88,26 +73,12 @@ public final class ChunkMinestom implements AutoCloseable {
                                     () -> {
                                         ticks.flush();
                                         gameplay.flush();
-                                        chunk.flush();
-                                        var inventory = sessions.inventory();
-                                        chunk.progress(
-                                                sessions.activeCount(),
-                                                inventory.stream()
-                                                        .mapToInt(JvmSessionStatus::getAttached)
-                                                        .sum());
+                                        chunk.tick();
                                     })
                             .repeat(TaskSchedule.tick(1))
                             .schedule();
-            var address = chunk.playerAddress();
-            server.start(new InetSocketAddress(address, 0));
-            var host =
-                    address instanceof Inet6Address
-                            ? "[" + address.getHostAddress() + "]"
-                            : address.getHostAddress();
-            chunk.bind(
-                    host + ":" + server.server().getPort(),
-                    MinecraftConstants.PROTOCOL_VERSION,
-                    service);
+            server.start(new InetSocketAddress(chunk.playerAddress(), 0));
+            chunk.bind(server.server().getPort(), MinecraftConstants.PROTOCOL_VERSION);
             started = true;
         } catch (RuntimeException error) {
             close();
@@ -125,7 +96,7 @@ public final class ChunkMinestom implements AutoCloseable {
                         () -> {
                             if (task != null) task.cancel();
                         },
-                        methods::close,
+                        sessions::close,
                         gameplay::close,
                         components::close,
                         this::removeShutdownHook);

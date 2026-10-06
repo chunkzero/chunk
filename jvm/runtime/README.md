@@ -7,11 +7,12 @@ Minestom or Kotlin dependency.
 
 Apps use it together with an engine adapter:
 
-| Module                                                  | Artifact                                      | Contents                                                    |
-| ------------------------------------------------------- | --------------------------------------------- | ----------------------------------------------------------- |
-| `jvm/runtime`                                           | `com.chunkzero.chunk:runtime`                 | `ChunkProcess`, `@SessionType`, `@Component`                |
-| [`jvm/runtime-minestom`](../runtime-minestom/README.md) | `com.chunkzero.chunk:runtime-minestom`        | The Minestom adapter and the session API gameplay code uses |
-| `jvm/runtime-minestom-kotlin`                           | `com.chunkzero.chunk:runtime-minestom-kotlin` | Coroutine adapters, covered in the Minestom README          |
+| Module                                                        | Artifact                                      | Contents                                                        |
+| ------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------- |
+| `jvm/runtime`                                                 | `com.chunkzero.chunk:runtime`                 | `ChunkProcess`, `@SessionType`, `@Component`                    |
+| [`jvm/runtime-minestom`](../runtime-minestom/README.md)       | `com.chunkzero.chunk:runtime-minestom`        | The Minestom adapter and the session API gameplay code uses     |
+| `jvm/runtime-minestom-kotlin`                                 | `com.chunkzero.chunk:runtime-minestom-kotlin` | Coroutine adapters, covered in the Minestom README              |
+| [`jvm/minestom-primitives`](../minestom-primitives/README.md) | `com.chunkzero.chunk:minestom-primitives`     | Login handling for apps that run their own sessions on Minestom |
 
 The [Gradle plugin](../gradle-plugin/README.md) adds the right one to each app.
 
@@ -46,6 +47,58 @@ create, the players to admit and the session methods to run, and reports what it
 progress, heap, GC, CPU, sessions and players) at least every three seconds. A broken stream registers and subscribes
 again. Players do not pass through this link: the gateway connects to Minestom's own listener, and each login presents a
 single-use capability the JVM issued for that player's delivery.
+
+## Running your own sessions
+
+`runtime-minestom` decides what a session is: a `Session` with its own scope in a shared Minestom process. An engine
+adapter, or an app that wants other isolation, can instead implement `SessionHandler` and pass it to `chunk.host(...)`.
+The returned `ChunkSessions` keeps the accounting core relies on, whatever a session is:
+
+| Chunk keeps                                                          | The handler decides                                       |
+| -------------------------------------------------------------------- | --------------------------------------------------------- |
+| Session phases, the 10-second creation deadline, 256 live sessions   | What a session is and how it is isolated from the others  |
+| Delivery capabilities, identity checks and fencing, session capacity | Where an admitted player spawns, and when they've arrived |
+| Withdrawing a session's players before its handler finishes it       | How it tears a session down                               |
+| Which session methods may run, and for whom                          | What a session method does                                |
+
+```java
+try (var chunk = ChunkProcess.connect()) {
+    var sessions = chunk.host(new SessionHandler() {
+        @Override public void create(SessionControl session) {
+            // session.id(), type(), capacity(), configurationJson(), backend()
+            games.open(session).whenComplete((ok, error) -> {
+                if (error == null) session.ready();
+                else session.fail(error);
+            });
+        }
+
+        @Override public void finish(SessionControl session) {
+            games.close(session.id()).whenComplete((ok, error) -> {
+                if (error == null) session.ended();
+                else session.ended(error);
+            });
+        }
+    });
+    // Start the engine's listener on chunk.playerAddress(), leaving compression and encryption to the gateway.
+    chunk.bind(port, protocolVersion);
+    chunk.ready();
+    chunk.awaitShutdown();
+}
+```
+
+- Handler callbacks run one at a time on the host's own thread and must return promptly. Report through the
+  `SessionControl` from any thread.
+- `finish` runs once every player of the session has been released, including after a failed creation. A session counts
+  against the JVM until it has `ended()`.
+- Each login presents the payload of its `chunk:delivery` login plugin response.
+  `sessions.admit(setup, uuid, name, disconnect)` checks it and returns the player's `Delivery`; admit the player with
+  its `player()` profile, and call `arrived()` once they are in the session. If core withdraws the delivery,
+  `disconnect` runs; once the player's connection closed and any leave handling settled, call `release()`.
+- Call `chunk.tick()` once per engine tick, so core can tell a stalled JVM.
+- `Delivery.move(destination)` and `operationId(action)` work as `SessionScope`'s do. Session methods reach
+  `SessionHandler.method`, which no session declares by default.
+
+[`minestom-primitives`](../minestom-primitives/README.md) handles the login side for Minestom.
 
 ## Launch configuration
 

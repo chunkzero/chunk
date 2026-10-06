@@ -27,13 +27,15 @@ class SessionManagerTest {
                 val ticks = TickExecutor()
                 val firstManager = SessionManager(first, ticks, mapOf("flat" to Supplier { FlatSession() }))
                 val secondManager = SessionManager(second, ticks, mapOf("flat" to Supplier { FlatSession() }))
+                val firstHost = TestHosts.detached(firstManager)
+                val secondHost = TestHosts.detached(secondManager)
                 val firstEvents = mutableListOf<SessionScope>()
                 val secondEvents = mutableListOf<SessionScope>()
                 first.eventHandler().addListener(SessionCreateEvent::class.java) { firstEvents.add(it.session) }
                 second.eventHandler().addListener(SessionCreateEvent::class.java) { secondEvents.add(it.session) }
                 val session = session("flat")
                 val creations =
-                    listOf(firstManager.create("same-id", session), secondManager.create("same-id", session))
+                    listOf(firstHost.create("same-id", session), secondHost.create("same-id", session))
                 repeat(4) { ticks.flush() }
                 creations.forEach { it.join() }
                 val firstScope = firstManager.get("same-id").scope
@@ -42,7 +44,7 @@ class SessionManagerTest {
                 assertEquals(listOf(secondScope), secondEvents)
                 assertSame(first, firstScope.process)
                 assertSame(second, secondScope.instances.single().process())
-                val ended = firstManager.finish("same-id", session)
+                val ended = firstHost.finish("same-id", session)
                 repeat(8) { ticks.flush() }
                 ended.join()
                 first.close()
@@ -53,24 +55,6 @@ class SessionManagerTest {
                 assertEquals(secondScope.instances.toSet(), second.instanceManager().instances)
                 assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_READY, secondManager.get("same-id").phase)
             }
-        }
-    }
-
-    @Test
-    fun `work queued after a session creation sees the created session`() {
-        val process = ServerProcess.create()
-        val ticks = TickExecutor()
-        val manager = SessionManager(process, ticks, mapOf("flat" to Supplier { FlatSession() }))
-        try {
-            manager.create("queued", session("flat"))
-            val queued = manager.afterQueued()
-            assertTrue(manager.inventory().isEmpty())
-            assertFalse(queued.isDone)
-            ticks.flush()
-            assertTrue(queued.isDone)
-            assertEquals(listOf("queued"), manager.inventory().map { it.id })
-        } finally {
-            process.stop()
         }
     }
 
@@ -99,8 +83,9 @@ class SessionManagerTest {
                 ),
             )
         val game = session("game")
+        val host = TestHosts.detached(manager)
         try {
-            val created = manager.create("game", game)
+            val created = host.create("game", game)
             repeat(4) { ticks.flush() }
             created.join()
             val session = manager.get("game")
@@ -124,7 +109,7 @@ class SessionManagerTest {
             left.complete(null)
             ticks.flush()
             assertTrue(leavingResult.isCompletedExceptionally)
-            val ended = manager.finish("game", game)
+            val ended = host.finish("game", game)
             repeat(8) { ticks.flush() }
             ended.join()
         } finally {
@@ -171,37 +156,38 @@ class SessionManagerTest {
                 ),
             )
 
+        val host = TestHosts.detached(manager)
         try {
             val first = session("delayed")
             val second = session("flat").toBuilder().setCapacity(32).build()
-            assertEquals(0, manager.activeCount())
-            val pending = manager.create("first", first)
-            val independent = manager.create("second", second)
+            assertEquals(0, host.activeCount())
+            val pending = host.create("first", first)
+            val independent = host.create("second", second)
             repeat(4) { ticks.flush() }
             assertFalse(pending.isDone)
-            assertEquals(2, manager.activeCount())
+            assertEquals(2, host.activeCount())
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_READY, independent.join().phase)
             assertEquals(32, independent.join().capacity)
             assertEquals(3, process.instanceManager().instances.size)
             created.complete(null)
             repeat(4) { ticks.flush() }
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_READY, pending.join().phase)
-            assertEquals(2, manager.activeCount())
-            val duplicate = manager.create("first", first)
+            assertEquals(2, host.activeCount())
+            val duplicate = host.create("first", first)
             repeat(2) { ticks.flush() }
             assertEquals(pending.join(), duplicate.join())
-            val changed = manager.create("first", first.toBuilder().setCapacity(3).build())
+            val changed = host.create("first", first.toBuilder().setCapacity(3).build())
             ticks.flush()
             assertTrue(changed.isCompletedExceptionally)
-            val ending = manager.finish("first", first)
+            val ending = host.finish("first", first)
             repeat(5) { ticks.flush() }
             assertFalse(ending.isDone)
-            assertEquals(2, manager.activeCount())
+            assertEquals(2, host.activeCount())
             assertEquals(0, disposed)
             finished.complete(null)
             repeat(5) { ticks.flush() }
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_ENDED, ending.join().phase)
-            assertEquals(1, manager.activeCount())
+            assertEquals(1, host.activeCount())
             assertEquals(1, disposed)
             assertEquals(1, process.instanceManager().instances.size)
             assertFalse(process.eventHandler().children.any { it.name == ownedScope.events.name })
@@ -209,19 +195,23 @@ class SessionManagerTest {
             val staleTask = ownedScope.onTick { error("Disposed task ran") }
             ticks.flush()
             assertTrue(staleTask.isCompletedExceptionally)
-            val stopSecond = manager.finish("second", second)
+            val stopSecond = host.finish("second", second)
             repeat(8) { ticks.flush() }
             assertTrue(stopSecond.isDone)
-            assertEquals(0, manager.activeCount())
-            val failed = manager.create("failed", session("failed"))
+            assertEquals(0, host.activeCount())
+            val failed = host.create("failed", session("failed"))
             repeat(8) { ticks.flush() }
             assertTrue(failed.isCompletedExceptionally)
             assertEquals(
                 JvmSessionPhase.JVM_SESSION_PHASE_FAILED,
-                manager.inventory().single { it.id == "failed" }.phase,
+                host
+                    .inventory()
+                    .sessionsList
+                    .single { it.id == "failed" }
+                    .phase,
             )
-            assertEquals(0, manager.activeCount())
-            assertEquals(3, manager.inventory().size)
+            assertEquals(0, host.activeCount())
+            assertEquals(3, host.inventory().sessionsList.size)
         } finally {
             process.stop()
         }

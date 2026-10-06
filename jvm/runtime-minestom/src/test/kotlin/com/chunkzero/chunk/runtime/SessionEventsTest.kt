@@ -1,6 +1,7 @@
 package com.chunkzero.chunk.runtime
 
 import chunk.sync.v1.Jvm.JvmSession
+import chunk.sync.v1.Jvm.JvmSessionPhase
 import com.chunkzero.chunk.runtime.minestom.event.SessionCreateEvent
 import com.chunkzero.chunk.runtime.minestom.event.SessionDestroyEvent
 import com.chunkzero.chunk.runtime.minestom.event.SessionEvent
@@ -96,7 +97,8 @@ class SessionEventsTest {
                     override fun onFinish() = finishing
                 },
             )
-        val create = manager.create("first", game)
+        val host = TestHosts.detached(manager)
+        val create = host.create("first", game)
         ticks.flush()
         assertTrue(global.isEmpty())
         completeOffThread(creating)
@@ -116,7 +118,8 @@ class SessionEventsTest {
                     }
                 },
             )
-        await(otherManager.create("second", game))
+        val otherHost = TestHosts.detached(otherManager)
+        await(otherHost.create("second", game))
         val player = player()
         val join = session.join(player)
         ticks.flush()
@@ -144,7 +147,7 @@ class SessionEventsTest {
         assertEquals(1, playerTicks)
         await(session.leave(player))
 
-        val finish = manager.finish("first", game)
+        val finish = host.finish("first", game)
         repeat(4) { ticks.flush() }
         assertFalse(disposed)
         completeOffThread(finishing)
@@ -161,9 +164,9 @@ class SessionEventsTest {
         assertEquals(local, global.filter { it.session === scope })
         assertEquals(1, other.size)
         assertFalse(process.eventHandler().children.contains(scope.events))
-        await(manager.finish("first", game))
+        await(host.finish("first", game))
         assertEquals(4, local.size)
-        await(otherManager.finish("second", game))
+        await(otherHost.finish("second", game))
     }
 
     @Test
@@ -180,13 +183,14 @@ class SessionEventsTest {
                         CompletableFuture.failedFuture<Void>(IllegalStateException("Join failed"))
                 },
             )
-        await(manager.create("first", game))
-        await(manager.create("first", game))
+        val host = TestHosts.detached(manager)
+        await(host.create("first", game))
+        await(host.create("first", game))
         val session = manager.get("first")
         val player = player()
         assertThrows(CompletionException::class.java) { await(session.join(player)) }
         await(session.leave(player))
-        await(manager.finish("first", game))
+        await(host.finish("first", game))
         assertEquals(
             listOf(SessionCreateEvent::class.java, SessionDestroyEvent::class.java),
             global.map { it.javaClass },
@@ -209,8 +213,9 @@ class SessionEventsTest {
                     }
                 },
             )
-        assertThrows(CompletionException::class.java) { await(failed.create("failed", game)) }
-        assertThrows(CompletionException::class.java) { await(failed.finish("failed", game)) }
+        val failedHost = TestHosts.detached(failed)
+        assertThrows(CompletionException::class.java) { await(failedHost.create("failed", game)) }
+        assertThrows(CompletionException::class.java) { await(failedHost.finish("failed", game)) }
         assertEquals(1, global.count { it.session.id == "failed" && it is SessionDestroyEvent })
         assertFalse(global.any { it.session.id == "failed" && it is SessionCreateEvent })
         process.schedulerManager().processTick()
@@ -234,8 +239,9 @@ class SessionEventsTest {
                     }
                 },
             )
-        await(manager.create("first", game))
-        await(manager.create("second", game))
+        val host = TestHosts.detached(manager)
+        await(host.create("first", game))
+        await(host.create("second", game))
         val (first, second) = scopes
         val firstEvents = mutableListOf<Event>()
         val secondEvents = mutableListOf<Event>()
@@ -270,14 +276,14 @@ class SessionEventsTest {
         schedulers.processTickEnd()
         assertEquals(1 to 1, starts to ends)
 
-        await(manager.finish("first", game))
+        await(host.finish("first", game))
         schedulers.processTick()
         schedulers.processTickEnd()
         assertEquals(1 to 1, starts to ends)
         assertTrue(entity.isRemoved)
         assertFalse(outsider.isRemoved)
         assertEquals(setOf(second.instances.single(), outsider.instance), process.instanceManager().instances)
-        await(manager.finish("second", game))
+        await(host.finish("second", game))
     }
 
     @Test
@@ -296,9 +302,10 @@ class SessionEventsTest {
                     }
                 },
             )
-        await(manager.create("owner", game))
+        val host = TestHosts.detached(manager)
+        await(host.create("owner", game))
         assertEquals(1, registered)
-        assertThrows(Throwable::class.java) { await(manager.finish("owner", game)) }
+        assertThrows(Throwable::class.java) { await(host.finish("owner", game)) }
         assertTrue(process.instanceManager().instances.isEmpty())
         assertFalse(process.eventHandler().children.contains(scope.events))
         assertEquals(1, global.count { it is SessionDestroyEvent })
@@ -317,7 +324,8 @@ class SessionEventsTest {
                     }
                 },
             )
-        await(manager.create("native", game))
+        val host = TestHosts.detached(manager)
+        await(host.create("native", game))
         val owned = CompletableFuture<Thread>()
         scope.events.addListener(EntityTickEvent::class.java) {
             if (!owned.isDone) {
@@ -327,7 +335,7 @@ class SessionEventsTest {
         }
         repeat(20) { if (!owned.isDone) process.ticker().tick(System.nanoTime()) }
         assertSame(process.dispatcher().threads().single(), owned.join())
-        await(manager.finish("native", game))
+        await(host.finish("native", game))
     }
 
     @Test
@@ -351,13 +359,14 @@ class SessionEventsTest {
                     override fun onLeave(player: Player) = CompletableFuture.failedFuture<Void>(hookFailure)
                 },
             )
-        await(manager.create("first", game))
+        val host = TestHosts.detached(manager)
+        await(host.create("first", game))
         val session = manager.get("first")
         val player = player()
         await(session.join(player))
         val leave = assertThrows(CompletionException::class.java) { await(session.leave(player)) }
         assertSame(hookFailure, leave.cause)
-        assertThrows(CompletionException::class.java) { await(manager.finish("first", game)) }
+        assertStuckEnding(host, "first")
         assertEquals(3, reported.size)
         assertTrue(reported.all { it === listenerFailure })
         assertTrue(global.last() is SessionDestroyEvent)
@@ -377,6 +386,17 @@ class SessionEventsTest {
         node.addListener(SessionJoinEvent::class.java, ::record)
         node.addListener(SessionLeaveEvent::class.java, ::record)
         node.addListener(SessionDestroyEvent::class.java, ::record)
+    }
+
+    /** A scope that fails to dispose keeps its session ending, so it stays counted. */
+    private fun assertStuckEnding(
+        host: ChunkSessions,
+        id: String,
+    ) {
+        val finish = host.finish(id, game)
+        repeat(20) { ticks.flush() }
+        assertFalse(finish.isDone)
+        assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_ENDING, host.phase(id))
     }
 
     private fun manager(session: Session) = SessionManager(process, ticks, mapOf("game" to Supplier { session }))

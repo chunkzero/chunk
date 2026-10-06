@@ -28,7 +28,7 @@ class AppRegistryTest {
     @TempDir Path directory;
 
     @Test
-    void serviceRegistryCreatesIndependentSessionsWithAssignedCallerIdentity() throws Exception {
+    void serviceRegistryCreatesIndependentSessions() throws Exception {
         var lobby = compile("lobby");
         var jar = jar("lobby.jar", lobby.classes(), lobby.provider());
         try (var loader = loader(jar)) {
@@ -39,13 +39,6 @@ class AppRegistryTest {
             assertEquals("lobby", first.toString());
             assertNotSame(first, factory.create());
             assertTrue(AppRegistry.load("renamed", loader).containsKey("renamed/default"));
-            factory.backend(
-                    "instance",
-                    (session, app) -> {
-                        assertEquals("instance", session);
-                        assertEquals("lobby", app);
-                        return null;
-                    });
         }
     }
 

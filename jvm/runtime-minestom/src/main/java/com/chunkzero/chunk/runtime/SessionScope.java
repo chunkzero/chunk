@@ -1,7 +1,5 @@
 package com.chunkzero.chunk.runtime;
 
-import chunk.sync.v1.CoreOuterClass.Position;
-
 import com.chunkzero.chunk.backend.api.Destination;
 import com.chunkzero.chunk.backend.client.BackendSession;
 import com.chunkzero.chunk.backend.client.OperationId;
@@ -45,7 +43,6 @@ import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Supplier;
-import java.util.regex.Pattern;
 
 /**
  * The gameplay isolate of one session within the shared server process. It owns the session's
@@ -53,7 +50,6 @@ import java.util.regex.Pattern;
  * until disposal. It is not a memory or failure boundary.
  */
 public final class SessionScope {
-    private static final Pattern ACTION = Pattern.compile("[A-Za-z0-9_-]{1,32}");
 
     private final ServerProcess process;
     private final String id;
@@ -61,7 +57,6 @@ public final class SessionScope {
     private final Supplier<CompletionStage<Void>> requestFinish;
     private final @Nullable BackendSession backend;
     private final ComponentRegistry components;
-    private final Mover mover;
     private final List<Instance> ownedInstances = new CopyOnWriteArrayList<>();
     private final List<AutoCloseable> resources = new ArrayList<>();
     private final Map<Player, List<AutoCloseable>> playerResources = new IdentityHashMap<>();
@@ -88,24 +83,12 @@ public final class SessionScope {
             Supplier<CompletionStage<Void>> requestFinish,
             @Nullable BackendSession backend,
             ComponentRegistry components) {
-        this(process, id, ticks, requestFinish, backend, components, Mover.UNAVAILABLE);
-    }
-
-    SessionScope(
-            ServerProcess process,
-            String id,
-            TickExecutor ticks,
-            Supplier<CompletionStage<Void>> requestFinish,
-            @Nullable BackendSession backend,
-            ComponentRegistry components,
-            Mover mover) {
         this.process = process;
         this.id = id;
         this.ticks = ticks;
         this.requestFinish = requestFinish;
         this.backend = backend;
         this.components = components;
-        this.mover = mover;
         events = EventNode.event("session-" + id, EventFilter.ALL, this::owns);
         try {
             var schedulers = process.schedulerManager();
@@ -271,20 +254,8 @@ public final class SessionScope {
 
     /** Stable mutation identity for one action on this exact player delivery. */
     public OperationId operationId(Player player, String action) {
-        if (!ACTION.matcher(action).matches())
-            throw new IllegalArgumentException("Invalid operation action");
         if (!players.contains(player)) throw new IllegalArgumentException("Player is not admitted");
-        var generation = ((ManagedPlayer) player).getBinding().getGeneration();
-        return new OperationId(
-                id
-                        + "/"
-                        + player.getUuid()
-                        + "/"
-                        + generation.getEpoch()
-                        + "."
-                        + generation.getRevision()
-                        + "/"
-                        + action);
+        return ((ManagedPlayer) player).getDelivery().operationId(action);
     }
 
     /**
@@ -296,9 +267,7 @@ public final class SessionScope {
     public CompletionStage<MoveResult> move(Player player, Destination destination) {
         Objects.requireNonNull(destination);
         if (!players.contains(player)) throw new IllegalArgumentException("Player is not admitted");
-        var managed = (ManagedPlayer) player;
-        return mover.move(
-                managed.getOperation(), managed.getBinding().getGeneration(), destination);
+        return ((ManagedPlayer) player).getDelivery().move(destination);
     }
 
     public CompletionStage<Void> finish() {
@@ -367,17 +336,6 @@ public final class SessionScope {
 
     private void checkActive() {
         if (disposed) throw new IllegalStateException("Session disposed");
-    }
-
-    /** Asks core to move the player of a delivery, as {@code ChunkProcess} does. */
-    interface Mover {
-        Mover UNAVAILABLE =
-                (delivery, generation, destination) ->
-                        CompletableFuture.failedFuture(
-                                new IllegalStateException("Moves unavailable"));
-
-        CompletionStage<MoveResult> move(
-                String delivery, Position generation, Destination destination);
     }
 
     private static void reject(AutoCloseable resource, String message) {

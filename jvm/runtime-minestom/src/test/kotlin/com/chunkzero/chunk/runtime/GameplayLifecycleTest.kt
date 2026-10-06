@@ -14,6 +14,7 @@ import net.minestom.server.network.ConnectionState
 import net.minestom.server.network.packet.server.login.LoginSuccessPacket
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
@@ -68,13 +69,15 @@ class GameplayLifecycleTest {
                         },
                 ),
             )
-        val service = GameplayService(manager, System::nanoTime) { true }
+        val host = TestHosts.detached(manager)
+        val service = GameplayService(manager, host)
         val sockets = mutableListOf<Socket>()
         minecraft
             .schedulerManager()
             .buildTask {
                 ticks.flush()
                 service.flush()
+                host.sweep()
             }.repeat(
                 net.minestom.server.timer.TaskSchedule
                     .tick(1),
@@ -87,8 +90,8 @@ class GameplayLifecycleTest {
                     .setSessionType(type)
                     .setCapacity(2)
                     .build()
-            manager.create("a", session()).get(3, TimeUnit.SECONDS)
-            manager.create("b", session()).get(3, TimeUnit.SECONDS)
+            host.create("a", session()).get(3, TimeUnit.SECONDS)
+            host.create("b", session()).get(3, TimeUnit.SECONDS)
             val uuid = UUID.randomUUID().toString()
             val wanted = mutableMapOf<String, JvmDelivery>()
 
@@ -102,7 +105,11 @@ class GameplayLifecycleTest {
                 .setPlayer(PlayerIdentity.newBuilder().setUuid(uuid).setUsername("test"))
                 .build()
 
-            fun phase(operation: String) = service.deliveries().single { it.operationId == operation }.phase
+            fun apply() = host.apply(wanted.mapKeys { "delivery/${it.key}" }.mapValues { it.value.toByteString() })
+
+            fun status(operation: String) = host.inventory().deliveriesList.single { it.operationId == operation }
+
+            fun phase(operation: String) = status(operation).phase
 
             fun await(
                 operation: String,
@@ -120,8 +127,8 @@ class GameplayLifecycleTest {
                 request: JvmDelivery,
             ): Socket {
                 wanted[operation] = request
-                service.apply(wanted)
-                val prepared = service.deliveries().single { it.operationId == operation }
+                apply()
+                val prepared = status(operation)
                 val setup =
                     PlayerSetup
                         .newBuilder()
@@ -150,21 +157,21 @@ class GameplayLifecycleTest {
                         .toBuilder()
                         .setWithdraw(true)
                         .build()
-                service.apply(wanted)
+                apply()
             }
             arrive(connect("first", delivery("a", 1)), "first")
-            assertTrue(service.arrived("first", "a"))
-            assertFalse(service.arrived("first", "b"))
+            assertTrue(host.delivery("first")!!.isArrived)
+            assertEquals("a", host.delivery("first")!!.session())
             val oldPlayer = minecraft.connectionManager().onlinePlayers.single()
             assertThrows(IllegalStateException::class.java) { connect("destination", delivery("b", 2)) }
             withdraw("first")
             await("first", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
-            assertFalse(service.arrived("first", "a"))
+            assertNull(host.delivery("first"))
             assertTrue(oldPlayer.isRemoved)
             assertTrue(oldPlayer in closedPlayers)
             assertTrue(minecraft.connectionManager().onlinePlayers.isEmpty())
             arrive(connect("next", delivery("b", 3)), "next")
-            manager.finish("a", session()).get(3, TimeUnit.SECONDS)
+            host.finish("a", session()).get(3, TimeUnit.SECONDS)
             val current = minecraft.connectionManager().onlinePlayers.single()
             assertEquals(uuid, current.uuid.toString())
             assertTrue(
@@ -177,7 +184,7 @@ class GameplayLifecycleTest {
             assertEquals(setOf(oldPlayer), closedPlayers)
             withdraw("next")
             await("next", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
-            manager.create("c", session("gated")).get(3, TimeUnit.SECONDS)
+            host.create("c", session("gated")).get(3, TimeUnit.SECONDS)
             connect("pending", delivery("c", 4))
             joinStarted.get(3, TimeUnit.SECONDS)
             assertTrue(phase("pending") != JvmDeliveryPhase.JVM_DELIVERY_PHASE_ARRIVED)
@@ -193,8 +200,8 @@ class GameplayLifecycleTest {
             arrive(connect("replacement", delivery("c", 6)), "replacement")
             withdraw("replacement")
             await("replacement", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
-            manager.finish("c", session("gated")).get(3, TimeUnit.SECONDS)
-            manager.finish("b", session()).get(3, TimeUnit.SECONDS)
+            host.finish("c", session("gated")).get(3, TimeUnit.SECONDS)
+            host.finish("b", session()).get(3, TimeUnit.SECONDS)
         } finally {
             sockets.forEach { it.close() }
             service.close()

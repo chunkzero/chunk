@@ -9,6 +9,7 @@ import chunk.sync.v1.CoreOuterClass.Entry;
 import chunk.sync.v1.CoreOuterClass.Position;
 import chunk.sync.v1.CoreOuterClass.SubscribeRequest;
 import chunk.sync.v1.CoreOuterClass.Update;
+import chunk.sync.v1.Gateway.PlayerIdentity;
 import chunk.sync.v1.Jvm.JvmDelivery;
 import chunk.sync.v1.Jvm.JvmSession;
 
@@ -112,20 +113,24 @@ class CoinCommandTest {
                                         new SessionRegistration(
                                                 "arena",
                                                 () -> ExampleSessions.INSTANCE.arena("Arena"))),
-                        (session, app) ->
+                        Map.of());
+        var host =
+                ChunkSessions.detached(
+                        manager,
+                        session ->
                                 BackendSession.overCore(
                                         channel,
                                         "test-credential-with-at-least-32-bytes",
                                         "build",
                                         new SessionIdentity(
-                                                new SessionId(session), app, Optional.empty()),
+                                                new SessionId(session), session, Optional.empty()),
                                         scheduler,
                                         Duration.ofSeconds(5)));
         var lobby = session("lobby");
         var arena = session("arena");
         try {
-            await(ticks, manager.create("lobby", lobby));
-            await(ticks, manager.create("arena", arena));
+            await(ticks, host.create("lobby", lobby));
+            await(ticks, host.create("arena", arena));
             var uuid = UUID.randomUUID();
             long generation = 0;
             for (var destination : List.of("lobby", "arena", "arena")) {
@@ -142,8 +147,19 @@ class CoinCommandTest {
                         };
                 connection.setClientState(ConnectionState.PLAY);
                 var player = new ManagedPlayer(connection, new GameProfile(uuid, "player"));
-                player.setBinding(
-                        "delivery", JvmDelivery.newBuilder().setGeneration(at(generation)).build());
+                player.setDelivery(
+                        new Delivery(
+                                null,
+                                "delivery",
+                                JvmDelivery.newBuilder()
+                                        .setSession(destination)
+                                        .setGeneration(at(generation))
+                                        .setPlayer(
+                                                PlayerIdentity.newBuilder()
+                                                        .setUuid(uuid.toString())
+                                                        .setUsername("player"))
+                                        .build(),
+                                0));
                 var managed = manager.get(destination);
                 try {
                     await(ticks, managed.join(player));
@@ -165,8 +181,8 @@ class CoinCommandTest {
             }
         } finally {
             try {
-                await(ticks, manager.finish("lobby", lobby));
-                await(ticks, manager.finish("arena", arena));
+                await(ticks, host.finish("lobby", lobby));
+                await(ticks, host.finish("arena", arena));
             } finally {
                 channel.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);
                 server.shutdownNow().awaitTermination(3, TimeUnit.SECONDS);

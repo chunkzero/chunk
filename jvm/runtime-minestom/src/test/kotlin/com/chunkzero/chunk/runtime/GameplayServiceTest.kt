@@ -10,8 +10,6 @@ import chunk.sync.v1.Jvm.JvmSessionPhase
 import chunk.sync.v1.Jvm.PlayerSetup
 import com.chunkzero.chunk.runtime.bootstrap.FlatSession
 import com.chunkzero.chunk.runtime.minestom.internal.GameplayService
-import com.chunkzero.chunk.runtime.minestom.internal.ProcessService
-import com.chunkzero.chunk.runtime.minestom.internal.SessionMethodService
 import com.google.protobuf.ByteString
 import net.minestom.server.ServerProcess
 import net.minestom.server.network.ConnectionState
@@ -37,22 +35,22 @@ class GameplayServiceTest {
         val ticks = TickExecutor()
         val manager = SessionManager(minecraft, ticks, mapOf("bridge" to Supplier { FlatSession() }))
         val clock = AtomicLong(System.nanoTime())
-        val gameplay = GameplayService(manager, clock::get) { true }
-        val methods = SessionMethodService(manager, mapOf(), gameplay::arrived, { _, _ -> }, System::currentTimeMillis)
         val core = FakeCore()
+        val host = TestHosts.linked(manager, core, clock::get)
+        val gameplay = GameplayService(manager, host)
         minecraft
             .schedulerManager()
             .buildTask {
                 ticks.flush()
                 gameplay.flush()
-                core.wake()
+                host.sweep()
             }.repeat(TaskSchedule.tick(1))
             .schedule()
         minecraft.start(InetSocketAddress("127.0.0.1", 0))
         val port = minecraft.server().port
         val sockets = mutableListOf<Socket>()
         try {
-            core.connect(ProcessService(manager, { true }, gameplay, methods))
+            core.connect(host.state())
             core.put(
                 "session/bridge",
                 JvmSession
@@ -62,7 +60,7 @@ class GameplayServiceTest {
                     .build(),
             )
             val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
-            while (manager.phase("bridge") != JvmSessionPhase.JVM_SESSION_PHASE_READY) {
+            while (host.phase("bridge") != JvmSessionPhase.JVM_SESSION_PHASE_READY) {
                 check(System.nanoTime() < deadline) { "The session never became ready" }
                 Thread.sleep(10)
             }

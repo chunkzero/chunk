@@ -1,10 +1,8 @@
 package com.chunkzero.chunk.runtime;
 
 import com.chunkzero.chunk.backend.api.BackendJson;
-import com.chunkzero.chunk.backend.client.BackendSession;
 
 import org.jetbrains.annotations.ApiStatus;
-import org.jetbrains.annotations.Nullable;
 
 import java.util.Objects;
 import java.util.function.BiFunction;
@@ -66,11 +64,5 @@ public final class SessionRegistration {
         if (!config.isObject() || !config.isEmpty())
             throw new IllegalArgumentException(
                     "Session provider does not declare creation configuration");
-    }
-
-    @Nullable
-    BackendSession backend(
-            String sessionId, @Nullable BiFunction<String, String, BackendSession> clients) {
-        return clients == null ? null : clients.apply(sessionId, appId);
     }
 }

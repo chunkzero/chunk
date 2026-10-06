@@ -1,4 +1,4 @@
-package com.chunkzero.chunk.runtime.minestom.internal;
+package com.chunkzero.chunk.runtime;
 
 import chunk.sync.v1.CoreOuterClass.Position;
 

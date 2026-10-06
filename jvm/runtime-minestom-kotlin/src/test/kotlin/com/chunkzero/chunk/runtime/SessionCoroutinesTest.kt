@@ -167,14 +167,15 @@ class SessionCoroutinesTest {
             }
             assertTrue(until())
         }
+        val host = ChunkSessions.detached(manager) { null }
         try {
             val game = session("game")
             val other = session("flat")
-            val created = manager.create("game", game)
-            val independent = manager.create("other", other)
+            val created = host.create("game", game)
+            val independent = host.create("other", other)
             pump { created.isDone && independent.isDone && observed }
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_READY, created.join().phase)
-            val ending = manager.finish("game", game)
+            val ending = host.finish("game", game)
             pump { mutationStarted.isDone }
             assertFalse(ending.isDone)
             assertFalse(watchClosed.isDone)
@@ -183,7 +184,7 @@ class SessionCoroutinesTest {
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_ENDED, ending.join().phase)
             assertTrue(committed)
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_READY, manager.get("other").phase)
-            val stopOther = manager.finish("other", other)
+            val stopOther = host.finish("other", other)
             pump { stopOther.isDone }
         } finally {
             result.complete(Unit)
