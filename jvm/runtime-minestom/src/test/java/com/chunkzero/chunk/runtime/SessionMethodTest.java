@@ -57,22 +57,26 @@ class SessionMethodTest {
         try {
             settle(ticks, host.create("session", spec));
             var control = controls.getFirst();
-            var result = manager.method(control, "record", "{\"message\":\"first\"}");
+            var result = manager.method(control, call("record", "{\"message\":\"first\"}"));
             settle(ticks, result.toCompletableFuture());
             assertEquals("1", result.toCompletableFuture().join());
             assertEquals(List.of(Thread.currentThread()), game.threads);
             assertTrue(
-                    manager.method(control, "missing", "{}")
+                    manager.method(control, call("missing", "{}"))
                             .toCompletableFuture()
                             .isCompletedExceptionally());
             settle(ticks, host.finish("session", spec));
-            var late = manager.method(control, "record", "{\"message\":\"late\"}");
+            var late = manager.method(control, call("record", "{\"message\":\"late\"}"));
             ticks.flush();
             assertTrue(late.toCompletableFuture().isCompletedExceptionally());
             assertEquals(1, game.threads.size());
         } finally {
             process.stop();
         }
+    }
+
+    private static SessionMethod call(String name, String argumentsJson) {
+        return new SessionMethod(name, argumentsJson, () -> true);
     }
 
     private static void settle(TickExecutor ticks, CompletableFuture<?> future) {

@@ -25,12 +25,12 @@ public interface SessionHandler {
 
     /**
      * Runs session method {@code method} of a ready session for one of its arrived players, and
-     * completes with its result as JSON, in at most 48 KiB. By default, sessions declare no
-     * methods.
+     * completes with its result as JSON, in at most 48 KiB. Call {@link SessionMethod#start()}
+     * right before running the method's effects, and do not run them if it returns false. A call
+     * that completes without having started is cancelled. By default, sessions declare no methods.
      */
-    default CompletionStage<String> method(
-            SessionControl session, String method, String argumentsJson) {
+    default CompletionStage<String> method(SessionControl session, SessionMethod call) {
         return CompletableFuture.failedFuture(
-                new IllegalArgumentException("Undeclared session method: " + method));
+                new IllegalArgumentException("Undeclared session method: " + call.name()));
     }
 }

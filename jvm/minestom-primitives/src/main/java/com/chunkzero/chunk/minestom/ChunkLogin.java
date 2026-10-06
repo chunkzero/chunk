@@ -115,8 +115,9 @@ public final class ChunkLogin implements AutoCloseable {
         admissions.forEach(
                 (connection, admission) -> {
                     if (connection.isOnline() || admission.leaving) return;
-                    admission.leaving = true;
                     var player = connection.getPlayer();
+                    if (player != null && !player.isRemoved()) return;
+                    admission.leaving = true;
                     CompletionStage<Void> left;
                     try {
                         left =

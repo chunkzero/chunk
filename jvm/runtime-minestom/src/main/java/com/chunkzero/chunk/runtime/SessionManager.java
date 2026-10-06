@@ -125,19 +125,19 @@ public final class SessionManager implements SessionHandler {
     }
 
     @Override
-    public CompletionStage<String> method(
-            SessionControl control, String method, String argumentsJson) {
-        var binding = methods.get(control.type() + "/" + method);
+    public CompletionStage<String> method(SessionControl control, SessionMethod call) {
+        var binding = methods.get(control.type() + "/" + call.name());
         if (binding == null)
             return CompletableFuture.failedFuture(
                     new IllegalArgumentException("Undeclared session method"));
         return ticks.submit(
                 () -> {
+                    if (!call.start()) return null;
                     var managed = sessions.get(control.id());
                     if (managed == null
                             || control.phase() != JvmSessionPhase.JVM_SESSION_PHASE_READY)
                         throw new IllegalStateException("Session unavailable");
-                    return binding.invoke(managed.behavior, argumentsJson);
+                    return binding.invoke(managed.behavior, call.argumentsJson());
                 });
     }
 

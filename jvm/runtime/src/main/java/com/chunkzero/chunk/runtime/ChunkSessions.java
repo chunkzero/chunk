@@ -444,7 +444,16 @@ public final class ChunkSessions implements AutoCloseable {
                         this, id, session, configuration, link.backend(id), link.nanoTime());
         outcomes.remove(id);
         sessions.put(id, control);
-        after.add(() -> dispatch(control, () -> handler.create(control)));
+        after.add(
+                () ->
+                        dispatch(
+                                control,
+                                () -> {
+                                    synchronized (this) {
+                                        if (control.handlerFinishing) return;
+                                    }
+                                    handler.create(control);
+                                }));
         return control.created;
     }
 
@@ -720,13 +729,16 @@ public final class ChunkSessions implements AutoCloseable {
                 cancel(operation);
                 return;
             }
-            operation.started = true;
         }
         CompletionStage<String> result;
         try {
             result =
                     handler.method(
-                            session, call.getMethod(), call.getArgumentsJson().toStringUtf8());
+                            session,
+                            new SessionMethod(
+                                    call.getMethod(),
+                                    call.getArgumentsJson().toStringUtf8(),
+                                    () -> start(operation)));
         } catch (RuntimeException error) {
             result = CompletableFuture.failedFuture(error);
         }
@@ -747,9 +759,28 @@ public final class ChunkSessions implements AutoCloseable {
                                             .build();
                     }
                     synchronized (this) {
-                        complete(operation, outcome);
+                        if (operation.started) complete(operation, outcome);
+                        else cancel(operation);
                     }
                 });
+    }
+
+    /** Marks {@code operation} started if it may still run, and cancels it otherwise. */
+    private synchronized boolean start(MethodCall operation) {
+        if (operation.done || methods.get(operation.id) != operation) return false;
+        if (operation.started) return true;
+        var call = operation.call;
+        var session = sessions.get(call.getSession());
+        if (closed
+                || session == null
+                || session.phase != JvmSessionPhase.JVM_SESSION_PHASE_READY
+                || link.currentTimeMillis() >= call.getDeadlineMs()
+                || !arrivedIn(call.getDelivery(), call.getSession())) {
+            cancel(operation);
+            return false;
+        }
+        operation.started = true;
+        return true;
     }
 
     private boolean arrivedIn(String operation, String session) {

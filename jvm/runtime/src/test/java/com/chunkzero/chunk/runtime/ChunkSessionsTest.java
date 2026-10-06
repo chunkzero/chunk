@@ -22,6 +22,7 @@ import com.google.protobuf.Message;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -30,6 +31,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -165,7 +167,57 @@ class ChunkSessionsTest {
                 () -> fence.claim("unset", Position.getDefaultInstance()));
     }
 
+    @Test
+    void methodsCancelledBeforeTheyStartDoNotRun() {
+        var handler = new Handler();
+        var host = host(handler, Duration.ofSeconds(10));
+        put("session/a", session(1, false));
+        host.apply(topic);
+        handler.created.getFirst().ready();
+        put("delivery/first", delivery("a", 1));
+        host.apply(topic);
+        host.admit(setup("first", status(host, "first").getCapability()), uuid, "player", () -> {})
+                .arrived();
+
+        handler.gate = new CompletableFuture<>();
+        put("method/slow", call("first"));
+        host.apply(topic);
+        put("method/slow", call("first").toBuilder().setCancel(true).build());
+        host.apply(topic);
+        handler.gate.complete(null);
+        assertEquals(JvmMethodPhase.JVM_METHOD_PHASE_CANCELLED, results.get("slow").getPhase());
+        assertTrue(handler.effects.isEmpty());
+
+        handler.gate = new CompletableFuture<>();
+        put("method/late", call("first"));
+        host.apply(topic);
+        clock.addAndGet(TimeUnit.SECONDS.toNanos(61));
+        put("delivery/first", delivery("a", 1).toBuilder().setWithdraw(true).build());
+        host.apply(topic);
+        handler.gate.complete(null);
+        assertEquals(JvmMethodPhase.JVM_METHOD_PHASE_CANCELLED, results.get("late").getPhase());
+        assertTrue(handler.effects.isEmpty());
+    }
+
+    @Test
+    void creationDispatchedAfterTeardownDoesNotRun() {
+        var handler = new Handler();
+        var queue = new ArrayDeque<Runnable>();
+        var host = host(handler, Duration.ofMillis(50), queue::add);
+        put("session/a", session(1, false));
+        host.apply(topic);
+        clock.addAndGet(TimeUnit.SECONDS.toNanos(1));
+        host.sweep();
+        while (!queue.isEmpty()) queue.poll().run();
+        assertTrue(handler.created.isEmpty());
+        assertEquals(1, handler.finished.size());
+    }
+
     private ChunkSessions host(SessionHandler handler, Duration deadline) {
+        return host(handler, deadline, Runnable::run);
+    }
+
+    private ChunkSessions host(SessionHandler handler, Duration deadline, Executor callbacks) {
         return new ChunkSessions(
                 handler,
                 new ChunkSessions.Link() {
@@ -198,7 +250,7 @@ class ChunkSessionsTest {
                         return clock.get();
                     }
                 },
-                Runnable::run,
+                callbacks,
                 deadline,
                 null);
     }
@@ -256,6 +308,8 @@ class ChunkSessionsTest {
     private static final class Handler implements SessionHandler {
         final List<SessionControl> created = new CopyOnWriteArrayList<>();
         final List<SessionControl> finished = new CopyOnWriteArrayList<>();
+        final List<String> effects = new CopyOnWriteArrayList<>();
+        volatile CompletableFuture<Void> gate;
 
         @Override
         public void create(SessionControl session) {
@@ -268,9 +322,14 @@ class ChunkSessionsTest {
         }
 
         @Override
-        public CompletionStage<String> method(
-                SessionControl session, String method, String argumentsJson) {
-            return CompletableFuture.completedFuture("\"ok\"");
+        public CompletionStage<String> method(SessionControl session, SessionMethod call) {
+            var run = gate == null ? CompletableFuture.<Void>completedFuture(null) : gate;
+            return run.thenApply(
+                    ignored -> {
+                        if (!call.start()) return null;
+                        effects.add(call.name());
+                        return "\"ok\"";
+                    });
         }
     }
 }

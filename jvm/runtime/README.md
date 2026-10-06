@@ -96,7 +96,8 @@ try (var chunk = ChunkProcess.connect()) {
   `disconnect` runs; once the player's connection closed and any leave handling settled, call `release()`.
 - Call `chunk.tick()` once per engine tick, so core can tell a stalled JVM.
 - `Delivery.move(destination)` and `operationId(action)` work as `SessionScope`'s do. Session methods reach
-  `SessionHandler.method`, which no session declares by default.
+  `SessionHandler.method`, which no session declares by default; a handler calls `SessionMethod.start()` right before
+  running the method's effects and skips them if it returns false.
 
 [`minestom-primitives`](../minestom-primitives/README.md) handles the login side for Minestom.
 
