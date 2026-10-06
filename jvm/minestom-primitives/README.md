@@ -37,7 +37,8 @@ try (var chunk = ChunkProcess.connect()) {
 
 - Keep Minestom in offline mode: the gateway authenticates players and owns encryption and compression.
 - The leave handler runs once a player's connection closed, whether they left or core withdrew their delivery, and the
-  delivery is released when it settles. A session ends only after its players are released.
+  delivery is released once it completes successfully; a failed leave is logged and leaves the delivery unreleased. A
+  session ends only after its players are released.
 - `login.delivery(player)` also gives `move(destination)` and `operationId(action)` for that player.
 - Isolation is the app's choice: several sessions can share instances, own several each, or the app can run one session
   per JVM through its machine profile's `max_sessions = 1`.

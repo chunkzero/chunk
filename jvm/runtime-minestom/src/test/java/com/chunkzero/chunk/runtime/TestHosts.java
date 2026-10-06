@@ -19,9 +19,9 @@ final class TestHosts {
         return ChunkSessions.detached(handler, session -> null);
     }
 
-    static ChunkSessions withDeadline(SessionHandler handler, Duration deadline) {
-        return new ChunkSessions(
-                handler, link(null, System::nanoTime), Runnable::run, deadline, null);
+    static ChunkSessions withDeadline(
+            SessionHandler handler, Duration deadline, LongSupplier nanos) {
+        return new ChunkSessions(handler, link(null, nanos), Runnable::run, deadline, null);
     }
 
     /** Reports to {@code core}, and expires deliveries by {@code nanos}. */

@@ -8,6 +8,7 @@ import chunk.sync.v1.Jvm.JvmSessionStatus;
 
 import com.chunkzero.chunk.backend.api.JsonType;
 import com.chunkzero.chunk.runtime.bootstrap.FlatSession;
+import com.chunkzero.chunk.runtime.minestom.event.SessionCreateEvent;
 import com.google.protobuf.ByteString;
 
 import net.minestom.server.ServerProcess;
@@ -26,6 +27,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
@@ -265,11 +267,15 @@ class SessionCreationTest {
                                                     }
                                                 })),
                         Map.of());
-        var host = TestHosts.withDeadline(manager, Duration.ofMillis(50));
+        var clock = new AtomicLong();
+        var host = TestHosts.withDeadline(manager, Duration.ofMillis(50), clock::get);
         try {
             var created = host.create("slow", session(16, "{}"));
-            var deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
-            while (!created.isDone() && System.nanoTime() < deadline) ticks.flush();
+            ticks.flush();
+            host.sweep();
+            assertFalse(created.isDone());
+            clock.addAndGet(Duration.ofMillis(50).toNanos());
+            host.sweep();
             assertTrue(created.isDone());
             var failure = assertThrows(CompletionException.class, created::join);
             assertInstanceOf(TimeoutException.class, failure.getCause());
@@ -280,6 +286,36 @@ class SessionCreationTest {
             assertTrue(creation.complete(null));
             flush(ticks);
             assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_FAILED, host.phase("slow"));
+        } finally {
+            process.stop();
+        }
+    }
+
+    @Test
+    void creationCompletingAfterTheDeadlinePublishesNoCreateEvent() {
+        var process = ServerProcess.create();
+        var ticks = new TickExecutor();
+        var manager =
+                new SessionManager(
+                        process,
+                        ticks,
+                        Map.of("arena/default", new SessionRegistration("arena", FlatSession::new)),
+                        Map.of());
+        var clock = new AtomicLong();
+        var host = TestHosts.withDeadline(manager, Duration.ofMillis(50), clock::get);
+        var events = new ArrayList<SessionScope>();
+        process.eventHandler()
+                .addListener(SessionCreateEvent.class, event -> events.add(event.getSession()));
+        try {
+            var created = host.create("late", session(16, "{}"));
+            // The creation has completed, but its tick task has not run yet.
+            ticks.flush();
+            clock.addAndGet(Duration.ofMillis(50).toNanos());
+            host.sweep();
+            flush(ticks);
+            assertThrows(CompletionException.class, created::join);
+            assertEquals(JvmSessionPhase.JVM_SESSION_PHASE_FAILED, host.phase("late"));
+            assertTrue(events.isEmpty());
         } finally {
             process.stop();
         }

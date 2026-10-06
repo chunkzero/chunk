@@ -31,7 +31,8 @@ import java.util.function.BiFunction;
  * up to the app.
  *
  * <p>Once a player's connection closes, whether they left or their delivery was withdrawn, it runs
- * the app's leave handler and then releases the delivery.
+ * the app's leave handler, and releases the delivery once that completes successfully. A leave that
+ * fails is logged and its delivery stays unreleased.
  */
 public final class ChunkLogin implements AutoCloseable {
     private static final System.Logger LOG = System.getLogger(ChunkLogin.class.getName());
@@ -62,7 +63,8 @@ public final class ChunkLogin implements AutoCloseable {
 
     /**
      * Admits delivered players. Once a player's connection closes, {@code leave} runs, and their
-     * delivery is released once it settles, so the session can still act for them meanwhile.
+     * delivery is released once it completes successfully, so the session can still act for them
+     * meanwhile.
      */
     public static ChunkLogin create(
             ChunkSessions sessions, BiFunction<Player, Delivery, CompletionStage<Void>> leave) {
@@ -126,11 +128,13 @@ public final class ChunkLogin implements AutoCloseable {
                     }
                     left.whenComplete(
                             (ignored, error) -> {
-                                if (error != null)
+                                if (error != null) {
                                     LOG.log(
                                             System.Logger.Level.WARNING,
-                                            "Player leave did not complete cleanly",
+                                            "Player leave failed; the delivery stays unreleased",
                                             error);
+                                    return;
+                                }
                                 admissions.remove(connection, admission);
                                 admission.delivery.release();
                             });

@@ -13,7 +13,8 @@ import java.util.concurrent.CompletableFuture;
 
 /**
  * A connection admitted under a delivery: it joins the delivery's session once spawned, arrives
- * once its client confirmed its position, and is released once it closed and left the session.
+ * once its client confirmed its position, and is released once it closed and left the session. A
+ * failed cleanup keeps it unreleased, so the session keeps ending and its player stays fenced.
  */
 final class AdmittedPlayer {
     private static final System.Logger LOG = System.getLogger(AdmittedPlayer.class.getName());
@@ -38,7 +39,7 @@ final class AdmittedPlayer {
     }
 
     boolean isReleased() {
-        return released.isDone();
+        return released.isDone() && !released.isCompletedExceptionally();
     }
 
     synchronized Instance configure(ManagedPlayer current) {
@@ -83,7 +84,7 @@ final class AdmittedPlayer {
 
     /**
      * Disconnects the player, awaits their join and spawn, removes them, runs the session's leave,
-     * and then releases the delivery.
+     * and then releases the delivery unless that cleanup failed.
      */
     synchronized CompletableFuture<Void> close() {
         if (closed) return released;
@@ -131,14 +132,18 @@ final class AdmittedPlayer {
                                         : joined.leave(current))
                 .whenComplete(
                         (ignored, error) -> {
-                            if (error != null)
-                                LOG.log(
-                                        System.Logger.Level.WARNING,
-                                        "Player leave did not complete cleanly",
-                                        error);
                             synchronized (this) {
                                 player = null;
                                 session = null;
+                            }
+                            if (error != null) {
+                                LOG.log(
+                                        System.Logger.Level.WARNING,
+                                        "Player leave did not complete cleanly; the delivery"
+                                                + " stays unreleased",
+                                        error);
+                                released.completeExceptionally(error);
+                                return;
                             }
                             delivery.thenAccept(Delivery::release);
                             released.complete(null);

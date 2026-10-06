@@ -347,10 +347,26 @@ public final class ChunkSessions implements AutoCloseable {
         after.forEach(Runnable::run);
     }
 
-    /** Expires deliveries never connected, refuses those whose session won't come, and reports. */
+    /**
+     * Fails sessions not ready within the creation deadline, expires deliveries never connected,
+     * refuses those whose session won't come, and reports.
+     */
     void sweep() {
         var after = new ArrayList<Runnable>();
         synchronized (this) {
+            var now = link.nanoTime();
+            for (var control : List.copyOf(sessions.values())) {
+                if (!control.settled && now - control.startedAt >= createDeadline.toNanos())
+                    fail(
+                            control,
+                            new TimeoutException(
+                                    "Session "
+                                            + control.id()
+                                            + " was not ready within "
+                                            + createDeadline),
+                            true,
+                            after);
+            }
             deliveries.values().forEach(delivery -> expire(delivery, after));
             settle(after);
         }
@@ -423,25 +439,12 @@ public final class ChunkSessions implements AutoCloseable {
         if (activeCount() >= MAX_SESSIONS)
             return CompletableFuture.failedFuture(
                     new IllegalStateException("Too many live sessions"));
-        var control = new SessionControl(this, id, session, configuration, link.backend(id));
+        var control =
+                new SessionControl(
+                        this, id, session, configuration, link.backend(id), link.nanoTime());
         outcomes.remove(id);
         sessions.put(id, control);
-        after.add(
-                () -> {
-                    CompletableFuture.delayedExecutor(
-                                    createDeadline.toMillis(), TimeUnit.MILLISECONDS)
-                            .execute(
-                                    () ->
-                                            fail(
-                                                    control,
-                                                    new TimeoutException(
-                                                            "Session "
-                                                                    + id
-                                                                    + " was not ready within "
-                                                                    + createDeadline),
-                                                    true));
-                    dispatch(control, () -> handler.create(control));
-                });
+        after.add(() -> dispatch(control, () -> handler.create(control)));
         return control.created;
     }
 
@@ -477,12 +480,14 @@ public final class ChunkSessions implements AutoCloseable {
         return status;
     }
 
-    void ready(SessionControl control) {
+    boolean ready(SessionControl control) {
         var after = new ArrayList<Runnable>();
+        boolean ready;
         synchronized (this) {
-            if (control.settled) return;
+            if (control.settled) return false;
             control.settled = true;
-            if (!control.finishing) control.phase = JvmSessionPhase.JVM_SESSION_PHASE_READY;
+            ready = !control.finishing;
+            if (ready) control.phase = JvmSessionPhase.JVM_SESSION_PHASE_READY;
             var status = control.status(0, 0);
             after.add(() -> control.created.complete(status));
             // A finish requested while it was starting waited for creation to settle.
@@ -490,27 +495,29 @@ public final class ChunkSessions implements AutoCloseable {
         }
         after.forEach(Runnable::run);
         link.flush();
+        return ready;
     }
 
     void fail(SessionControl control, Throwable error) {
-        fail(control, error, false);
-    }
-
-    private void fail(SessionControl control, Throwable error, boolean onlyStarting) {
-        Objects.requireNonNull(error);
         var after = new ArrayList<Runnable>();
         synchronized (this) {
-            if (terminal(control.phase) || (onlyStarting && control.settled)) return;
-            if (control.failure == null) control.failure = error;
-            if (!control.settled) {
-                control.settled = true;
-                after.add(() -> control.created.completeExceptionally(error));
-                if (control.finishing) withdraw(control, after);
-            }
-            finish(control, after);
+            fail(control, error, false, after);
         }
         after.forEach(Runnable::run);
         link.flush();
+    }
+
+    private void fail(
+            SessionControl control, Throwable error, boolean onlyStarting, List<Runnable> after) {
+        Objects.requireNonNull(error);
+        if (terminal(control.phase) || (onlyStarting && control.settled)) return;
+        if (control.failure == null) control.failure = error;
+        if (!control.settled) {
+            control.settled = true;
+            after.add(() -> control.created.completeExceptionally(error));
+            if (control.finishing) withdraw(control, after);
+        }
+        finish(control, after);
     }
 
     CompletionStage<Void> finish(SessionControl control) {

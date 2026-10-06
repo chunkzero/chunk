@@ -23,6 +23,7 @@ public final class SessionControl {
     private final JvmSession spec;
     private final JsonNode configuration;
     private final @Nullable BackendSession backend;
+    final long startedAt;
 
     // Guarded by owner.
     JvmSessionPhase phase = JvmSessionPhase.JVM_SESSION_PHASE_STARTING;
@@ -39,12 +40,14 @@ public final class SessionControl {
             String id,
             JvmSession spec,
             JsonNode configuration,
-            @Nullable BackendSession backend) {
+            @Nullable BackendSession backend,
+            long startedAt) {
         this.owner = owner;
         this.id = id;
         this.spec = spec;
         this.configuration = configuration;
         this.backend = backend;
+        this.startedAt = startedAt;
     }
 
     /** The session's ID, unique within the deployment. */
@@ -72,9 +75,13 @@ public final class SessionControl {
         return backend;
     }
 
-    /** The session admits players. Ignored unless it is still starting. */
-    public void ready() {
-        owner.ready(this);
+    /**
+     * The session admits players. Ignored unless it is still starting.
+     *
+     * @return whether this call made the session ready
+     */
+    public boolean ready() {
+        return owner.ready(this);
     }
 
     /** The session can't continue: it ends, and is reported failed once its handler finished it. */

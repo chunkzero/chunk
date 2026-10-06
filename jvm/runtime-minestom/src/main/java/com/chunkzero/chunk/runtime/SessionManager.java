@@ -197,9 +197,11 @@ public final class SessionManager implements SessionHandler {
                                                 if (finishing) return null;
                                                 if (error == null
                                                         && !scope.getInstances().isEmpty()) {
-                                                    control.ready();
-                                                    process.eventHandler()
-                                                            .call(new SessionCreateEvent(scope));
+                                                    if (control.ready())
+                                                        process.eventHandler()
+                                                                .call(
+                                                                        new SessionCreateEvent(
+                                                                                scope));
                                                 } else {
                                                     control.fail(
                                                             error == null

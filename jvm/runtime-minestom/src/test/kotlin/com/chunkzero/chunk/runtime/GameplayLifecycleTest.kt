@@ -36,6 +36,7 @@ class GameplayLifecycleTest {
         val closedPlayers = ConcurrentHashMap.newKeySet<Player>()
         val joinStarted = CompletableFuture<Unit>()
         val joinFinished = CompletableFuture<Void>()
+        val closeFailed = CompletableFuture<Unit>()
         val manager =
             SessionManager(
                 minecraft,
@@ -51,6 +52,26 @@ class GameplayLifecycleTest {
 
                                 override fun onJoin(player: Player): CompletableFuture<Void> {
                                     scope.own(player, AutoCloseable { closedPlayers.add(player) })
+                                    return CompletableFuture.completedFuture(null)
+                                }
+                            }
+                        },
+                    "failing" to
+                        Supplier {
+                            object : Session() {
+                                lateinit var scope: SessionScope
+
+                                override fun onCreate(scope: SessionScope) =
+                                    FlatSession().onCreate(scope).also { this.scope = scope }
+
+                                override fun onJoin(player: Player): CompletableFuture<Void> {
+                                    scope.own(
+                                        player,
+                                        AutoCloseable {
+                                            closeFailed.complete(Unit)
+                                            error("Close failed")
+                                        },
+                                    )
                                     return CompletableFuture.completedFuture(null)
                                 }
                             }
@@ -201,6 +222,17 @@ class GameplayLifecycleTest {
             withdraw("replacement")
             await("replacement", JvmDeliveryPhase.JVM_DELIVERY_PHASE_CLOSED)
             host.finish("c", session("gated")).get(3, TimeUnit.SECONDS)
+            host.create("d", session("failing")).get(3, TimeUnit.SECONDS)
+            arrive(connect("broken", delivery("d", 7)), "broken")
+            withdraw("broken")
+            closeFailed.get(3, TimeUnit.SECONDS)
+            Thread.sleep(200)
+            assertEquals(
+                JvmDeliveryPhase.JVM_DELIVERY_PHASE_WITHDRAWING,
+                phase("broken"),
+                "A failed player cleanup keeps the delivery unreleased",
+            )
+            assertThrows(IllegalStateException::class.java) { connect("blocked", delivery("d", 8)) }
             host.finish("b", session()).get(3, TimeUnit.SECONDS)
         } finally {
             sockets.forEach { it.close() }
