@@ -6,10 +6,9 @@ The Java client gameplay code uses to call the project's queries, mutations and 
 and derives the `caller` the TypeScript function sees, so arguments can never change who is calling. It is a Java 21
 library; the Kotlin adapter lives in `jvm/backend-client-kotlin`.
 
-Sessions get their `BackendSession` from `scope.getBackend()` (see the
-[Minestom runtime](../multistom/README.md)) and wrap it in the generated `BackendClient`, which follows the
-backend's function paths. Functions that read `caller.player` need a child session that names the player, owned by the
-scope for as long as the player stays:
+Sessions get their `BackendSession` from `scope.getBackend()` (see the [Minestom runtime](../multistom/README.md)) and
+wrap it in the generated `BackendClient`, which follows the backend's function paths. Functions that read
+`caller.player` need a child session that names the player, owned by the scope for as long as the player stays:
 
 ```java
 var backend =

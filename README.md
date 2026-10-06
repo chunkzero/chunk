@@ -43,11 +43,11 @@ target/debug/chunk create ../my-server --chunk-source .
 ```
 
 It creates a Kotlin project (`--language java` for Java) and prints the commands to build and run it. Gameplay code
-starts at [`jvm/multistom`](jvm/multistom/README.md); [`examples/arena`](examples/arena/README.md) shows
-the Java side of the API. The [CLI README](crates/chunk-cli/README.md) covers every command: `dev` runs a project
-locally and rebuilds it on change, `build` packages a release, `players` and `nodes` operate the local environment, and
-`auth login` and `deploy` deploy to a self-hosted install. [`docs/distribution.md`](docs/distribution.md) covers
-packaging and publishing the SDK.
+starts at [`jvm/multistom`](jvm/multistom/README.md); [`examples/arena`](examples/arena/README.md) shows the Java side
+of the API. The [CLI README](crates/chunk-cli/README.md) covers every command: `dev` runs a project locally and rebuilds
+it on change, `build` packages a release, `players` and `nodes` operate the local environment, and `auth login` and
+`deploy` deploy to a self-hosted install. [`docs/distribution.md`](docs/distribution.md) covers packaging and publishing
+the SDK.
 
 ## Self-hosting
 
