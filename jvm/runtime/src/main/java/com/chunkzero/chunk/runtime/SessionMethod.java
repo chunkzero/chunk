@@ -27,7 +27,8 @@ public final class SessionMethod {
     /**
      * Authorizes the call right before its effects run. Returns true if the call may run: it is not
      * cancelled or past its deadline, and its session and delivery are still open. Otherwise the
-     * call is cancelled and its effects must not run.
+     * call is cancelled and its effects must not run. A call whose handler completes normally
+     * without ever starting it is cancelled; one whose handler fails without starting it fails.
      */
     public boolean start() {
         return start.getAsBoolean();

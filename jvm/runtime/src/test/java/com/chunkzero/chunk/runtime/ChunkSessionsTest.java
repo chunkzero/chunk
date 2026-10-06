@@ -243,6 +243,35 @@ class ChunkSessionsTest {
         assertEquals(1, handler.finished.size());
     }
 
+    @Test
+    void methodsTheirHandlerNeverStartedAreCancelledOrFailed() {
+        var handler =
+                new Handler() {
+                    @Override
+                    public CompletionStage<String> method(
+                            SessionControl session, SessionMethod call) {
+                        return call.name().equals("skip")
+                                ? CompletableFuture.completedFuture(null)
+                                : CompletableFuture.failedFuture(
+                                        new IllegalStateException("undeclared"));
+                    }
+                };
+        var host = host(handler, Duration.ofSeconds(10));
+        put("session/a", session(1, false));
+        host.apply(topic);
+        handler.created.getFirst().ready();
+        put("delivery/first", delivery("a", 1));
+        host.apply(topic);
+        host.admit(setup("first", status(host, "first").getCapability()), uuid, "player", () -> {})
+                .arrived();
+
+        put("method/skip", call("first").toBuilder().setMethod("skip").build());
+        put("method/undeclared", call("first").toBuilder().setMethod("undeclared").build());
+        host.apply(topic);
+        assertEquals(JvmMethodPhase.JVM_METHOD_PHASE_CANCELLED, results.get("skip").getPhase());
+        assertEquals(JvmMethodPhase.JVM_METHOD_PHASE_FAILED, results.get("undeclared").getPhase());
+    }
+
     private ChunkSessions host(SessionHandler handler, Duration deadline) {
         return host(handler, deadline, Runnable::run);
     }
@@ -335,7 +364,7 @@ class ChunkSessionsTest {
         return Position.newBuilder().setEpoch(epoch).setRevision(revision).build();
     }
 
-    private static final class Handler implements SessionHandler {
+    private static class Handler implements SessionHandler {
         final List<SessionControl> created = new CopyOnWriteArrayList<>();
         final List<SessionControl> finished = new CopyOnWriteArrayList<>();
         final List<String> effects = new CopyOnWriteArrayList<>();
