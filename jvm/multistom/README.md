@@ -1,8 +1,8 @@
-# Minestom runtime
+# Multistom runtime
 
 The session API gameplay code is written against, and the adapter that runs it on [Minestom](https://minestom.net).
 `ChunkMinestom` attaches an app-owned Minestom `ServerProcess` to a [`ChunkProcess`](../runtime/README.md), creates
-sessions when core asks, admits the players core delivers, and runs session methods. `jvm/runtime-minestom-kotlin` adds
+sessions when core asks, admits the players core delivers, and runs session methods. `jvm/multistom-kotlin` adds
 coroutine adapters, described [below](#kotlin).
 
 Minestom comes from [chunkzero/multistom](https://github.com/chunkzero/multistom), pinned to a nightly of
@@ -206,10 +206,10 @@ deliver them to a listener on the `SessionEvent` interface.
 
 ## Kotlin
 
-`jvm/runtime-minestom-kotlin` lets sessions use coroutines. Extend `CoroutineSession` and override its suspending
-`create`, `join`, `leave` and `finish`. `scope.coroutines` (import `com.chunkzero.chunk.runtime.coroutines`) is a
-`CoroutineScope` owned by the session and dispatched on the tick thread, so `launch`, `async` and `Flow.launchIn` resume
-there and are cancelled when the session ends. From the Kotlin project template:
+`jvm/multistom-kotlin` lets sessions use coroutines. Extend `CoroutineSession` and override its suspending `create`,
+`join`, `leave` and `finish`. `scope.coroutines` (import `com.chunkzero.chunk.runtime.coroutines`) is a `CoroutineScope`
+owned by the session and dispatched on the tick thread, so `launch`, `async` and `Flow.launchIn` resume there and are
+cancelled when the session ends. From the Kotlin project template:
 
 ```kotlin
 private class GreetingSession : CoroutineSession() {

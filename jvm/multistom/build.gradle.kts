@@ -15,7 +15,7 @@ tasks.withType<JavaCompile>().configureEach { options.release = 25 }
 dependencies {
     api(project(":jvm:runtime"))
     api(project(":jvm:backend-client"))
-    api(libs.minestom)
+    api(libs.multistom)
     api(libs.polar)
     implementation(project(":jvm:proto"))
     testImplementation(libs.grpc.netty)

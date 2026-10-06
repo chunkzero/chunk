@@ -7,8 +7,8 @@ tasks.withType<JavaCompile>().configureEach { options.release = 25 }
 dependencies {
     api(project(":jvm:runtime"))
     // Apps bring their own Minestom; this module only uses API upstream Minestom shares.
-    compileOnly(libs.upstream.minestom)
+    compileOnly(libs.minestom)
     compileOnly(libs.jetbrains.annotations)
-    testImplementation(libs.upstream.minestom)
+    testImplementation(libs.minestom)
     testImplementation(project(":jvm:proto"))
 }

@@ -47,7 +47,7 @@ hook, imported from `#chunk/apps`. A `scope.ts` in any directory under `apps/` a
 below it.
 
 See the [TypeScript SDK](https://github.com/chunkzero/chunk/blob/main/crates/chunk-build/sdk/README.md), the
-[session API](https://github.com/chunkzero/chunk/blob/main/jvm/runtime-minestom/README.md) and the
+[session API](https://github.com/chunkzero/chunk/blob/main/jvm/multistom/README.md) and the
 [Gradle plugin](https://github.com/chunkzero/chunk/blob/main/jvm/gradle-plugin/README.md) for the details.
 
 ## Toolchain

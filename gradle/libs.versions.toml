@@ -9,6 +9,7 @@ dokka = "2.2.0"
 
 protobuf = "4.36.1"
 grpc = "1.84.0"
+minestom = "2026.10.05-26.2"
 multistom = "0.1.0-nightly.20261005021334.g24a253a8ad29"
 
 [libraries]
@@ -22,9 +23,8 @@ grpc-protobuf = { module = "io.grpc:grpc-protobuf", version.ref = "grpc" }
 grpc-api = { module = "io.grpc:grpc-api", version.ref = "grpc" }
 grpc-stub = { module = "io.grpc:grpc-stub", version.ref = "grpc" }
 grpc-netty = { module = "io.grpc:grpc-netty-shaded", version.ref = "grpc" }
-minestom = { module = "com.chunkzero.multistom:multistom", version.ref = "multistom" }
-# Upstream Minestom, which apps that manage their own sessions may use instead of multistom.
-upstream-minestom = { module = "net.minestom:minestom", version = "2026.10.05-26.2" }
+minestom = { module = "net.minestom:minestom", version.ref = "minestom" }
+multistom = { module = "com.chunkzero.multistom:multistom", version.ref = "multistom" }
 polar = { module = "dev.hollowcube:polar", version = "1.16.0" }
 junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }

@@ -297,8 +297,8 @@ class ChunkPluginTest {
         val repository = File(System.getProperty("chunk.test.repository"))
         for ((module, name) in listOf(
             "runtime" to "Component",
-            "runtime-minestom" to "ComponentBinding",
-            "runtime-minestom" to "ComponentProvider",
+            "multistom" to "ComponentBinding",
+            "multistom" to "ComponentProvider",
         )) {
             write(
                 "src/main/java/com/chunkzero/chunk/runtime/$name.java",
@@ -403,7 +403,7 @@ class ChunkPluginTest {
                 "apps/lobby/src/main/java/com/chunkzero/chunk/runtime/$name.java",
                 repository
                     .resolve(
-                        "jvm/runtime-minestom/src/main/java/com/chunkzero/chunk/runtime/$name.java",
+                        "jvm/multistom/src/main/java/com/chunkzero/chunk/runtime/$name.java",
                     ).readText(),
             )
         }
@@ -596,9 +596,9 @@ class ChunkPluginTest {
         write("chunk.toml", "")
         listOf(
             "backend-client",
-            "runtime-minestom",
+            "multistom",
             "backend-client-kotlin",
-            "runtime-minestom-kotlin",
+            "multistom-kotlin",
         ).forEach(::module)
         write(
             "chunk-fixture",

@@ -6,7 +6,7 @@ fn source(root: &Path) -> PathBuf {
     for name in WRAPPER.iter().map(|(name, _)| *name).chain([
         "settings.gradle.kts",
         "jvm/gradle-plugin/settings.gradle.kts",
-        "jvm/runtime-minestom/build.gradle.kts",
+        "jvm/multistom/build.gradle.kts",
     ]) {
         let path = source.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();

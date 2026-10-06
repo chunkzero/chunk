@@ -7,12 +7,12 @@ Minestom or Kotlin dependency.
 
 Apps use it together with an engine adapter:
 
-| Module                                                        | Artifact                                      | Contents                                                        |
-| ------------------------------------------------------------- | --------------------------------------------- | --------------------------------------------------------------- |
-| `jvm/runtime`                                                 | `com.chunkzero.chunk:runtime`                 | `ChunkProcess`, `@SessionType`, `@Component`                    |
-| [`jvm/runtime-minestom`](../runtime-minestom/README.md)       | `com.chunkzero.chunk:runtime-minestom`        | The Minestom adapter and the session API gameplay code uses     |
-| `jvm/runtime-minestom-kotlin`                                 | `com.chunkzero.chunk:runtime-minestom-kotlin` | Coroutine adapters, covered in the Minestom README              |
-| [`jvm/minestom-primitives`](../minestom-primitives/README.md) | `com.chunkzero.chunk:minestom-primitives`     | Login handling for apps that run their own sessions on Minestom |
+| Module                                    | Artifact                               | Contents                                                                |
+| ----------------------------------------- | -------------------------------------- | ----------------------------------------------------------------------- |
+| `jvm/runtime`                             | `com.chunkzero.chunk:runtime`          | `ChunkProcess`, `@SessionType`, `@Component`                            |
+| [`jvm/multistom`](../multistom/README.md) | `com.chunkzero.chunk:multistom`        | The session API and its runtime on the multistom Minestom fork          |
+| `jvm/multistom-kotlin`                    | `com.chunkzero.chunk:multistom-kotlin` | Coroutine adapters, covered in the multistom README                     |
+| [`jvm/minestom`](../minestom/README.md)   | `com.chunkzero.chunk:minestom`         | Login handling for apps running their own sessions on upstream Minestom |
 
 The [Gradle plugin](../gradle-plugin/README.md) adds the right one to each app.
 
@@ -50,7 +50,7 @@ single-use capability the JVM issued for that player's delivery.
 
 ## Running your own sessions
 
-`runtime-minestom` decides what a session is: a `Session` with its own scope in a shared Minestom process. An engine
+The `multistom` module decides what a session is: a `Session` with its own scope in a shared Minestom process. An engine
 adapter, or an app that wants other isolation, can instead implement `SessionHandler` and pass it to `chunk.host(...)`.
 The returned `ChunkSessions` keeps the accounting core relies on, whatever a session is:
 
@@ -99,7 +99,7 @@ try (var chunk = ChunkProcess.connect()) {
   `SessionHandler.method`, which no session declares by default; a handler calls `SessionMethod.start()` right before
   running the method's effects and skips them if it returns false.
 
-[`minestom-primitives`](../minestom-primitives/README.md) handles the login side for Minestom.
+[`minestom`](../minestom/README.md) handles the login side for upstream Minestom.
 
 ## Launch configuration
 

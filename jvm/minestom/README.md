@@ -1,9 +1,10 @@
-# Minestom primitives
+# Minestom
 
 Login handling for Minestom apps that run their own sessions through
-[`ChunkSessions`](../runtime/README.md#running-your-own-sessions) instead of `runtime-minestom`. It compiles against
-upstream [Minestom](https://minestom.net) (`net.minestom:minestom`) and leaves the Minestom dependency to the app, so
-the app picks its Minestom build; it must speak the gateway's Minecraft version, Java Edition 26.2.
+[`ChunkSessions`](../runtime/README.md#running-your-own-sessions) instead of the [`multistom`](../multistom/README.md)
+runtime. It compiles against upstream [Minestom](https://minestom.net) (`net.minestom:minestom`) and leaves the Minestom
+dependency to the app, so the app picks its Minestom build; it must speak the gateway's Minecraft version, Java Edition
+26.2.
 
 `ChunkLogin` answers the gateway's `chunk:delivery` login request, admits only players this JVM was asked to admit, with
 the profile the gateway authenticated, and releases each delivery once its player's connection closed. Everything else,
