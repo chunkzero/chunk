@@ -18,4 +18,12 @@ public @interface Component {
         PROCESS,
         SESSION
     }
+
+    /**
+     * Marks a type the host supplies to session-scoped component factories, such as a handle to the
+     * session. Factories may take it as a dependency; no factory may provide it.
+     */
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface Supplied {}
 }

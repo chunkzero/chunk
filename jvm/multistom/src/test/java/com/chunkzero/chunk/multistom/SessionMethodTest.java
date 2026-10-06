@@ -10,6 +10,10 @@ import com.chunkzero.chunk.backend.api.SessionMethodRef;
 import com.chunkzero.chunk.runtime.SessionControl;
 import com.chunkzero.chunk.runtime.SessionHandler;
 import com.chunkzero.chunk.runtime.SessionMethod;
+import com.chunkzero.chunk.runtime.SessionMethodBinding;
+import com.chunkzero.chunk.runtime.SessionMethodRegistry;
+import com.chunkzero.chunk.runtime.SessionProvider;
+import com.chunkzero.chunk.runtime.SessionRegistry;
 import com.chunkzero.chunk.runtime.TestHosts;
 
 import net.minestom.server.ServerProcess;
@@ -35,13 +39,15 @@ class SessionMethodTest {
         var binding =
                 new SessionMethodBinding<>(
                         new SessionMethodRef<>("lobby", "default", "record", args, number),
-                        (session, input) -> ((Game) session).record(input));
+                        Game.class,
+                        (session, input) -> session.record(input));
         var manager =
                 new SessionManager(
                         process,
                         ticks,
-                        Map.of("lobby/default", new SessionRegistration("lobby", () -> game)),
-                        Map.of("lobby/default/record", binding));
+                        new SessionRegistry(
+                                Map.of("lobby/default", (SessionProvider<Game>) () -> game)),
+                        new SessionMethodRegistry(List.of("lobby/default"), List.of(binding)));
         var controls = new ArrayList<SessionControl>();
         var host =
                 TestHosts.detached(

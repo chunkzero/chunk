@@ -1,13 +1,6 @@
-package com.chunkzero.chunk.multistom.internal;
+package com.chunkzero.chunk.runtime;
 
 import com.chunkzero.chunk.backend.client.BackendSession;
-import com.chunkzero.chunk.multistom.ComponentBinding;
-import com.chunkzero.chunk.multistom.ComponentProvider;
-import com.chunkzero.chunk.multistom.SessionScope;
-import com.chunkzero.chunk.runtime.Component;
-
-import org.jetbrains.annotations.ApiStatus;
-import org.jetbrains.annotations.Nullable;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -19,11 +12,14 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.ServiceLoader;
 
-/** Owns generated factory instances for one app process and its independent sessions. */
-@ApiStatus.Internal
+/**
+ * Owns generated factory instances for one app process and its independent sessions. Session
+ * factories may depend on {@link BackendSession} and {@link Component.Supplied} types, which the
+ * host supplies when it opens a session's components.
+ */
 public final class ComponentRegistry implements AutoCloseable {
     private final Map<Class<?>, ComponentBinding<?>> bindings = new HashMap<>();
-    private final Store process = new Store(null);
+    private final Store process = new Store(Map.of());
     private final List<SessionComponents> sessions = new ArrayList<>();
     private final Map<Object, Entry> owned = new IdentityHashMap<>();
     private boolean closed;
@@ -53,6 +49,7 @@ public final class ComponentRegistry implements AutoCloseable {
         }
     }
 
+    /** Loads the build-generated {@link ComponentProvider} services. */
     public static ComponentRegistry load(ClassLoader loader) {
         var declarations = new ArrayList<ComponentBinding<?>>();
         for (var provider : ServiceLoader.load(ComponentProvider.class, loader)) {
@@ -64,20 +61,34 @@ public final class ComponentRegistry implements AutoCloseable {
         return new ComponentRegistry(declarations);
     }
 
-    public synchronized SessionComponents session(SessionScope scope) {
+    /**
+     * Opens one session's components, given the values the host supplies by type.
+     *
+     * @throws IllegalArgumentException if a key is neither {@link BackendSession} nor a {@link
+     *     Component.Supplied} type, or its value is not an instance of it
+     */
+    public synchronized SessionComponents session(Map<Class<?>, Object> supplied) {
+        for (var entry : supplied.entrySet()) {
+            if (!builtin(entry.getKey()) || !entry.getKey().isInstance(entry.getValue()))
+                throw new IllegalArgumentException(
+                        "Invalid supplied component: " + entry.getKey().getName());
+        }
         checkActive();
         checkIdle();
-        var components = new SessionComponents(new Store(scope));
+        var components = new SessionComponents(new Store(Map.copyOf(supplied)));
         sessions.add(components);
         return components;
     }
 
     private Object resolve(Store session, Class<?> type, List<Entry> created) throws Exception {
-        if (type == SessionScope.class) return Objects.requireNonNull(session.scope);
-        if (type == BackendSession.class)
-            return Objects.requireNonNull(
-                    Objects.requireNonNull(session.scope).getBackend(),
-                    "Session backend unavailable");
+        if (builtin(type)) {
+            var supplied = session.supplied.get(type);
+            if (supplied != null) return supplied;
+            throw new IllegalStateException(
+                    type == BackendSession.class
+                            ? "Session backend unavailable"
+                            : "Supplied component unavailable: " + type.getName());
+        }
         var binding = bindings.get(type);
         if (binding == null)
             throw new IllegalArgumentException("Missing component: " + type.getName());
@@ -90,7 +101,7 @@ public final class ComponentRegistry implements AutoCloseable {
         var value =
                 Objects.requireNonNull(
                         binding.factory().create(dependencies), "Component factory returned null");
-        if (value instanceof SessionScope || value instanceof BackendSession)
+        if (value instanceof BackendSession || builtin(value.getClass()))
             throw new IllegalStateException(
                     "Component factory returned a borrowed session capability");
         if (owned.containsKey(value))
@@ -109,7 +120,7 @@ public final class ComponentRegistry implements AutoCloseable {
     }
 
     private static boolean builtin(Class<?> type) {
-        return type == SessionScope.class || type == BackendSession.class;
+        return type == BackendSession.class || type.isAnnotationPresent(Component.Supplied.class);
     }
 
     private void checkActive() {
@@ -160,7 +171,7 @@ public final class ComponentRegistry implements AutoCloseable {
         }
     }
 
-    /** SessionScope owns this cache; only the session tick thread may access its components. */
+    /** One session's components; only the session's thread may access them. */
     public final class SessionComponents implements AutoCloseable {
         private final Store store;
 
@@ -168,6 +179,7 @@ public final class ComponentRegistry implements AutoCloseable {
             this.store = store;
         }
 
+        /** Resolves an exact declared component type, creating it and its dependencies once. */
         public <T> T get(Class<T> type) {
             synchronized (ComponentRegistry.this) {
                 checkActive();
@@ -209,12 +221,12 @@ public final class ComponentRegistry implements AutoCloseable {
     }
 
     private static final class Store {
-        final @Nullable SessionScope scope;
+        final Map<Class<?>, Object> supplied;
         final Map<Class<?>, Entry> values = new LinkedHashMap<>();
         boolean closed;
 
-        Store(@Nullable SessionScope scope) {
-            this.scope = scope;
+        Store(Map<Class<?>, Object> supplied) {
+            this.supplied = supplied;
         }
     }
 

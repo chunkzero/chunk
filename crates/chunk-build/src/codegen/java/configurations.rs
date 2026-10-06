@@ -37,7 +37,7 @@ pub(super) fn sources(
             let provider = names::type_name(session, &provider_scope.path);
             provider_scope.declare(&provider, session)?;
             provider_scope.declarations.push(format!(
-                "public interface {provider} extends com.chunkzero.chunk.multistom.ConfiguredSessionProvider<{}> {{\n@Override default JsonType<{}> configurationType() {{ return {}.TYPE; }}\n}}",
+                "public interface {provider}<S> extends com.chunkzero.chunk.runtime.ConfiguredSessionProvider<{}, S> {{\n@Override default JsonType<{}> configurationType() {{ return {}.TYPE; }}\n}}",
                 config.ty, config.ty, scope.path.join(".")
             ));
             metadata.push(json!({

@@ -5,7 +5,8 @@ import com.chunkzero.chunk.backend.client.BackendSession;
 import com.chunkzero.chunk.backend.client.OperationId;
 import com.chunkzero.chunk.multistom.event.SessionDestroyEvent;
 import com.chunkzero.chunk.multistom.event.SessionEvent;
-import com.chunkzero.chunk.multistom.internal.ComponentRegistry;
+import com.chunkzero.chunk.runtime.Component;
+import com.chunkzero.chunk.runtime.ComponentRegistry;
 import com.chunkzero.chunk.runtime.MoveResult;
 
 import net.minestom.server.ServerProcess;
@@ -48,8 +49,9 @@ import java.util.function.Supplier;
 /**
  * The gameplay isolate of one session within the shared server process. It owns the session's
  * instances with their entities and schedulers, its event node, scheduler, and closeable resources
- * until disposal. It is not a memory or failure boundary.
+ * until disposal. It is not a memory or failure boundary. Session components may depend on it.
  */
+@Component.Supplied
 public final class SessionScope {
 
     private final ServerProcess process;
@@ -227,8 +229,17 @@ public final class SessionScope {
      * Closeable results are owned automatically, including rollback of a failed factory graph.
      */
     public <T> T component(Class<T> type) {
-        return resource(ComponentRegistry.SessionComponents.class, () -> components.session(this))
+        return resource(
+                        ComponentRegistry.SessionComponents.class,
+                        () -> components.session(supplied()))
                 .get(type);
+    }
+
+    private Map<Class<?>, Object> supplied() {
+        var supplied = new HashMap<Class<?>, Object>();
+        supplied.put(SessionScope.class, this);
+        if (backend != null) supplied.put(BackendSession.class, backend);
+        return supplied;
     }
 
     void releasePlayer(Player player) throws Exception {

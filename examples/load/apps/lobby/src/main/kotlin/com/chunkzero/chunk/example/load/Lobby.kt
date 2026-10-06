@@ -4,11 +4,11 @@ import com.chunkzero.chunk.example.load.generated.BackendTypes
 import com.chunkzero.chunk.example.load.generated.CoroutineBackendClient
 import com.chunkzero.chunk.multistom.ChunkMinestom
 import com.chunkzero.chunk.multistom.CoroutineSession
-import com.chunkzero.chunk.multistom.SessionProvider
 import com.chunkzero.chunk.multistom.SessionScope
 import com.chunkzero.chunk.multistom.coroutines
 import com.chunkzero.chunk.multistom.own
 import com.chunkzero.chunk.runtime.ChunkProcess
+import com.chunkzero.chunk.runtime.SessionProvider
 import com.chunkzero.chunk.runtime.SessionType
 import kotlinx.coroutines.launch
 import net.minestom.server.ServerProcess
@@ -23,7 +23,7 @@ private const val SAVE_SECONDS = 60L
 private const val TICKS_PER_LOG = 200
 
 @SessionType("default")
-class LobbySessions : SessionProvider {
+class LobbySessions : SessionProvider<LobbySession> {
     override fun create() = LobbySession()
 }
 

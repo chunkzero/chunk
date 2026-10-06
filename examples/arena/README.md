@@ -51,8 +51,8 @@ In the arena, `/match` shows the score and `/lobby` leaves the match. Stats pers
 
 - [`Lobby.java`](apps/lobby/src/main/java/example/lobby/Lobby.java) and
   [`Arena.java`](apps/arena/src/main/java/example/arena/Arena.java) are each app's `main` and session provider. The
-  arena implements the generated `ArenaSessionProviders.Koth` interface to receive the destination's config, and its
-  [`ArenaSession`](apps/arena/src/main/java/example/arena/ArenaSession.java) implements the generated
+  arena implements the generated `ArenaSessionProviders.Koth<ArenaSession>` interface to receive the destination's
+  config, and its [`ArenaSession`](apps/arena/src/main/java/example/arena/ArenaSession.java) implements the generated
   `SessionMethods.Arena.Koth.Status`.
 - [`LobbyComponents`](apps/lobby/src/main/java/example/lobby/LobbyComponents.java) and
   [`ArenaComponents`](apps/arena/src/main/java/example/arena/ArenaComponents.java) declare a `SESSION` component for the

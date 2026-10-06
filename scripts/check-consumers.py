@@ -17,7 +17,7 @@ INPUTS = (
     "gradlew", "gradlew.bat", "gradle", "gradle.properties", "settings.gradle.kts", "build.gradle.kts",
     "buildSrc", "jvm", "proto", "examples/arena", "examples/local",
 )
-PROVIDER = "META-INF/services/com.chunkzero.chunk.multistom.SessionProvider"
+PROVIDER = "META-INF/services/com.chunkzero.chunk.runtime.SessionProvider"
 
 
 def require(condition, message):

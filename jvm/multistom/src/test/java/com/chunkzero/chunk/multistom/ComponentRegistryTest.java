@@ -6,8 +6,9 @@ import static com.chunkzero.chunk.runtime.Component.Scope.SESSION;
 import static org.junit.jupiter.api.Assertions.*;
 
 import com.chunkzero.chunk.backend.client.BackendSession;
-import com.chunkzero.chunk.multistom.internal.ComponentRegistry;
 import com.chunkzero.chunk.runtime.Component;
+import com.chunkzero.chunk.runtime.ComponentBinding;
+import com.chunkzero.chunk.runtime.ComponentRegistry;
 
 import net.minestom.server.ServerProcess;
 

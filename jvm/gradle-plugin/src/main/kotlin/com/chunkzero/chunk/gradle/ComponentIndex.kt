@@ -116,13 +116,18 @@ internal fun componentFactories(methods: List<ComponentMethod>): List<ComponentF
             )
         }
 
-internal fun validateComponents(factories: List<ComponentFactory>): List<ComponentFactory> {
+/** Links [factories]; [lookup] resolves `@Component.Supplied` types, which the host supplies per session. */
+internal fun validateComponents(
+    factories: List<ComponentFactory>,
+    lookup: ClassLookup,
+): List<ComponentFactory> {
     require(factories.size <= 256) { "App supports at most 256 component factories" }
     val byType = mutableMapOf<String, ComponentFactory>()
-    val builtins =
-        setOf("com/chunkzero/chunk/multistom/SessionScope", "com/chunkzero/chunk/backend/client/BackendSession")
+
+    fun builtin(type: String) =
+        type == "com/chunkzero/chunk/backend/client/BackendSession" || lookup(type)?.supplied == true
     for (factory in factories) {
-        require(factory.type !in builtins) { "Component cannot replace session builtin: ${factory.type}" }
+        require(!builtin(factory.type)) { "Component cannot provide host-supplied type: ${factory.type}" }
         require(byType.put(factory.type, factory) == null) { "Duplicate component identity: ${factory.type}" }
         require(factory.dependencies.size <= 32) { "Component ${factory.type} supports at most 32 dependencies" }
     }
@@ -135,10 +140,11 @@ internal fun validateComponents(factories: List<ComponentFactory>): List<Compone
         val factory = requireNotNull(byType[type]) { "Missing component provider: $type" }
         for (dependency in factory.dependencies) {
             val target = byType[dependency]
-            require(factory.scope != "PROCESS" || (dependency !in builtins && target?.scope != "SESSION")) {
+            val builtin = builtin(dependency)
+            require(factory.scope != "PROCESS" || (!builtin && target?.scope != "SESSION")) {
                 "Process component ${factory.type} captures session dependency $dependency"
             }
-            if (dependency !in builtins) visit(dependency)
+            if (!builtin) visit(dependency)
         }
         visiting.remove(type)
         visited.add(type)

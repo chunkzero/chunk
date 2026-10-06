@@ -222,7 +222,9 @@ fn session_configuration_providers_are_scoped_to_their_app_and_detect_java_colli
     let output = root.path().join("generated");
     generate(&fixture(), &output, GenerationTarget::Java { package: "example" }).unwrap();
     let provider = fs::read_to_string(output.join("java-session/duels/example/DuelsSessionProviders.java")).unwrap();
-    assert!(provider.contains("ConfiguredSessionProvider<SessionConfigs.Duels.Default.Config>"));
+    assert!(provider.contains(
+        "public interface Default<S> extends com.chunkzero.chunk.runtime.ConfiguredSessionProvider<SessionConfigs.Duels.Default.Config, S>"
+    ));
     assert!(provider.contains("return SessionConfigs.Duels.Default.TYPE;"));
     let models = fs::read_to_string(output.join("java/example/SessionConfigs.java")).unwrap();
     assert!(!models.contains("com.chunkzero.chunk.runtime"));

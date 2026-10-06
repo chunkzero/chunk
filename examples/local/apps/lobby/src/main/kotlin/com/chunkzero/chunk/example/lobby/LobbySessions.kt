@@ -1,14 +1,15 @@
 package com.chunkzero.chunk.example.lobby
 
 import com.chunkzero.chunk.example.ExampleSessions
+import com.chunkzero.chunk.example.LobbySession
 import com.chunkzero.chunk.multistom.ChunkMinestom
-import com.chunkzero.chunk.multistom.SessionProvider
 import com.chunkzero.chunk.runtime.ChunkProcess
+import com.chunkzero.chunk.runtime.SessionProvider
 import com.chunkzero.chunk.runtime.SessionType
 import net.minestom.server.ServerProcess
 
 @SessionType("default")
-class LobbySessions : SessionProvider {
+class LobbySessions : SessionProvider<LobbySession> {
     override fun create() = ExampleSessions.lobby()
 }
 

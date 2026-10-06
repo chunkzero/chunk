@@ -3,11 +3,14 @@ package com.chunkzero.chunk.multistom;
 import com.chunkzero.chunk.multistom.event.SessionCreateEvent;
 import com.chunkzero.chunk.multistom.event.SessionJoinEvent;
 import com.chunkzero.chunk.multistom.event.SessionLeaveEvent;
-import com.chunkzero.chunk.multistom.internal.ComponentRegistry;
+import com.chunkzero.chunk.runtime.ComponentRegistry;
 import com.chunkzero.chunk.runtime.Delivery;
 import com.chunkzero.chunk.runtime.SessionControl;
 import com.chunkzero.chunk.runtime.SessionHandler;
 import com.chunkzero.chunk.runtime.SessionMethod;
+import com.chunkzero.chunk.runtime.SessionMethodRegistry;
+import com.chunkzero.chunk.runtime.SessionProvider;
+import com.chunkzero.chunk.runtime.SessionRegistry;
 
 import net.minestom.server.ServerProcess;
 import net.minestom.server.entity.Player;
@@ -37,9 +40,9 @@ public final class SessionManager implements SessionHandler {
     private static final System.Logger LOG = System.getLogger(SessionManager.class.getName());
     private final ServerProcess process;
     private final TickExecutor ticks;
-    private final Map<String, SessionRegistration> factories;
+    private final SessionRegistry types;
     private final ComponentRegistry components;
-    private final Map<String, SessionMethodBinding<?, ?>> methods;
+    private final SessionMethodRegistry methods;
     private final Map<String, ManagedSession> sessions = new ConcurrentHashMap<>();
 
     SessionManager(
@@ -47,35 +50,38 @@ public final class SessionManager implements SessionHandler {
         this(
                 process,
                 ticks,
-                factories.entrySet().stream()
-                        .collect(
-                                Collectors.toMap(
-                                        Map.Entry::getKey,
-                                        entry ->
-                                                new SessionRegistration(
-                                                        entry.getKey(), entry.getValue()))),
-                Map.of());
+                new SessionRegistry(
+                        factories.entrySet().stream()
+                                .collect(
+                                        Collectors.toMap(
+                                                Map.Entry::getKey,
+                                                entry -> provider(entry.getValue())))),
+                new SessionMethodRegistry(List.of(), List.of()));
     }
 
     SessionManager(
             ServerProcess process,
             TickExecutor ticks,
-            Map<String, SessionRegistration> factories,
-            Map<String, SessionMethodBinding<?, ?>> methods) {
-        this(process, ticks, factories, new ComponentRegistry(List.of()), methods);
+            SessionRegistry types,
+            SessionMethodRegistry methods) {
+        this(process, ticks, types, new ComponentRegistry(List.of()), methods);
     }
 
     SessionManager(
             ServerProcess process,
             TickExecutor ticks,
-            Map<String, SessionRegistration> factories,
+            SessionRegistry types,
             ComponentRegistry components,
-            Map<String, SessionMethodBinding<?, ?>> methods) {
+            SessionMethodRegistry methods) {
         this.process = process;
         this.ticks = ticks;
-        this.factories = Map.copyOf(factories);
+        this.types = types;
         this.components = components;
-        this.methods = Map.copyOf(methods);
+        this.methods = methods;
+    }
+
+    private static SessionProvider<Session> provider(Supplier<Session> factory) {
+        return factory::get;
     }
 
     public TickExecutor getTicks() {
@@ -90,15 +96,18 @@ public final class SessionManager implements SessionHandler {
     public void create(SessionControl control) {
         ticks.submit(
                         () -> {
-                            var registration = factories.get(control.type());
-                            if (registration == null)
-                                throw new IllegalArgumentException("Unknown session type");
-                            var managed =
-                                    new ManagedSession(
-                                            control,
-                                            registration.create(
-                                                    control.capacity(),
-                                                    control.configurationJson()));
+                            var created =
+                                    types.create(
+                                            control.type(),
+                                            control.capacity(),
+                                            control.configurationJson());
+                            if (!(created instanceof Session session))
+                                throw new IllegalArgumentException(
+                                        "Session type "
+                                                + control.type()
+                                                + " must create a "
+                                                + Session.class.getName());
+                            var managed = new ManagedSession(control, session);
                             sessions.put(control.id(), managed);
                             managed.start();
                             return null;
@@ -128,8 +137,7 @@ public final class SessionManager implements SessionHandler {
 
     @Override
     public CompletionStage<String> method(SessionControl control, SessionMethod call) {
-        var binding = methods.get(control.type() + "/" + call.name());
-        if (binding == null)
+        if (!methods.declares(control.type(), call.name()))
             return CompletableFuture.failedFuture(
                     new IllegalArgumentException("Undeclared session method"));
         return ticks.submit(
@@ -140,7 +148,8 @@ public final class SessionManager implements SessionHandler {
                     if (!call.start()) return null;
                     if (managed == null || !control.isReady())
                         throw new IllegalStateException("Session unavailable");
-                    return binding.invoke(managed.behavior, call.argumentsJson());
+                    return methods.invoke(
+                            control.type(), call.name(), managed.behavior, call.argumentsJson());
                 });
     }
 

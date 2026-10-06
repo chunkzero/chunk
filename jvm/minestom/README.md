@@ -41,5 +41,8 @@ try (var chunk = ChunkProcess.connect()) {
   their delivery, and the delivery is released once it completes successfully; a failed leave is logged and leaves the
   delivery unreleased. A session ends only after its players are released.
 - `login.delivery(player)` also gives `move(destination)` and `operationId(action)` for that player.
+- The handler can create sessions from the app's providers, methods and components with the runtime's
+  [`SessionRegistry`, `SessionMethodRegistry` and `ComponentRegistry`](../runtime/README.md#running-your-own-sessions),
+  as multistom does.
 - Isolation is the app's choice: several sessions can share instances, own several each, or the app can run one session
   per JVM through its machine profile's `max_sessions = 1`.
