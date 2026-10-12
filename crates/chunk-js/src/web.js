@@ -9,6 +9,7 @@
   const log = core.ops.op_chunk_log;
   const digest = core.ops.op_chunk_digest;
   const Uint8 = Uint8Array;
+  const { TypeError } = globalThis;
   // A JavaScript clone, since V8's serializer runs host-object hooks keyed by
   // the global Symbol.for("Deno.core.hostObject") brand. It accepts an explicit
   // list of types and throws DataCloneError for anything else. Built-ins are

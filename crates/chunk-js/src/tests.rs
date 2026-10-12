@@ -550,10 +550,14 @@ fn url_parse_survives_constructors_and_setters_that_parse_urls() {
             nested = false;
           },
         });
-        return [subclass.href, subclass instanceof Nested, URL.parse("HTTP://b/").href, URL.parse("c", "HTTP://b/x/y").href, URL.parse("nope")];
+        const Native = TypeError;
+        globalThis.TypeError = function () { return {}; };
+        let missing;
+        try { URL.parse(); } catch (error) { missing = error instanceof Native; }
+        return [subclass.href, subclass instanceof Nested, URL.parse("HTTP://b/").href, URL.parse("c", "HTTP://b/x/y").href, URL.parse("nope"), missing];
     "#)
     .unwrap();
-    assert_eq!(value(&execution), json!(["http://a/x", false, "http://b/", "http://b/x/c", null]));
+    assert_eq!(value(&execution), json!(["http://a/x", false, "http://b/", "http://b/x/c", null, true]));
 }
 
 #[test]
