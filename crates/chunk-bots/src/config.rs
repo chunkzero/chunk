@@ -63,7 +63,9 @@ pub struct Config {
 impl Config {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.bots > 0 && self.bots <= 100_000, "bots must be 1..=100000");
-        let longest = self.prefix.len() + (self.first + self.bots - 1).to_string().len();
+        let last = self.first.checked_add(self.bots - 1);
+        ensure!(last.is_some(), "first and bots must leave every index within a u32");
+        let longest = self.prefix.len() + last.map_or(0, |last| last.to_string().len());
         ensure!(
             !self.prefix.is_empty()
                 && longest <= 16
@@ -73,7 +75,12 @@ impl Config {
         ensure!(self.login_rate > 0.0 && self.login_rate <= 10_000.0, "login rate must be in (0, 10000]");
         ensure!(self.max_pending > 0, "max pending must be positive");
         ensure!(self.move_hz <= 20, "move rate must be at most 20 Hz, the client tick rate");
-        ensure!(self.ping_interval >= 0.0 && self.command_interval > 0.0, "invalid ping or command interval");
+        ensure!(
+            (0.0..=86_400.0).contains(&self.ping_interval)
+                && self.command_interval > 0.0
+                && self.command_interval <= 86_400.0,
+            "ping interval must be in [0, 86400] and command interval in (0, 86400]"
+        );
         ensure!(self.command.as_ref().is_none_or(|command| command.len() < 200), "command too long");
         ensure!(self.view_distance >= 2, "view distance must be at least 2");
         ensure!(self.stats_interval > 0 && self.login_timeout > 0, "intervals must be positive");

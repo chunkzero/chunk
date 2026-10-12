@@ -182,7 +182,7 @@ impl IndexRange {
     }
 }
 
-/// The backend hashes deployment, contract, function, caller and validated arguments.
+/// The backend hashes function, caller and validated arguments, so the identity outlasts a redeployment.
 /// Stable identity lets a lost acknowledgement be recovered without reexecution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Operation {

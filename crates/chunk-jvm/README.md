@@ -27,8 +27,10 @@ replaced, not restarted: a restarted runner exits with code 77.
 
 Empty values count as unset. Cached releases and AOT caches are verified again before reuse.
 
-The JVM runs as `java -Xmx<heap>m -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError [AOT flags] -jar <app jar>` in a fresh
-working directory under `/tmp`. The heap is the lowest of the cgroup v2 memory limit, the machine's memory and the
+The JVM runs as
+`java -Xms<heap>m -Xmx<heap>m -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError --enable-native-access=ALL-UNNAMED [AOT flags] -jar <app jar>`
+in a fresh working directory under `/tmp`. On one CPU it runs `-XX:+UseSerialGC` instead of G1, and a JVM recording its
+AOT cache starts without `-Xms`. The heap is the lowest of the cgroup v2 memory limit, the machine's memory and the
 launch profile's memory, less 200 MiB and a tenth of that memory for everything outside the heap. Besides the runner's
 own environment, the JVM gets what the Java runtime reads: `CHUNK_PROCESS_TOKEN` (the machine credential),
 `CHUNK_DEPLOYMENT`, `CHUNK_CORE_ENDPOINT`, `CHUNK_PROCESS_ID`, `CHUNK_PROCESS_GENERATION`, `CHUNK_MACHINE_PROFILE`,
@@ -48,8 +50,9 @@ The runner reports its Java runtime to core in `chunk:launch` (`IMPLEMENTOR`, `J
   `-XX:AOTMode=record -XX:AOTConfiguration=<file>`. Once it exits cleanly (0, or on a forwarded SIGTERM or SIGINT), the
   runner creates the cache with `-XX:AOTMode=create`, for up to 45 seconds, and uploads it (`chunk:aot-write`) for up to
   30 seconds more; core holds the host's release for up to 90 seconds meanwhile. If anything fails, the runner tells
-  core no cache came, and another host may record it. A machine with less than 768 MiB of memory doesn't record, since
-  creating the cache needs a few hundred MiB beyond the heap, but it still uses a cache a larger machine made.
+  core no cache came, and another host may record it. A machine with less than 768 MiB of memory, or 448 MiB on one CPU,
+  doesn't record, since creating the cache needs a few hundred MiB beyond the heap, but it still uses a cache a larger
+  machine made.
 
 The cache never changes the runner's exit code. Java checks the JAR's path, size and modification time against the
 cache; unpacked releases keep the archive's zero timestamps under the same `CHUNK_CACHE`, so a cache fits every machine

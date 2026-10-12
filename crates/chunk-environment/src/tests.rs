@@ -132,12 +132,11 @@ fn authorized<T>(message: T, token: &str) -> tonic::Request<T> {
 }
 
 #[test]
-fn services_accept_core_and_gateway_and_ignore_a_legacy_exec() {
+fn services_accept_core_and_gateway() {
     assert_eq!("gateway, core".parse::<Services>().unwrap(), Services::default());
-    assert_eq!("core,gateway,exec".parse::<Services>().unwrap(), Services::default());
-    let core = "core,exec".parse::<Services>().unwrap();
+    let core = "core".parse::<Services>().unwrap();
     assert!(core.contains(Service::Core) && !core.contains(Service::Gateway));
-    for rejected in ["", "exec", "core,jvm", "core,,gateway"] {
+    for rejected in ["", "core,exec", "core,jvm", "core,,gateway"] {
         assert!(rejected.parse::<Services>().is_err(), "{rejected:?} was accepted");
     }
     let gateway = "gateway".parse::<Services>().unwrap();
