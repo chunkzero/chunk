@@ -94,11 +94,22 @@ async fn claim(
         (None, Some(_)) => return Err(errors::error(Code::OperationMismatch, "the operation ID names a login")),
         (None, None) => return Err(errors::invalid("no move is queued under this operation ID")),
     };
-    let control = service.control.clone();
+    let login = request.source.is_none();
+    let (control, ended) = (service.control.clone(), request.clone());
     let outcome = match service.operations.admit(async move { control.claim_approved(request, &approved).await }).await
     {
         Ok(assignment) => Outcome::Assignment(assigned(service, assignment)?),
         Err(Failure::Unresolved(ROUTE_AGAIN)) => Outcome::Refusal(ClaimRefusal::RouteAgain.into()),
+        // A login's claim ends here so the player can claim again; a move is abandoned by its gateway.
+        Err(Failure::Invalid(DESTINATION_RETIRED)) if login => {
+            let control = service.control.clone();
+            service
+                .operations
+                .admit(async move { control.cancel(ended).await })
+                .await
+                .map_err(|f| errors::operation(&f))?;
+            Outcome::Refusal(ClaimRefusal::DestinationRetired.into())
+        }
         Err(Failure::Invalid(ALREADY_OWNED)) => Outcome::Refusal(ClaimRefusal::AlreadyConnected.into()),
         Err(failure) => return Err(errors::operation(&failure)),
     };

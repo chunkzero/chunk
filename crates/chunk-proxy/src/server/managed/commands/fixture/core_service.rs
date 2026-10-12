@@ -61,6 +61,8 @@ impl Service {
                         destination: Some(destination),
                         ..reservation()
                     })
+                } else if self.retiring.swap(false, Ordering::SeqCst) {
+                    claim_result::Outcome::Refusal(ClaimRefusal::DestinationRetired.into())
                 } else if logins.retired.as_ref() == Some(&login.deployment) || placement.refuses(&login.deployment) {
                     claim_result::Outcome::Refusal(ClaimRefusal::RouteAgain.into())
                 } else {

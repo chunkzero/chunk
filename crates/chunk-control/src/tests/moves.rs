@@ -109,12 +109,33 @@ async fn a_destination_that_retires_after_its_source_was_fenced_frees_the_player
         .unwrap();
     let stale = control.activate(identity.clone()).await;
     assert!(matches!(stale, Err(Error::Invalid("stale activation"))), "{stale:?}");
-    // A JVM that finishes a session withdraws its deliveries.
+    // A cancelled claim stays stale when its session retires afterwards.
     retire(&control, "move", Phase::Withdrawing);
-    assert!(retired(&control.activate(identity).await));
+    let cancelled = control.activate(identity).await;
+    assert!(matches!(cancelled, Err(Error::Invalid(_))) && !retired(&cancelled), "{cancelled:?}");
 
     control.cancel(destination).await.unwrap();
     assert!(!control.state().unwrap().players.contains_key(&uuid));
     control.claim(request("again", &uuid)).await.unwrap();
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn reconciliation_ending_a_claim_in_a_retired_session_is_reported_until_a_newer_claim_owns_the_player() {
+    let fixture = Fixture::new();
+    let control = fixture.control().await;
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let (source, destination, identity) = moving(&fixture, &control, &uuid).await;
+    control.cancel(source).await.unwrap();
+    retire(&control, "move", Phase::Reserved);
+    control.reconcile_all().await.unwrap();
+    let claim = control.state().unwrap().claims["move"].clone();
+    assert!(claim.retired, "{:?}", claim.phase as u8);
+    assert!(retired(&control.activate(identity.clone()).await));
+
+    control.claim(request("again", &uuid)).await.unwrap();
+    let superseded = control.activate(identity).await;
+    assert!(matches!(superseded, Err(Error::Invalid(_))) && !retired(&superseded), "{superseded:?}");
+    drop(destination);
     fixture.close().await;
 }

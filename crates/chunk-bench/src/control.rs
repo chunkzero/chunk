@@ -175,6 +175,7 @@ impl Client {
         }
         let activated: ActivateResult = self.call("activate", &operation, &()).await?;
         ensure!(!activated.waiting, "activation waiting for a roster");
+        ensure!(!activated.retired, "synthetic player's session retired before activation");
         let mut claims = self.gateway.claims.clone();
         claims
             .wait_for(|claims| claims.get(&operation) == Some(&ClaimPhase::Arrived))

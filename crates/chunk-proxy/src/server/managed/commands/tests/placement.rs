@@ -216,6 +216,22 @@ async fn a_reserved_move_completes_in_its_deployment_though_the_current_one_drop
 }
 
 #[tokio::test]
+async fn a_login_whose_session_retired_while_claiming_is_claimed_again_under_a_new_operation() {
+    let fixture = Fixture::new().await;
+    deployments(&fixture, "b");
+    fixture.service.retiring.store(true, Ordering::SeqCst);
+    let login = Claim { operation_id: "login".into(), ..fixture.claim.clone() };
+    let (mut guard, _) = claim_destination(&login, &retarget(&fixture, "b")).await.unwrap();
+    guard.armed = false;
+    let claims = fixture.service.logins.lock().unwrap().claims.clone();
+    assert_eq!(claims.len(), 2);
+    assert_eq!(claims[0].0, "login");
+    assert_ne!(claims[1].0, "login");
+    assert_eq!(guard.claim.operation_id, claims[1].0);
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn a_move_whose_session_retired_before_activation_is_recorded_failed_and_its_player_routed_as_a_login() {
     let fixture = Fixture::new().await;
     deployments(&fixture, "b");

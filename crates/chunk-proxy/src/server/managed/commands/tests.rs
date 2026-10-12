@@ -14,6 +14,7 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
     use chunk_proto::sync::v1::{Error, GatewayMove, SessionDemand, error::Code};
     for (code, message) in [
         (Code::Invalid, "destination configuration rejected"),
+        (Code::Invalid, "destination session retired"),
         (Code::Stopped, "runtime stopped"),
         (Code::Unavailable, "app did not become ready within 35 seconds"),
     ] {

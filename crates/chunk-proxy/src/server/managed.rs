@@ -20,7 +20,7 @@ use chunk_proto::sync::v1::{
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     sync::{Notify, oneshot},
-    time::{Instant, sleep, timeout},
+    time::{Instant, sleep, timeout, timeout_at},
 };
 
 use super::{
@@ -129,7 +129,8 @@ impl Assignment {
 
 /// Claims `guard`'s login or queued move. `None` means the deployment that admitted it is no longer current, so it must
 /// be admitted again; it reserved nothing.
-async fn claim(guard: &ClaimGuard) -> io::Result<Option<Assignment>> {
+/// Asks core to place `guard`'s claim.
+async fn claim(guard: &ClaimGuard) -> io::Result<Claimed> {
     let arguments = ClaimArguments {
         login: guard.claim.source.is_none().then(|| login(&guard.claim)),
         deployment: guard.claim.deployment.clone(),
@@ -137,9 +138,12 @@ async fn claim(guard: &ClaimGuard) -> io::Result<Option<Assignment>> {
     let operation = &guard.claim.operation_id;
     let (result, _): (ClaimResult, _) = guard.platform.call("claim", operation, &arguments, WAIT_TIMEOUT).await?;
     match result.outcome {
-        Some(Outcome::Assignment(assigned)) => Assignment::new(assigned, &guard.claim).map(Some),
+        Some(Outcome::Assignment(assigned)) => {
+            Assignment::new(assigned, &guard.claim).map(|assignment| Claimed::Placed(assignment.into()))
+        }
         Some(Outcome::Refusal(refusal)) => match ClaimRefusal::try_from(refusal) {
-            Ok(ClaimRefusal::RouteAgain) => Ok(None),
+            Ok(ClaimRefusal::RouteAgain) => Ok(Claimed::RouteAgain),
+            Ok(ClaimRefusal::DestinationRetired) => Ok(Claimed::Retired),
             Ok(ClaimRefusal::AlreadyConnected) => {
                 Err(io::Error::new(io::ErrorKind::PermissionDenied, "You are already connected."))
             }
@@ -147,6 +151,15 @@ async fn claim(guard: &ClaimGuard) -> io::Result<Option<Assignment>> {
         },
         None => Err(invalid_data("missing claim outcome")),
     }
+}
+
+/// What core made of a claim.
+enum Claimed {
+    Placed(Box<Assignment>),
+    /// The deployment that admitted the claim no longer accepts it; it is admitted again under the same operation ID.
+    RouteAgain,
+    /// The claim's session retired and core ended the claim; its player is routed again under a new operation ID.
+    Retired,
 }
 
 fn login(claim: &Claim) -> GatewayLogin {
@@ -192,17 +205,13 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                 deadline.min(PACK_TIMEOUT).min(remaining),
             )
             .await?;
-        let opened = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
+        // Activation and, when the session retired first, routing the player again share this one bound.
+        let budget = Instant::now() + deadline.min(WAIT_TIMEOUT);
+        let opened = timeout_at(budget, open(&assignment, &guard, &authenticated, &settings))
             .await
             .map_err(io::Error::other)??;
         let Some(mut internal) = opened else {
-            // The client is configuring and its player holds no other claim, so they are routed as a login, once.
-            let routed = if rerouted {
-                Err(io::Error::other("destination session retired after routing again"))
-            } else {
-                timeout(deadline.min(WAIT_TIMEOUT), reroute(guard, current)).await.map_err(io::Error::other).flatten()
-            };
-            match routed {
+            match reroute_once(rerouted, guard, current, budget).await {
                 Ok(next) => (guard, assignment) = next,
                 Err(error) => {
                     let _ =
@@ -240,15 +249,15 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         commands.arrived();
         rerouted = false;
         tracing::info!(operation = %guard.claim.operation_id, player = %guard.claim.player.uuid, "player arrived in managed session");
-        let next = relay::until(
+        let next = live_move(
             &mut authenticated.transport,
             &mut internal,
             &mut settings,
-            Box::pin(next_move(&guard, &identity, authenticated.protocol_version, current)),
-            true,
             Some(&mut commands),
+            (&guard, &identity, authenticated.protocol_version),
+            (current, &platform),
         )
-        .await??;
+        .await?;
         commands.configuration();
         timeout(
             Duration::from_secs(10),
@@ -256,7 +265,12 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         )
         .await
         .map_err(io::Error::other)??;
-        check_move(&platform, &next.0.claim).await?;
+        // A destination that retired while the client configured is routed again once the source is withdrawn.
+        if let Err(error) = check_move(&platform, &next.0.claim).await
+            && !retired(&next.0, deadline).await
+        {
+            return Err(error);
+        }
         // The client's acknowledgment fences all remaining source PLAY input.
         if let Err(error) = withdraw(&guard).await {
             let _ = configuration::disconnect(&mut authenticated.transport, 0x02, "Session move unavailable").await;
@@ -266,6 +280,53 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         guard.armed = false;
         drop(internal);
         (guard, assignment) = next;
+    }
+}
+
+/// Whether core reports that `destination`'s session retired.
+async fn retired(destination: &ClaimGuard, deadline: Duration) -> bool {
+    matches!(timeout(deadline.min(WAIT_TIMEOUT), activate(destination)).await, Ok(Ok(false)))
+}
+
+/// Routes the player of `retired` as a login again within `budget`, unless that already happened since they arrived.
+/// The client is configuring and their player holds no other claim.
+async fn reroute_once(
+    rerouted: bool,
+    retired: ClaimGuard,
+    current: &Retarget,
+    budget: Instant,
+) -> io::Result<(ClaimGuard, Assignment)> {
+    if rerouted {
+        return Err(io::Error::other("destination session retired after routing again"));
+    }
+    timeout_at(budget, reroute(retired, current)).await.map_err(io::Error::other).flatten()
+}
+
+/// Waits for a move from `source` whose claim core still holds, relaying the delivery meanwhile. A move that ended after
+/// it was prepared, as when its destination retired, is abandoned and the player stays in play.
+async fn live_move<S, I>(
+    public: &mut Transport<S>,
+    internal: &mut Transport<I>,
+    settings: &mut chunk_protocol::versions::v26_2::ConfigurationClientInformation,
+    mut commands: Option<&mut commands::Commands>,
+    (source, identity, protocol): (&ClaimGuard, &ClaimIdentity, i32),
+    (current, platform): (&Retarget, &Platform),
+) -> io::Result<(ClaimGuard, Assignment)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    I: AsyncRead + AsyncWrite + Unpin,
+{
+    loop {
+        let ready = Box::pin(next_move(source, identity, protocol, current));
+        let mut next = relay::until(public, internal, settings, ready, true, commands.as_deref_mut()).await??;
+        if check_move(platform, &next.0.claim).await.is_ok() {
+            return Ok(next);
+        }
+        tracing::warn!(operation = %next.0.claim.operation_id, "move ended before configuration; source remains active");
+        next.0.failure = Some("move ended before configuration".into());
+        if next.0.cancel().await.is_ok() {
+            next.0.armed = false;
+        }
     }
 }
 
@@ -317,12 +378,13 @@ async fn claim_destination(login: &Claim, current: &Retarget) -> io::Result<(Cla
                 ClaimGuard { platform: platform.clone(), claim, armed: true, failure: None }
             }
         };
-        let Some(assignment) = self::claim(&guard).await? else {
-            guard.armed = false;
-            sleep(Duration::from_millis(100)).await;
-            continue;
-        };
-        return Ok((guard, assignment));
+        match self::claim(&guard).await? {
+            Claimed::Placed(assignment) => return Ok((guard, *assignment)),
+            Claimed::RouteAgain => {}
+            Claimed::Retired => login.operation_id = uuid::Uuid::new_v4().to_string(),
+        }
+        guard.armed = false;
+        sleep(Duration::from_millis(100)).await;
     }
 }
 

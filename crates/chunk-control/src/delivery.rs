@@ -14,20 +14,15 @@ impl Control {
     /// Records admission intent for the claim `identity` names; native Minecraft login attaches the prepared delivery.
     /// # Errors
     /// Rejects stale identity and retains authority after ambiguous runtime replies. Rejects with
-    /// [`crate::DESTINATION_RETIRED`] the current claim whose session retired before admitting it, whether or not that
-    /// already withdrew the claim. Reports `Busy` until recovery has fenced surviving JVMs.
+    /// [`crate::DESTINATION_RETIRED`] a claim that ended unactivated because its session retired, unless its move was
+    /// abandoned or a newer claim owns its player. Reports `Busy` until recovery has fenced surviving JVMs.
     pub async fn activate(&self, identity: ClaimIdentity) -> Result<Assignment> {
         self.admit()?;
         let operation = self.operation(&identity.operation_id)?;
         let _guard = operation.lock().await;
         let admitted = self.update(|state| {
-            let claim = state.claims.get(&identity.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             // Checked before the move's source: once that is fenced and this claim released, nothing owns the player.
-            if claim.identity(&identity.operation_id) == identity
-                && !claim.activated
-                && matches!(claim.phase, Phase::Reserved | Phase::Withdrawing | Phase::Released)
-                && state.sessions.get(&claim.session).is_some_and(|session| session.retired)
-            {
+            if lost_to_retirement(state, &identity) {
                 return Err(Error::Invalid(crate::DESTINATION_RETIRED));
             }
             crate::moves::authorize_destination(state, &identity)?;
@@ -228,10 +223,41 @@ pub(crate) fn apply(state: &mut State, host: &str, status: &JvmDeliveryStatus) -
     if phase <= claim.phase {
         return Ok(());
     }
+    if matches!(phase, Phase::Withdrawing | Phase::Released) {
+        note_retirement(state, operation);
+    }
     if phase == Phase::Released {
         release(state, operation)
     } else {
         set_phase(state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?, phase)
+    }
+}
+
+/// Whether the claim `identity` names ended, or is ending, unactivated because its session retired: not because it was
+/// cancelled, its move abandoned or a newer claim took its player.
+fn lost_to_retirement(state: &State, identity: &ClaimIdentity) -> bool {
+    let operation = &identity.operation_id;
+    let Some(claim) = state.claims.get(operation) else { return false };
+    let ended = claim.retired
+        || (claim.phase == Phase::Reserved && state.sessions.get(&claim.session).is_some_and(|s| s.retired));
+    let abandoned = state.moves.get(operation).is_some_and(|intent| intent.canceled || intent.failure.is_some());
+    let superseded = state.players.get(&claim.player).is_some_and(|owner| {
+        [&owner.current, &owner.pending].into_iter().flatten().any(|other| {
+            other != operation && state.claims.get(other).is_some_and(|other| other.generation > claim.generation)
+        })
+    });
+    claim.identity(operation) == *identity && !claim.activated && ended && !abandoned && !superseded
+}
+
+/// Records that `operation` is ending because its session retired, if it is still reserved there.
+pub(crate) fn note_retirement(state: &mut State, operation: &str) {
+    let retired = state.claims.get(operation).is_some_and(|claim| {
+        claim.phase == Phase::Reserved
+            && !claim.activated
+            && state.sessions.get(&claim.session).is_some_and(|s| s.retired)
+    });
+    if retired && let Some(claim) = state.claims.get_mut(operation) {
+        claim.retired = true;
     }
 }
 

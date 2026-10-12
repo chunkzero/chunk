@@ -248,7 +248,7 @@ fn schema() -> DatabaseSchema {
             "generation": generation, "session": string, "phase": {"type": "enum", "values": Phase::NAMES},
             "assignment?": string, "activated": boolean, "created_at_ms": integer, "assigned_at_ms?": integer,
             "released_at_ms?": integer,
-            "roster?": string,
+            "roster?": string, "retired": boolean,
         },
         MOVES: {
             "request": string, "canceled": boolean, "sequence": integer,

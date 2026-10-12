@@ -1,4 +1,6 @@
-use super::{Assignment, Claim, ClaimGuard, ClaimIdentity, Platform, Retarget, WAIT_TIMEOUT, claim, invalid_data};
+use super::{
+    Assignment, Claim, ClaimGuard, ClaimIdentity, Claimed, Platform, Retarget, WAIT_TIMEOUT, claim, invalid_data,
+};
 use crate::server::platform::{RPC_TIMEOUT, failure};
 use chunk_proto::sync::v1::{Position, ReservationResult, SessionDemand, error::Code};
 use std::{io, time::Duration};
@@ -118,7 +120,8 @@ async fn attempt(source: &ClaimGuard, destination: &mut ClaimGuard, protocol: i3
     let platform = destination.platform.clone();
     platform.approve_move(&source.platform, &source.claim, &destination.claim).await?;
     check_move(&platform, &destination.claim).await?;
-    let Some(assignment) = claim(destination).await? else { return Ok(None) };
+    let Claimed::Placed(assignment) = claim(destination).await? else { return Ok(None) };
+    let assignment = *assignment;
     if !assignment.deployment.is_empty() && assignment.deployment != destination.claim.deployment {
         bind(destination, &assignment.deployment, assignment.destination.clone());
         destination.platform.approve_move(&source.platform, &source.claim, &destination.claim).await?;

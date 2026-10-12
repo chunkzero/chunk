@@ -44,7 +44,7 @@ pub(super) struct Service {
     /// Activations answered as waiting for the rest of a roster before one succeeds.
     pub roster_waits: Arc<AtomicUsize>,
     pub activations: Arc<AtomicUsize>,
-    /// The next activation finds its claim's session retired.
+    /// The next activation or login claim finds its session retired.
     pub retiring: Arc<AtomicBool>,
     /// Counts claim-state changes; open streams send a new snapshot for each.
     pub published: Arc<watch::Sender<u64>>,

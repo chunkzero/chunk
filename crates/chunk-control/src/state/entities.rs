@@ -350,6 +350,8 @@ pub(crate) struct Claim {
     pub released_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roster: Option<String>,
+    /// Whether the claim ended unactivated because its session retired, rather than by cancellation.
+    pub retired: bool,
 }
 
 impl Claim {
