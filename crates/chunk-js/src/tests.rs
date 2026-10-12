@@ -533,3 +533,59 @@ fn structured_clone_reads_built_ins_by_brand_despite_modified_prototypes() {
         json!({"map": 42, "view": 0x0203, "symbols": 0, "errors": vec!["DataCloneError"; 5], "shared": true, "array": [true, 3, ["0", "2"]], "keys": ["a", "b"]})
     );
 }
+
+#[test]
+fn url_parse_survives_constructors_and_setters_that_parse_urls() {
+    let execution = run(r#"
+        class Nested extends URL { constructor(...args) { super(...args); new URL("HTTP://nested/"); } }
+        const subclass = Nested.parse("HTTP://a/x");
+        const brand = Object.getOwnPropertySymbols(new URL("http://a/"))[0];
+        let nested = false;
+        Object.defineProperty(URL.prototype, brand, {
+          set(value) {
+            Object.defineProperty(this, brand, { value });
+            if (nested) return;
+            nested = true;
+            new URL("HTTP://nested/");
+            nested = false;
+          },
+        });
+        return [subclass.href, subclass instanceof Nested, URL.parse("HTTP://b/").href, URL.parse("c", "HTTP://b/x/y").href, URL.parse("nope")];
+    "#)
+    .unwrap();
+    assert_eq!(value(&execution), json!(["http://a/x", false, "http://b/", "http://b/x/c", null]));
+}
+
+#[test]
+fn stacks_are_strings_that_ignore_prepare_stack_trace() {
+    let execution = run(r#"
+        Error.prepareStackTrace = (_, frames) => frames;
+        for (const index of [0, 1, 2]) Object.defineProperty(Array.prototype, index, { get() { throw 1; }, set() {} });
+        return new Error("boom").stack;
+    "#)
+    .unwrap();
+    let stack = value(&execution);
+    assert!(
+        stack.as_str().unwrap().starts_with("Error: boom\n    at default (chunk:deployment/build-a:4:16)"),
+        "{stack}"
+    );
+    let Err(Error::JavaScript(thrown)) = run("Error.prepareStackTrace = () => 'custom'; throw new TypeError('boom');")
+    else {
+        panic!("expected a JavaScript error");
+    };
+    assert!(thrown.starts_with("TypeError: boom\n    at default (chunk:deployment/build-a:1:"), "{thrown}");
+}
+
+#[test]
+fn imports_at_runtime_reject_without_aborting() {
+    let execution = run("try { await import(import.meta.url); } catch (error) { return error.message; }").unwrap();
+    assert_eq!(value(&execution), json!("Runtime imports are unavailable"));
+    let source = r"
+        import(import.meta.url).catch(() => {});
+        await 0;
+        Error.stackTraceLimit = 0;
+        throw Object.assign(new Error('x'), { message: 42 });
+        export default () => 1;
+    ";
+    assert!(matches!(Deployment::new("build-a".into(), source.into(), Limits::default()), Err(Error::JavaScript(_))));
+}

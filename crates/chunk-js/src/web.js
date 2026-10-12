@@ -188,10 +188,22 @@
       return encodeInto(source, destination);
     }
   }
+  // deno_web's URL.parse runs application code, a subclass constructor or a setter on the brand,
+  // between parsing and reading the result, and its op panics if that code parses another URL.
+  const NativeURL = url.URL;
+  const canParse = NativeURL.canParse;
+  NativeURL.parse = {
+    parse(input, base = undefined) {
+      if (arguments.length === 0) throw new TypeError("Failed to execute 'URL.parse': 1 argument required");
+      input = `${input}`;
+      if (base !== undefined) base = `${base}`;
+      return canParse(input, base) ? new NativeURL(input, base) : null;
+    },
+  }.parse;
   Object.assign(globalThis, {
     TextEncoder,
     TextDecoder: encoding.TextDecoder,
-    URL: url.URL,
+    URL: NativeURL,
     URLSearchParams: url.URLSearchParams,
     atob: base64.atob,
     btoa: base64.btoa,
@@ -200,8 +212,8 @@
       return clone(value);
     },
   });
-  delete url.URL.createObjectURL;
-  delete url.URL.revokeObjectURL;
+  delete NativeURL.createObjectURL;
+  delete NativeURL.revokeObjectURL;
   const levels = ["debug", "log", "info", "warn", "error"];
   globalThis.console = Object.freeze(
     Object.fromEntries(
