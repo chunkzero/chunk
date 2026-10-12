@@ -73,7 +73,7 @@ impl Config {
             "prefix must be alphanumeric or '_', and names at most 16 characters"
         );
         ensure!((0.001..=10_000.0).contains(&self.login_rate), "login rate must be in [0.001, 10000]");
-        ensure!(self.max_pending > 0, "max pending must be positive");
+        ensure!((1..=100_000).contains(&self.max_pending), "max pending must be 1..=100000");
         ensure!(self.move_hz <= 20, "move rate must be at most 20 Hz, the client tick rate");
         ensure!(
             (0.0..=86_400.0).contains(&self.ping_interval)
@@ -87,7 +87,7 @@ impl Config {
             (1..=86_400).contains(&self.stats_interval) && (1..=86_400).contains(&self.login_timeout),
             "stats interval and login timeout must be in [1, 86400]"
         );
-        ensure!(self.threads != Some(0), "threads must be positive");
+        ensure!(self.threads.is_none_or(|threads| (1..=1024).contains(&threads)), "threads must be 1..=1024");
         Ok(())
     }
 
