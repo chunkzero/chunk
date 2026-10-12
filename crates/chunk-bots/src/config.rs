@@ -63,20 +63,31 @@ pub struct Config {
 impl Config {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.bots > 0 && self.bots <= 100_000, "bots must be 1..=100000");
-        let longest = self.prefix.len() + (self.first + self.bots - 1).to_string().len();
+        let last = self.first.checked_add(self.bots - 1);
+        ensure!(last.is_some(), "first and bots must leave every index within a u32");
+        let longest = self.prefix.len() + last.map_or(0, |last| last.to_string().len());
         ensure!(
             !self.prefix.is_empty()
                 && longest <= 16
                 && self.prefix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
             "prefix must be alphanumeric or '_', and names at most 16 characters"
         );
-        ensure!(self.login_rate > 0.0 && self.login_rate <= 10_000.0, "login rate must be in (0, 10000]");
-        ensure!(self.max_pending > 0, "max pending must be positive");
+        ensure!((0.001..=10_000.0).contains(&self.login_rate), "login rate must be in [0.001, 10000]");
+        ensure!((1..=100_000).contains(&self.max_pending), "max pending must be 1..=100000");
         ensure!(self.move_hz <= 20, "move rate must be at most 20 Hz, the client tick rate");
-        ensure!(self.ping_interval >= 0.0 && self.command_interval > 0.0, "invalid ping or command interval");
+        ensure!(
+            (0.0..=86_400.0).contains(&self.ping_interval)
+                && self.command_interval > 0.0
+                && self.command_interval <= 86_400.0,
+            "ping interval must be in [0, 86400] and command interval in (0, 86400]"
+        );
         ensure!(self.command.as_ref().is_none_or(|command| command.len() < 200), "command too long");
         ensure!(self.view_distance >= 2, "view distance must be at least 2");
-        ensure!(self.stats_interval > 0 && self.login_timeout > 0, "intervals must be positive");
+        ensure!(
+            (1..=86_400).contains(&self.stats_interval) && (1..=86_400).contains(&self.login_timeout),
+            "stats interval and login timeout must be in [1, 86400]"
+        );
+        ensure!(self.threads.is_none_or(|threads| (1..=1024).contains(&threads)), "threads must be 1..=1024");
         Ok(())
     }
 

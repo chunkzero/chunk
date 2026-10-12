@@ -28,14 +28,13 @@ impl Default for Services {
 impl FromStr for Services {
     type Err = io::Error;
 
-    /// Accepts `core,gateway`, `core` and `gateway`, in any order. A legacy `exec` is ignored with a warning.
+    /// Accepts `core,gateway`, `core` and `gateway`, in any order.
     fn from_str(value: &str) -> io::Result<Self> {
         let mut services = BTreeSet::new();
         for name in value.split(',').map(str::trim) {
             match name {
                 "core" => _ = services.insert(Service::Core),
                 "gateway" => _ = services.insert(Service::Gateway),
-                "exec" => tracing::warn!("ignoring exec in CHUNK_SERVICES; core runs backend functions"),
                 name => return Err(io::Error::other(format!("unknown service {name:?} in CHUNK_SERVICES"))),
             }
         }
