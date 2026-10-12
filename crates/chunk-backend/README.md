@@ -28,10 +28,13 @@ commits are outstanding or another deployment change is in progress. At most 16 
 serve against the one database.
 
 Table names are the keys of the schema the project's `server/schema/index.ts` exports, not file paths. A deployment's
-tables are merged into the store's installed schema: new tables, optional new fields and new indexes are accepted.
-Changing an existing field or index is rejected unless the deployment's migration journal carries a migration for it.
-While an expand migration is active the store keeps both shapes, and transforms each write so deployments on either side
-of it can read and write; its finish drops the old shape. Tables starting with `chunk_` are reserved.
+tables are merged into the store's installed schema: new tables, optional new fields and new indexes are accepted, and
+deployments that declare one index name with different fields each read their own. Removing or renaming a field, or
+adding a required one, needs a migration in the deployment's journal (see the SDK's
+[migrations](../chunk-build/sdk/README.md#migrations)); a field's type can't change in place. While an expand migration
+is active the store keeps both shapes, and a resident deployment that carries it runs its `to` on each write from the
+old shape, and its `back`, where it has one, on each write from the new. Finishing it drops the old shape. Tables
+starting with `chunk_` are reserved.
 
 Release a deployment once its mutations and subscriptions have drained; `release` returns `Busy` while an action still
 uses it. Releasing removes the bundle and permanently retires the ID; data, schema and operation outcomes stay. If a

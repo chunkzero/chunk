@@ -72,7 +72,7 @@ impl Config {
                 && self.prefix.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
             "prefix must be alphanumeric or '_', and names at most 16 characters"
         );
-        ensure!(self.login_rate > 0.0 && self.login_rate <= 10_000.0, "login rate must be in (0, 10000]");
+        ensure!((0.001..=10_000.0).contains(&self.login_rate), "login rate must be in [0.001, 10000]");
         ensure!(self.max_pending > 0, "max pending must be positive");
         ensure!(self.move_hz <= 20, "move rate must be at most 20 Hz, the client tick rate");
         ensure!(
@@ -83,7 +83,11 @@ impl Config {
         );
         ensure!(self.command.as_ref().is_none_or(|command| command.len() < 200), "command too long");
         ensure!(self.view_distance >= 2, "view distance must be at least 2");
-        ensure!(self.stats_interval > 0 && self.login_timeout > 0, "intervals must be positive");
+        ensure!(
+            (1..=86_400).contains(&self.stats_interval) && (1..=86_400).contains(&self.login_timeout),
+            "stats interval and login timeout must be in [1, 86400]"
+        );
+        ensure!(self.threads != Some(0), "threads must be positive");
         Ok(())
     }
 
