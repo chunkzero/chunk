@@ -44,6 +44,8 @@ pub(super) struct Service {
     /// Activations answered as waiting for the rest of a roster before one succeeds.
     pub roster_waits: Arc<AtomicUsize>,
     pub activations: Arc<AtomicUsize>,
+    /// The next activation finds its claim's session retired.
+    pub retiring: Arc<AtomicBool>,
     /// Counts claim-state changes; open streams send a new snapshot for each.
     pub published: Arc<watch::Sender<u64>>,
     /// Ends open streams at their next publication and refuses new ones.
@@ -150,6 +152,7 @@ impl Fixture {
             reopen: Arc::default(),
             roster_waits: Arc::default(),
             activations: Arc::default(),
+            retiring: Arc::default(),
             published: Arc::new(watch::Sender::new(1)),
             watch_down: Arc::default(),
             refused_watches: Arc::default(),

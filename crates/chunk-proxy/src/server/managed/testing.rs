@@ -45,7 +45,9 @@ async fn arrived(
     };
     let guard = ClaimGuard { platform: platform.clone(), claim: login, armed: true, failure: None };
     let assignment = claim(&guard).await?.ok_or_else(|| io::Error::other("core asked to route the login again"))?;
-    activate(&guard).await?;
+    if !activate(&guard).await? {
+        return Err(io::Error::other("the claim's session retired before activation"));
+    }
     arrive(&guard, assignment.identity.clone()).await?;
     Ok((guard, assignment))
 }

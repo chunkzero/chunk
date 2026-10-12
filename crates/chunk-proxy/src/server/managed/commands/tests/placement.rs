@@ -6,12 +6,15 @@ use crate::{
     PlatformTarget,
     server::{
         Retarget,
-        managed::{Assignment, ClaimGuard, claim_destination, moves::next_move},
+        managed::{Assignment, ClaimGuard, activate, claim_destination, moves::next_move, reroute},
     },
 };
 use chunk_proto::sync::v1::{GatewayMove, SessionDemand};
 use serde_json::{Value, json};
-use std::{io, sync::RwLock};
+use std::{
+    io,
+    sync::{RwLock, atomic::Ordering},
+};
 
 fn manifest(app: &str) -> Value {
     let hook = |event: &str, export: &str| json!({"domain": "", "event": event, "export": export});
@@ -209,5 +212,31 @@ async fn a_reserved_move_completes_in_its_deployment_though_the_current_one_drop
     destination.armed = false;
     assert_eq!(assignment.deployment, "b");
     assert!(hooks(&fixture).iter().all(|(deployment, _)| deployment == "b"));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_move_whose_session_retired_before_activation_is_recorded_failed_and_its_player_routed_as_a_login() {
+    let fixture = Fixture::new().await;
+    deployments(&fixture, "b");
+    let current = retarget(&fixture, "b");
+    let (_source, running) = moving(&fixture, &current);
+    let (destination, _) = tokio::time::timeout(Duration::from_secs(5), running).await.unwrap().unwrap().unwrap();
+    fixture.service.retiring.store(true, Ordering::SeqCst);
+    assert!(!activate(&destination).await.unwrap());
+
+    let (mut login, assignment) = reroute(destination, &current).await.unwrap();
+    login.armed = false;
+    assert_eq!(assignment.deployment, "b");
+    assert!(login.claim.source.is_none());
+    assert_eq!(login.claim.connection_id, fixture.claim.connection_id);
+    let failure = fixture.service.movement.lock().unwrap().failure.clone();
+    assert_eq!(failure, Some(("move".into(), "destination session retired".into())));
+    // The retired claim was withdrawn before its player's login was claimed.
+    {
+        let logins = fixture.service.logins.lock().unwrap();
+        assert_eq!(logins.cancels, ["move"]);
+        assert_eq!(logins.claims.last().map(|(operation, _)| operation), Some(&login.claim.operation_id));
+    }
     fixture.close().await;
 }

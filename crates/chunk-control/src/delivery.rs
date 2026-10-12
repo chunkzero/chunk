@@ -13,18 +13,25 @@ use crate::{
 impl Control {
     /// Records admission intent for the claim `identity` names; native Minecraft login attaches the prepared delivery.
     /// # Errors
-    /// Rejects stale identity and retains authority after ambiguous runtime replies. Reports `Busy` until recovery
-    /// has fenced surviving JVMs.
+    /// Rejects stale identity and retains authority after ambiguous runtime replies. Rejects with
+    /// [`crate::DESTINATION_RETIRED`] the current claim whose session retired before admitting it, whether or not that
+    /// already withdrew the claim. Reports `Busy` until recovery has fenced surviving JVMs.
     pub async fn activate(&self, identity: ClaimIdentity) -> Result<Assignment> {
         self.admit()?;
         let operation = self.operation(&identity.operation_id)?;
         let _guard = operation.lock().await;
         let admitted = self.update(|state| {
+            let claim = state.claims.get(&identity.operation_id).ok_or(Error::Invalid("unknown claim"))?;
+            // Checked before the move's source: once that is fenced and this claim released, nothing owns the player.
+            if claim.identity(&identity.operation_id) == identity
+                && !claim.activated
+                && matches!(claim.phase, Phase::Reserved | Phase::Withdrawing | Phase::Released)
+                && state.sessions.get(&claim.session).is_some_and(|session| session.retired)
+            {
+                return Err(Error::Invalid(crate::DESTINATION_RETIRED));
+            }
             crate::moves::authorize_destination(state, &identity)?;
             let claim = state.claims.get(&identity.operation_id).ok_or(Error::Invalid("unknown claim"))?;
-            if claim.phase == Phase::Reserved && state.sessions[&claim.session].retired {
-                return Err(Error::Invalid("destination draining"));
-            }
             if claim.identity(&identity.operation_id) != identity
                 || claim.assignment.is_none()
                 || state.players.get(&claim.player).and_then(|p| p.current.as_ref()) != Some(&identity.operation_id)

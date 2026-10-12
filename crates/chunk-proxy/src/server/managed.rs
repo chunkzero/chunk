@@ -174,7 +174,13 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
     let mut lifecycle = Lifecycle::new(platform.clone());
     let mut commands = commands::Commands::new(&platform).await?;
     let mut packs = packs::Packs::default();
+    let mut rerouted = false;
     loop {
+        if guard.platform.target.deployment != platform.target.deployment {
+            platform = guard.platform.clone();
+            lifecycle.rebind(platform.clone());
+            commands = commands::Commands::new(&platform).await?;
+        }
         commands.bind(&guard.claim, &assignment.identity)?;
         // Packs load within what the claim's lifetime leaves, keeping time to connect before it expires.
         let remaining = assignment.expires.saturating_duration_since(Instant::now()).saturating_sub(CONNECT_RESERVE);
@@ -186,9 +192,29 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
                 deadline.min(PACK_TIMEOUT).min(remaining),
             )
             .await?;
-        let mut internal = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
+        let opened = timeout(deadline.min(WAIT_TIMEOUT), open(&assignment, &guard, &authenticated, &settings))
             .await
             .map_err(io::Error::other)??;
+        let Some(mut internal) = opened else {
+            // The client is configuring and its player holds no other claim, so they are routed as a login, once.
+            let routed = if rerouted {
+                Err(io::Error::other("destination session retired after routing again"))
+            } else {
+                timeout(deadline.min(WAIT_TIMEOUT), reroute(guard, current)).await.map_err(io::Error::other).flatten()
+            };
+            match routed {
+                Ok(next) => (guard, assignment) = next,
+                Err(error) => {
+                    let _ =
+                        configuration::disconnect(&mut authenticated.transport, 0x02, "Server temporarily unavailable")
+                            .await;
+                    return Err(error);
+                }
+            }
+            lifecycle.cutover(&guard.claim);
+            rerouted = true;
+            continue;
+        };
         timeout(
             deadline.min(WAIT_TIMEOUT),
             Box::pin(configuration::relay(&mut authenticated.transport, &mut internal, &mut settings)),
@@ -212,6 +238,7 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         }
         lifecycle.arrived(&guard.claim)?;
         commands.arrived();
+        rerouted = false;
         tracing::info!(operation = %guard.claim.operation_id, player = %guard.claim.player.uuid, "player arrived in managed session");
         let next = relay::until(
             &mut authenticated.transport,
@@ -239,12 +266,27 @@ pub(super) async fn serve<S: AsyncRead + AsyncWrite + Unpin>(
         guard.armed = false;
         drop(internal);
         (guard, assignment) = next;
-        if guard.platform.target.deployment != platform.target.deployment {
-            platform = guard.platform.clone();
-            lifecycle.rebind(platform.clone());
-            commands = commands::Commands::new(&platform).await?;
-        }
     }
+}
+
+/// Routes the player of `retired`, a claim whose session retired before admitting them, as a login again. Core admits
+/// that login once `retired` is withdrawn, as the player then holds no claim: a move fenced its source before
+/// activating. A move is first recorded as failed.
+async fn reroute(mut retired: ClaimGuard, current: &Retarget) -> io::Result<(ClaimGuard, Assignment)> {
+    let operation = retired.claim.operation_id.clone();
+    tracing::warn!(%operation, player = %retired.claim.player.uuid, "session retired before activation; routing its player again");
+    if retired.claim.source.is_some() {
+        retired.failure = Some("destination session retired".into());
+        if let Err(error) = retired.cancel().await {
+            tracing::debug!(%error, %operation, "retired move's failure unrecorded");
+        }
+        retired.failure = None;
+    }
+    withdraw(&retired).await?;
+    retired.armed = false;
+    let Claim { connection_id, player, .. } = retired.claim.clone();
+    let login = Claim { operation_id: uuid::Uuid::new_v4().to_string(), connection_id, player, ..Claim::default() };
+    claim_destination(&login, current).await
 }
 
 /// Routes and claims `login` through the current release. A login whose player may return to the session they left on
@@ -327,26 +369,30 @@ fn login_claim(profile: &chunk_protocol::versions::v26_2::LoginSuccess, connecti
     }
 }
 
+/// Activates `guard`'s claim and connects to its JVM, or returns `None` when the claim's session retired first.
 async fn open<S>(
     assignment: &Assignment,
     guard: &ClaimGuard,
     authenticated: &Authenticated<S>,
     settings: &chunk_protocol::versions::v26_2::ConfigurationClientInformation,
-) -> io::Result<Transport<tokio::net::TcpStream>> {
+) -> io::Result<Option<Transport<tokio::net::TcpStream>>> {
     if assignment.protocol != authenticated.protocol_version {
         return Err(invalid_data("destination protocol differs from client"));
     }
-    activate(guard).await?;
-    gameplay::login(authenticated, settings, &assignment.endpoint, assignment.setup.clone()).await
+    if !activate(guard).await? {
+        return Ok(None);
+    }
+    gameplay::login(authenticated, settings, &assignment.endpoint, assignment.setup.clone()).await.map(Some)
 }
 
-/// Records admission intent. A roster member waits for the rest of its group; the caller bounds the wait.
-async fn activate(guard: &ClaimGuard) -> io::Result<()> {
+/// Records admission intent, returning whether core admitted the claim: `false` means its session retired first, which
+/// ends the claim. A roster member waits for the rest of its group; the caller bounds the wait.
+async fn activate(guard: &ClaimGuard) -> io::Result<bool> {
     loop {
         let operation = &guard.claim.operation_id;
         let (result, _): (ActivateResult, _) = guard.platform.call("activate", operation, &(), RPC_TIMEOUT).await?;
-        if !result.waiting {
-            return Ok(());
+        if result.retired || !result.waiting {
+            return Ok(!result.retired);
         }
         sleep(Duration::from_millis(250)).await;
     }

@@ -435,7 +435,7 @@ async fn roster_activation_waits_for_the_group_and_other_failures_still_end_the_
         failure: None,
     };
     fixture.service.roster_waits.store(3, Ordering::SeqCst);
-    crate::server::managed::activate(&guard).await.unwrap();
+    assert!(crate::server::managed::activate(&guard).await.unwrap());
     assert_eq!(fixture.service.activations.load(Ordering::SeqCst), 4);
     let mut target = fixture.commands.tasks.platform.target.clone();
     target.gateway.credential = "wrong".into();

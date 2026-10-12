@@ -6,7 +6,9 @@ use super::{
     super::{SyncService, app},
     decode, errors,
 };
-use chunk_control::{ALREADY_OWNED, Error as Failure, Generation, ROSTER_WAITING, ROUTE_AGAIN, StoredClaim};
+use chunk_control::{
+    ALREADY_OWNED, DESTINATION_RETIRED, Error as Failure, Generation, ROSTER_WAITING, ROUTE_AGAIN, StoredClaim,
+};
 use chunk_proto::{
     control::v1 as control,
     sync::v1::{
@@ -108,8 +110,9 @@ async fn activate(service: &SyncService, gateway: &str, operation: &str) -> Resu
     let identity = identity.ok_or_else(|| errors::invalid("no claim under this operation ID"))?;
     let control = service.control.clone();
     match service.operations.admit(async move { control.activate(identity).await }).await {
-        Ok(_) => Ok(ActivateResult { waiting: false }),
-        Err(Failure::Unresolved(ROSTER_WAITING)) => Ok(ActivateResult { waiting: true }),
+        Ok(_) => Ok(ActivateResult::default()),
+        Err(Failure::Unresolved(ROSTER_WAITING)) => Ok(ActivateResult { waiting: true, retired: false }),
+        Err(Failure::Invalid(DESTINATION_RETIRED)) => Ok(ActivateResult { waiting: false, retired: true }),
         Err(failure) => Err(errors::operation(&failure)),
     }
 }

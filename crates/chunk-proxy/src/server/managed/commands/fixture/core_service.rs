@@ -83,7 +83,8 @@ impl Service {
                 self.activations.fetch_add(1, Ordering::SeqCst);
                 let waits =
                     self.roster_waits.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waits| waits.checked_sub(1));
-                ActivateResult { waiting: waits.is_ok() }.encode_to_vec()
+                let retired = self.retiring.swap(false, Ordering::SeqCst);
+                ActivateResult { waiting: waits.is_ok(), retired }.encode_to_vec()
             }
             "chunk:withdraw" => {
                 self.logins.lock().unwrap().cancels.push(operation);

@@ -17,8 +17,9 @@ pub(crate) use select::{admit_move, select_room};
 impl Control {
     /// Reserves capacity durably, coalesces demand, and prepares a non-active delivery.
     /// # Errors
-    /// Rejects duplicate membership, changed operations, unknown session types and unresolved hosts. Reports `Busy`
-    /// until recovery has fenced surviving JVMs, even for a restored claim: the log may have lost its cancellation.
+    /// Rejects duplicate membership, changed operations, unknown session types and unresolved hosts, and with
+    /// [`crate::DESTINATION_RETIRED`] a reservation whose session retired. Reports `Busy` until recovery has fenced
+    /// surviving JVMs, even for a restored claim: the log may have lost its cancellation.
     pub async fn claim(&self, request: ClaimRequest) -> Result<Assignment> {
         self.claim_approved(request, "").await
     }
@@ -55,6 +56,9 @@ impl Control {
             return Err(Error::Invalid("claim closed"));
         }
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
+        if claim.phase == Phase::Reserved && session.retired {
+            return Err(Error::Invalid(crate::DESTINATION_RETIRED));
+        }
         let deployment = &state.host_release(&session.host)?.deployment;
         let runtime = self.runtime(&session.host).await?;
         let config = self.jvm_configuration(deployment, &runtime)?;
@@ -90,6 +94,9 @@ impl Control {
             let claim = state.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase != Phase::Reserved {
                 return Err(Error::Invalid("claim no longer reserved"));
+            }
+            if state.sessions.get(&claim.session).is_some_and(|session| session.retired) {
+                return Err(Error::Invalid(crate::DESTINATION_RETIRED));
             }
             let mut persisted = assignment.clone();
             persisted.configuration = None;

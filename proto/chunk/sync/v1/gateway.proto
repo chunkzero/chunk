@@ -219,6 +219,9 @@ enum ClaimRefusal {
 message ActivateResult {
   // Other members of the player's roster have yet to activate, so none was admitted. Call again.
   bool waiting = 1;
+  // The claim's session retired before admitting the player, so the claim only ends. Withdraw it; its player, who
+  // holds no other claim once a move fenced its source, can then log in again.
+  bool retired = 2;
 }
 
 // Arguments of `chunk:abandon_move`.
