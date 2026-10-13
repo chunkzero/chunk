@@ -78,8 +78,10 @@ impl Control {
         };
         let preparation = match prepared.await {
             Ok(preparation) => preparation,
-            // The session's retirement is what stopped or closed the delivery.
+            // The session's retirement is what stopped or closed the delivery. Its report reaches the JVM's link
+            // within its commit, so taking the writer once waits for that commit to publish.
             Err(error) => {
+                drop(self.authority.writer()?);
                 let state = self.state()?;
                 let retired = state
                     .claims

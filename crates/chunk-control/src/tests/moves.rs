@@ -148,6 +148,10 @@ async fn a_report_closing_a_delivery_and_ending_its_session_together_leaves_the_
         state.claims["move"].phase == Phase::Released && state.sessions[&session].retired
     })
     .await;
+    assert!(retired(&control.activate(identity.clone()).await));
+    // The claim outlives its finished session's row.
+    control.reconcile_all().await.unwrap();
+    assert!(!control.state().unwrap().sessions.contains_key(&session));
     assert!(retired(&control.activate(identity).await));
     fixture.close().await;
 }

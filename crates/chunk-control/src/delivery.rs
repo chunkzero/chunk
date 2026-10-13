@@ -248,9 +248,9 @@ fn lost_to_retirement(state: &State, identity: &ClaimIdentity) -> bool {
 }
 
 /// Whether `claim` never admitted its player and its session retired, without control canceling it while that session
-/// still ran. Read from the session, so it holds however the claim itself ended.
+/// still ran. Read from the session, so it holds however the claim itself ended; a session no longer kept has finished.
 pub(crate) fn retired(state: &State, claim: &Claim) -> bool {
-    !claim.activated && !claim.canceled && state.sessions.get(&claim.session).is_some_and(|session| session.retired)
+    !claim.activated && !claim.canceled && state.sessions.get(&claim.session).is_none_or(|session| session.retired)
 }
 
 pub(crate) fn release(state: &mut State, operation: &str) -> Result<()> {
