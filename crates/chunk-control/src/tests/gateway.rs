@@ -22,6 +22,7 @@ fn add(control: &Control, gateway: &str, operations: impl IntoIterator<Item = St
                     assigned_at_ms: None,
                     released_at_ms: None,
                     roster: None,
+                    canceled: false,
                 };
                 state.claims.insert(operation, claim);
             }

@@ -61,10 +61,12 @@ impl Service {
                         destination: Some(destination),
                         ..reservation()
                     })
+                } else if self.retiring.swap(false, Ordering::SeqCst) {
+                    claim_result::Outcome::Refusal(ClaimRefusal::DestinationRetired.into())
                 } else if logins.retired.as_ref() == Some(&login.deployment) || placement.refuses(&login.deployment) {
                     claim_result::Outcome::Refusal(ClaimRefusal::RouteAgain.into())
                 } else {
-                    claim_result::Outcome::Assignment(placed(&login.deployment))
+                    claim_result::Outcome::Assignment(placement.placed(&login.deployment))
                 };
                 ClaimResult { outcome: Some(outcome) }.encode_to_vec()
             }
@@ -83,7 +85,9 @@ impl Service {
                 self.activations.fetch_add(1, Ordering::SeqCst);
                 let waits =
                     self.roster_waits.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |waits| waits.checked_sub(1));
-                ActivateResult { waiting: waits.is_ok() }.encode_to_vec()
+                let retired = self.retiring.swap(false, Ordering::SeqCst)
+                    || self.logins.lock().unwrap().retired_operations.contains(&operation);
+                ActivateResult { waiting: waits.is_ok(), retired }.encode_to_vec()
             }
             "chunk:withdraw" => {
                 self.logins.lock().unwrap().cancels.push(operation);
@@ -97,6 +101,7 @@ impl Service {
                 }
                 let expected = movement.pending.as_ref().map(|pending| &pending.operation_id);
                 let expected = expected.or_else(|| movement.failure.as_ref().map(|(operation, _)| operation));
+                let expected = expected.or(movement.vanished.as_ref());
                 assert_eq!(expected, Some(&operation));
                 let reason = sync::AbandonMoveArguments::decode(call.arguments.as_slice()).unwrap().reason;
                 movement.pending = None;
@@ -183,7 +188,7 @@ impl Service {
         } else if placement.refuses(approved) {
             claim_result::Outcome::Refusal(ClaimRefusal::RouteAgain.into())
         } else {
-            claim_result::Outcome::Assignment(placed(approved))
+            claim_result::Outcome::Assignment(placement.placed(approved))
         };
         Ok(ClaimResult { outcome: Some(outcome) }.encode_to_vec())
     }
@@ -196,10 +201,13 @@ impl super::Placement {
     }
 }
 
-/// A reservation in `deployment`, or in the fixture's own when it is empty.
-fn placed(deployment: &str) -> ClaimAssignment {
-    let deployment = if deployment.is_empty() { "deployment" } else { deployment };
-    ClaimAssignment { deployment: deployment.into(), ..reservation() }
+impl super::Placement {
+    /// A reservation in `deployment`, or in the fixture's own when it is empty.
+    fn placed(&self, deployment: &str) -> ClaimAssignment {
+        let deployment = if deployment.is_empty() { "deployment" } else { deployment };
+        let endpoint = self.endpoint.clone().unwrap_or_else(|| reservation().endpoint);
+        ClaimAssignment { deployment: deployment.into(), endpoint, ..reservation() }
+    }
 }
 
 /// The claim the gateway's topic holds.

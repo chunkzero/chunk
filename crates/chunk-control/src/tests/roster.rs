@@ -243,3 +243,30 @@ async fn moves_to_undeclared_destinations_are_unknown() {
     assert!(matches!(moved, Err(Error::Refused(chunk_contract::MoveRefusal::UnknownDestination))), "{moved:?}");
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn members_of_a_roster_whose_session_retires_are_told_so_rather_than_that_their_move_was_abandoned() {
+    let fixture = fixture();
+    let control = fixture.control().await;
+    let members = [arrive(&fixture, &control, "a").await, arrive(&fixture, &control, "b").await];
+    let destinations = control.move_roster(&roster("party", 1, &members)).unwrap();
+    let mut activations = Vec::new();
+    for (destination, (player, source)) in destinations.iter().zip(&members) {
+        let prepared = control.claim(destination.clone()).await.unwrap();
+        control.cancel(request(&source.operation_id, player)).await.unwrap();
+        activations.push(prepared.claim.unwrap());
+    }
+    let (first, second) = (&destinations[0].operation_id, &destinations[1].operation_id);
+    let session = control.state().unwrap().claims[first].session.clone();
+    assert_eq!(control.state().unwrap().claims[second].session, session);
+
+    // The first member's claim releasing fails the second member's move.
+    fixture.runtime.finish(&session, &[first]);
+    eventually(|| control.state().unwrap().moves[second].failure.is_some()).await;
+    assert_eq!(control.state().unwrap().moves[second].failure.as_ref().unwrap().reason, "roster member left");
+    for activation in activations {
+        let result = control.activate(activation).await;
+        assert!(matches!(result, Err(Error::Invalid(crate::DESTINATION_RETIRED))), "{result:?}");
+    }
+    fixture.close().await;
+}

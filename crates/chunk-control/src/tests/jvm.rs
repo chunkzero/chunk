@@ -128,6 +128,16 @@ impl FakeRuntime {
         }
     }
 
+    /// Ends `session` and closes `operations`' deliveries together, as `scope.finish()` does, so the next report
+    /// carries both.
+    pub(super) fn finish(&self, session: &str, operations: &[&str]) {
+        let mut bindings = self.bindings.lock().unwrap();
+        for operation in operations {
+            bindings.get_mut(*operation).unwrap().phase = JvmDeliveryPhase::Closed;
+        }
+        self.ended_sessions.lock().unwrap().insert(session.into());
+    }
+
     /// Prepares `operation`'s delivery, or closes it once withdrawn.
     fn delivery(&self, operation: &str, wanted: &JvmDelivery) {
         let mut bindings = self.bindings.lock().unwrap();

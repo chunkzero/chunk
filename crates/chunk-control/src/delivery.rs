@@ -13,18 +13,20 @@ use crate::{
 impl Control {
     /// Records admission intent for the claim `identity` names; native Minecraft login attaches the prepared delivery.
     /// # Errors
-    /// Rejects stale identity and retains authority after ambiguous runtime replies. Reports `Busy` until recovery
-    /// has fenced surviving JVMs.
+    /// Rejects stale identity and retains authority after ambiguous runtime replies. Rejects with
+    /// [`crate::DESTINATION_RETIRED`] a claim whose session retired before admitting it, unless control canceled it
+    /// first or a newer claim owns its player. Reports `Busy` until recovery has fenced surviving JVMs.
     pub async fn activate(&self, identity: ClaimIdentity) -> Result<Assignment> {
         self.admit()?;
         let operation = self.operation(&identity.operation_id)?;
         let _guard = operation.lock().await;
         let admitted = self.update(|state| {
+            // Checked before the move's source: once that is fenced and this claim released, nothing owns the player.
+            if lost_to_retirement(state, &identity) {
+                return Err(Error::Invalid(crate::DESTINATION_RETIRED));
+            }
             crate::moves::authorize_destination(state, &identity)?;
             let claim = state.claims.get(&identity.operation_id).ok_or(Error::Invalid("unknown claim"))?;
-            if claim.phase == Phase::Reserved && state.sessions[&claim.session].retired {
-                return Err(Error::Invalid("destination draining"));
-            }
             if claim.identity(&identity.operation_id) != identity
                 || claim.assignment.is_none()
                 || state.players.get(&claim.player).and_then(|p| p.current.as_ref()) != Some(&identity.operation_id)
@@ -84,10 +86,15 @@ impl Control {
         let host = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?.host.clone();
         // The claim may have been released since it was read, such as with its host's capacity.
         let released = self.update(|s| {
-            let claim = s.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
+            let claim = s.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase == Phase::Released {
                 return Ok(true);
             }
+            // A claim its JVM already withdraws, or whose session retired, ends for that reason instead.
+            let ending = claim.phase == Phase::Withdrawing
+                || s.sessions.get(&claim.session).is_some_and(|session| session.retired);
+            let claim = s.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
+            claim.canceled |= !ending;
             set_phase(claim, Phase::Withdrawing).map(|()| false)
         })?;
         if released {
@@ -226,6 +233,24 @@ pub(crate) fn apply(state: &mut State, host: &str, status: &JvmDeliveryStatus) -
     } else {
         set_phase(state.claims.get_mut(operation).ok_or(Error::Invalid("unknown claim"))?, phase)
     }
+}
+
+/// Whether the claim `identity` names is lost to its session's retirement and still its player's newest.
+fn lost_to_retirement(state: &State, identity: &ClaimIdentity) -> bool {
+    let operation = &identity.operation_id;
+    let Some(claim) = state.claims.get(operation) else { return false };
+    let superseded = state.players.get(&claim.player).is_some_and(|owner| {
+        [&owner.current, &owner.pending].into_iter().flatten().any(|other| {
+            other != operation && state.claims.get(other).is_some_and(|other| other.generation > claim.generation)
+        })
+    });
+    claim.identity(operation) == *identity && retired(state, claim) && !superseded
+}
+
+/// Whether `claim` never admitted its player and its session retired, without control canceling it while that session
+/// still ran. Read from the session, so it holds however the claim itself ended; a session no longer kept has finished.
+pub(crate) fn retired(state: &State, claim: &Claim) -> bool {
+    !claim.activated && !claim.canceled && state.sessions.get(&claim.session).is_none_or(|session| session.retired)
 }
 
 pub(crate) fn release(state: &mut State, operation: &str) -> Result<()> {

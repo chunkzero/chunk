@@ -44,6 +44,8 @@ pub(super) struct Service {
     /// Activations answered as waiting for the rest of a roster before one succeeds.
     pub roster_waits: Arc<AtomicUsize>,
     pub activations: Arc<AtomicUsize>,
+    /// The next activation or login claim finds its session retired.
+    pub retiring: Arc<AtomicBool>,
     /// Counts claim-state changes; open streams send a new snapshot for each.
     pub published: Arc<watch::Sender<u64>>,
     /// Ends open streams at their next publication and refuses new ones.
@@ -71,6 +73,8 @@ pub(super) struct Logins {
     pub cancels: Vec<String>,
     /// Logins routed with this deployment are rejected for routing again.
     pub retired: Option<String>,
+    /// Activating any of these operations finds its session retired, every time.
+    pub retired_operations: BTreeSet<String>,
     /// The next routing waits for this, then fails.
     pub unroutable: Option<tokio::sync::oneshot::Receiver<()>>,
 }
@@ -90,6 +94,8 @@ pub(super) struct Placement {
     pub returns: Option<(String, sync::SessionDemand)>,
     /// The deployment and destination a move's operation already holds a reservation in.
     pub reserved: Option<(String, sync::SessionDemand)>,
+    /// The player listener every reservation names, where the fixture's own is not one.
+    pub endpoint: Option<String>,
 }
 
 #[derive(Default)]
@@ -100,6 +106,8 @@ pub(super) struct Movement {
     pub reports: usize,
     pub lose_report: bool,
     pub stall_retries: bool,
+    /// The operation ID of a move core ended without recording a failure; the gateway's abandonment records it.
+    pub vanished: Option<String>,
     /// The operation ID and reason of the move abandoned.
     pub failure: Option<(String, String)>,
 }
@@ -150,6 +158,7 @@ impl Fixture {
             reopen: Arc::default(),
             roster_waits: Arc::default(),
             activations: Arc::default(),
+            retiring: Arc::default(),
             published: Arc::new(watch::Sender::new(1)),
             watch_down: Arc::default(),
             refused_watches: Arc::default(),

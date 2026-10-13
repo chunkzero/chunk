@@ -17,8 +17,9 @@ pub(crate) use select::{admit_move, select_room};
 impl Control {
     /// Reserves capacity durably, coalesces demand, and prepares a non-active delivery.
     /// # Errors
-    /// Rejects duplicate membership, changed operations, unknown session types and unresolved hosts. Reports `Busy`
-    /// until recovery has fenced surviving JVMs, even for a restored claim: the log may have lost its cancellation.
+    /// Rejects duplicate membership, changed operations, unknown session types and unresolved hosts, and with
+    /// [`crate::DESTINATION_RETIRED`] a reservation whose session retired. Reports `Busy` until recovery has fenced
+    /// surviving JVMs, even for a restored claim: the log may have lost its cancellation.
     pub async fn claim(&self, request: ClaimRequest) -> Result<Assignment> {
         self.claim_approved(request, "").await
     }
@@ -51,6 +52,9 @@ impl Control {
         let state = self.state()?;
         let claim = state.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
         claim.matches(&request)?;
+        if crate::delivery::retired(&state, claim) {
+            return Err(Error::Invalid(crate::DESTINATION_RETIRED));
+        }
         if matches!(claim.phase, Phase::Withdrawing | Phase::Released) {
             return Err(Error::Invalid("claim closed"));
         }
@@ -68,9 +72,25 @@ impl Control {
             return Ok(assignment);
         }
         // Control's desired state already asks the JVM for this session, and its topic for this delivery.
-        self.session_ready(&session.host, &runtime, &claim.session).await?;
+        let prepared = async {
+            self.session_ready(&session.host, &runtime, &claim.session).await?;
+            self.prepared(&runtime, &request.operation_id, claim.generation).await
+        };
+        let preparation = match prepared.await {
+            Ok(preparation) => preparation,
+            // The session's retirement is what stopped or closed the delivery. Its report reaches the JVM's link
+            // within its commit, so taking the writer once waits for that commit to publish.
+            Err(error) => {
+                drop(self.authority.writer()?);
+                let state = self.state()?;
+                let retired = state
+                    .claims
+                    .get(&request.operation_id)
+                    .is_some_and(|claim| crate::delivery::retired(&state, claim));
+                return Err(if retired { Error::Invalid(crate::DESTINATION_RETIRED) } else { error });
+            }
+        };
         let mut delivery = delivery(deployment, &runtime, &config, claim, &request);
-        let preparation = self.prepared(&runtime, &request.operation_id, claim.generation).await?;
         delivery.identity = None;
         let assigned_at_ms = crate::now_ms();
         let assignment = Assignment {
@@ -86,6 +106,10 @@ impl Control {
             // A host released while preparing never gets a new prepared claim, which only its release would end.
             if state.released(&session.host) {
                 return Err(Error::Stopped);
+            }
+            let claim = state.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
+            if crate::delivery::retired(state, claim) {
+                return Err(Error::Invalid(crate::DESTINATION_RETIRED));
             }
             let claim = state.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase != Phase::Reserved {
@@ -306,6 +330,7 @@ pub(crate) fn insert_claim(
             assigned_at_ms: None,
             released_at_ms: None,
             roster,
+            canceled: false,
         },
     );
     Ok(())

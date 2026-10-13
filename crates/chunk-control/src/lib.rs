@@ -74,6 +74,10 @@ pub const ALREADY_OWNED: &str = "player already owned";
 /// Control's reply to an activation while other members of its roster have yet to activate. Nothing was admitted.
 pub const ROSTER_WAITING: &str = "roster awaiting members";
 
+/// Control's reply to claiming or activating a claim whose session retired before admitting its player. Nothing was
+/// admitted, and the claim only ends.
+pub const DESTINATION_RETIRED: &str = "destination session retired";
+
 /// Control's reply to an operation ID first used for a different claim request.
 pub const OPERATION_CHANGED: &str = "claim operation changed";
 

@@ -14,6 +14,7 @@ async fn failed_move_stops_preparation_and_reports_the_reason_despite_a_lost_rep
     use chunk_proto::sync::v1::{Error, GatewayMove, SessionDemand, error::Code};
     for (code, message) in [
         (Code::Invalid, "destination configuration rejected"),
+        (Code::Invalid, "destination session retired"),
         (Code::Stopped, "runtime stopped"),
         (Code::Unavailable, "app did not become ready within 35 seconds"),
     ] {
@@ -435,7 +436,7 @@ async fn roster_activation_waits_for_the_group_and_other_failures_still_end_the_
         failure: None,
     };
     fixture.service.roster_waits.store(3, Ordering::SeqCst);
-    crate::server::managed::activate(&guard).await.unwrap();
+    assert!(crate::server::managed::activate(&guard).await.unwrap());
     assert_eq!(fixture.service.activations.load(Ordering::SeqCst), 4);
     let mut target = fixture.commands.tasks.platform.target.clone();
     target.gateway.credential = "wrong".into();

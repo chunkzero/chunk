@@ -213,12 +213,18 @@ enum ClaimRefusal {
   CLAIM_REFUSAL_ROUTE_AGAIN = 1;
   // The player already holds a claim, such as through another connection.
   CLAIM_REFUSAL_ALREADY_CONNECTED = 2;
+  // The login's session retired before control prepared it, and control ended the claim. Route the login again under a
+  // new operation ID.
+  CLAIM_REFUSAL_DESTINATION_RETIRED = 3;
 }
 
 // The result of `chunk:activate`.
 message ActivateResult {
   // Other members of the player's roster have yet to activate, so none was admitted. Call again.
   bool waiting = 1;
+  // The claim's session retired before admitting the player, so the claim only ends. Withdraw it; its player, who
+  // holds no other claim once a move fenced its source, can then log in again.
+  bool retired = 2;
 }
 
 // Arguments of `chunk:abandon_move`.
