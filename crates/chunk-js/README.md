@@ -36,8 +36,10 @@ numbers, strings, booleans and bigints, `ArrayBuffer`s, typed arrays and `DataVi
 and class instances, throws `DataCloneError`, unlike in browsers (an object whose internal state can't be read from
 JavaScript, such as an iterator or a `URL`, clones as a plain object if its prototype was replaced to look like one);
 `crypto.subtle.digest` with SHA-1/256/384/512 on up to 1 MiB; ordinary `ArrayBuffer`s and typed arrays; and `console`
-methods, whose output (at most 32 messages and 16 KiB per call) the backend logs. Not available: filesystem, network,
-process, timers, Node or Deno globals, runtime imports, `Intl` and locale methods, `performance`, weak references,
+methods, whose output (at most 32 messages and 16 KiB per call) the backend logs. `URL.parse` returns a plain `URL`,
+also when called on a subclass. An error's `stack` is always a string: `Error.prepareStackTrace` is ignored, so code
+never receives call-site objects. Not available: filesystem, network, process, timers, Node or Deno globals, `import()`
+(every call rejects, including a module importing itself), `Intl` and locale methods, `performance`, weak references,
 WebAssembly, `SharedArrayBuffer` and resizable `ArrayBuffer`s. A promise that can never settle fails the call, and so
 does an unhandled rejection.
 

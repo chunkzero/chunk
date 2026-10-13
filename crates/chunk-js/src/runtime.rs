@@ -98,6 +98,15 @@ impl State {
             ),
             ..Default::default()
         });
+        // deno_core's default callback honours Error.prepareStackTrace with call sites whose
+        // methods panic once application code has modified Array.prototype.
+        runtime.v8_isolate().set_prepare_stack_trace_callback(deno_core::error::format_stack_trace);
+        // deno_core's dynamic import unwraps properties of a failed import's error, which
+        // application code controls.
+        runtime.v8_isolate().set_host_import_module_dynamically_callback(|scope, _, _, _, _| reject_import(scope));
+        runtime
+            .v8_isolate()
+            .set_host_import_module_with_phase_dynamically_callback(|scope, _, _, _, _, _| reject_import(scope));
         runtime.op_state().borrow_mut().put(None::<Capabilities>);
         runtime.op_state().borrow_mut().put(None::<crate::actions::ActionCapabilities>);
         runtime.op_state().borrow_mut().put(crate::actions::Env(Json::empty()));
@@ -203,6 +212,14 @@ impl State {
         serde_json::from_str::<serde_json::Value>(&encoded).map_err(js_error)?;
         Ok(encoded)
     }
+}
+
+fn reject_import<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<v8::Local<'s, v8::Promise>> {
+    let resolver = v8::PromiseResolver::new(scope)?;
+    let message = v8::String::new(scope, "Runtime imports are unavailable")?;
+    let error = v8::Exception::type_error(scope, message);
+    resolver.reject(scope, error)?;
+    Some(resolver.get_promise(scope))
 }
 
 fn js_error(error: impl std::fmt::Display) -> Error {
