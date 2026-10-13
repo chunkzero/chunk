@@ -170,7 +170,7 @@ fn recovery_fences_its_hosts_unassigned_reservations_but_never_another_hosts() {
             assigned_at_ms: None,
             released_at_ms: None,
             roster: None,
-            retired: false,
+            canceled: false,
         };
         state.claims.insert(host.into(), claim);
     }

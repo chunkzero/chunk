@@ -52,13 +52,13 @@ impl Control {
         let state = self.state()?;
         let claim = state.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
         claim.matches(&request)?;
+        if crate::delivery::retired(&state, claim) {
+            return Err(Error::Invalid(crate::DESTINATION_RETIRED));
+        }
         if matches!(claim.phase, Phase::Withdrawing | Phase::Released) {
             return Err(Error::Invalid("claim closed"));
         }
         let session = state.sessions.get(&claim.session).ok_or(Error::Invalid("missing session"))?;
-        if claim.phase == Phase::Reserved && session.retired {
-            return Err(Error::Invalid(crate::DESTINATION_RETIRED));
-        }
         let deployment = &state.host_release(&session.host)?.deployment;
         let runtime = self.runtime(&session.host).await?;
         let config = self.jvm_configuration(deployment, &runtime)?;
@@ -72,9 +72,23 @@ impl Control {
             return Ok(assignment);
         }
         // Control's desired state already asks the JVM for this session, and its topic for this delivery.
-        self.session_ready(&session.host, &runtime, &claim.session).await?;
+        let prepared = async {
+            self.session_ready(&session.host, &runtime, &claim.session).await?;
+            self.prepared(&runtime, &request.operation_id, claim.generation).await
+        };
+        let preparation = match prepared.await {
+            Ok(preparation) => preparation,
+            // The session's retirement is what stopped or closed the delivery.
+            Err(error) => {
+                let state = self.state()?;
+                let retired = state
+                    .claims
+                    .get(&request.operation_id)
+                    .is_some_and(|claim| crate::delivery::retired(&state, claim));
+                return Err(if retired { Error::Invalid(crate::DESTINATION_RETIRED) } else { error });
+            }
+        };
         let mut delivery = delivery(deployment, &runtime, &config, claim, &request);
-        let preparation = self.prepared(&runtime, &request.operation_id, claim.generation).await?;
         delivery.identity = None;
         let assigned_at_ms = crate::now_ms();
         let assignment = Assignment {
@@ -91,12 +105,13 @@ impl Control {
             if state.released(&session.host) {
                 return Err(Error::Stopped);
             }
+            let claim = state.claims.get(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
+            if crate::delivery::retired(state, claim) {
+                return Err(Error::Invalid(crate::DESTINATION_RETIRED));
+            }
             let claim = state.claims.get_mut(&request.operation_id).ok_or(Error::Invalid("unknown claim"))?;
             if claim.phase != Phase::Reserved {
                 return Err(Error::Invalid("claim no longer reserved"));
-            }
-            if state.sessions.get(&claim.session).is_some_and(|session| session.retired) {
-                return Err(Error::Invalid(crate::DESTINATION_RETIRED));
             }
             let mut persisted = assignment.clone();
             persisted.configuration = None;
@@ -313,7 +328,7 @@ pub(crate) fn insert_claim(
             assigned_at_ms: None,
             released_at_ms: None,
             roster,
-            retired: false,
+            canceled: false,
         },
     );
     Ok(())

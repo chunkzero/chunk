@@ -100,21 +100,14 @@ async fn a_destination_that_retires_after_its_source_was_fenced_frees_the_player
     let (source, destination, identity) = moving(&fixture, &control, &uuid).await;
     control.cancel(source).await.unwrap();
 
-    // A claim withdrawn while its session still runs is stale.
-    control
-        .update(|state| {
-            state.claims.get_mut("move").unwrap().phase = Phase::Withdrawing;
-            Ok(())
-        })
-        .unwrap();
-    let stale = control.activate(identity.clone()).await;
-    assert!(matches!(stale, Err(Error::Invalid("stale activation"))), "{stale:?}");
-    // A cancelled claim stays stale when its session retires afterwards.
-    retire(&control, "move", Phase::Withdrawing);
-    let cancelled = control.activate(identity).await;
-    assert!(matches!(cancelled, Err(Error::Invalid(_))) && !retired(&cancelled), "{cancelled:?}");
-
+    // A claim canceled while its session still runs is stale, and stays so when the session retires afterwards.
     control.cancel(destination).await.unwrap();
+    let stale = control.activate(identity.clone()).await;
+    assert!(matches!(stale, Err(Error::Invalid(_))) && !retired(&stale), "{stale:?}");
+    retire(&control, "move", Phase::Released);
+    let canceled = control.activate(identity).await;
+    assert!(matches!(canceled, Err(Error::Invalid(_))) && !retired(&canceled), "{canceled:?}");
+
     assert!(!control.state().unwrap().players.contains_key(&uuid));
     control.claim(request("again", &uuid)).await.unwrap();
     fixture.close().await;
@@ -130,7 +123,7 @@ async fn reconciliation_ending_a_claim_in_a_retired_session_is_reported_until_a_
     retire(&control, "move", Phase::Reserved);
     control.reconcile_all().await.unwrap();
     let claim = control.state().unwrap().claims["move"].clone();
-    assert!(claim.retired, "{:?}", claim.phase as u8);
+    assert!(!claim.canceled, "{:?}", claim.phase as u8);
     assert!(retired(&control.activate(identity.clone()).await));
 
     control.claim(request("again", &uuid)).await.unwrap();

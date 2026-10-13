@@ -30,22 +30,12 @@ impl Control {
             if !cancel {
                 continue;
             }
-            let retired = claim.phase == Phase::Reserved && state.sessions[&claim.session].retired;
             let control = self.clone();
             let permits = permits.clone();
             tasks.spawn(async move {
                 let Ok(_permit) = permits.acquire_owned().await else {
                     return;
                 };
-                if retired
-                    && let Err(error) = control.update(|state| {
-                        crate::delivery::note_retirement(state, &request.operation_id);
-                        Ok(())
-                    })
-                {
-                    tracing::debug!(%error, "control reconciliation could not record a retirement");
-                    return;
-                }
                 if let Err(error) = control.cancel(request).await {
                     tracing::debug!(%error, "control reconciliation retains unresolved claim");
                 }
