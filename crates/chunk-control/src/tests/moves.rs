@@ -132,3 +132,42 @@ async fn reconciliation_ending_a_claim_in_a_retired_session_is_reported_until_a_
     drop(destination);
     fixture.close().await;
 }
+
+#[tokio::test]
+async fn a_report_closing_a_delivery_and_ending_its_session_together_leaves_the_move_retired() {
+    let fixture = Fixture::new();
+    let control = fixture.control().await;
+    let uuid = uuid::Uuid::new_v4().to_string();
+    let (source, _, identity) = moving(&fixture, &control, &uuid).await;
+    control.cancel(source).await.unwrap();
+    let session = control.state().unwrap().claims["move"].session.clone();
+
+    fixture.runtime.finish(&session, &["move"]);
+    eventually(|| {
+        let state = control.state().unwrap();
+        state.claims["move"].phase == Phase::Released && state.sessions[&session].retired
+    })
+    .await;
+    assert!(retired(&control.activate(identity).await));
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn a_login_whose_delivery_closes_with_its_session_while_control_prepares_it_is_retired() {
+    let fixture = Fixture::new();
+    fixture.runtime.stalled_preparation.store(true, Ordering::Release);
+    let control = fixture.control().await;
+    let login = request("login", &uuid::Uuid::new_v4().to_string());
+    let claiming = tokio::spawn({
+        let (control, login) = (control.clone(), login.clone());
+        async move { control.claim(login).await }
+    });
+    eventually(|| fixture.runtime.bindings.lock().unwrap().contains_key("login")).await;
+    let session = control.state().unwrap().claims["login"].session.clone();
+
+    fixture.runtime.finish(&session, &["login"]);
+    let claimed = claiming.await.unwrap();
+    assert!(retired(&claimed), "{claimed:?}");
+    assert!(retired(&control.claim(login).await));
+    fixture.close().await;
+}

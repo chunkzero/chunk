@@ -2,6 +2,7 @@
 //! activation.
 
 use super::*;
+use crate::server::{authentication::Authenticated, transport::Transport};
 use crate::{
     PlatformTarget,
     server::{
@@ -10,11 +11,20 @@ use crate::{
     },
 };
 use chunk_proto::sync::v1::{GatewayMove, SessionDemand};
+use chunk_protocol::{
+    RemainingBytes,
+    versions::v26_2::{
+        AcknowledgeConfiguration, ConfigurationAcknowledged, ConfigurationKeepAlive, ConfigurationKeepAliveResponse,
+        FinishConfiguration, Handshake, LoginAcknowledged, LoginPluginRequest, LoginPluginResponse, LoginStart,
+        LoginSuccess, StartConfiguration,
+    },
+};
 use serde_json::{Value, json};
 use std::{
     io,
     sync::{RwLock, atomic::Ordering},
 };
+use tokio::net::TcpStream;
 
 fn manifest(app: &str) -> Value {
     let hook = |event: &str, export: &str| json!({"domain": "", "event": event, "export": export});
@@ -254,5 +264,143 @@ async fn a_move_whose_session_retired_before_activation_is_recorded_failed_and_i
         assert_eq!(logins.cancels, ["move"]);
         assert_eq!(logins.claims.last().map(|(operation, _)| operation), Some(&login.claim.operation_id));
     }
+    fixture.close().await;
+}
+
+/// Plays a JVM's player listener for one connection: its delivery login, then, when `finish`, the end of configuration.
+/// Returns the connection, which stays open until dropped.
+async fn jvm_accepts(listener: &tokio::net::TcpListener, profile: &LoginSuccess, finish: bool) -> Transport<TcpStream> {
+    let (socket, _) = listener.accept().await.unwrap();
+    let mut jvm = Transport::new(socket);
+    decode_packet::<Handshake>(&jvm.read_frame(4096).await.unwrap()).unwrap();
+    decode_packet::<LoginStart>(&jvm.read_frame(4096).await.unwrap()).unwrap();
+    let challenge = LoginPluginRequest {
+        message_id: VarInt(1),
+        channel: McString::new("chunk:delivery").unwrap(),
+        data: RemainingBytes::new(vec![]).unwrap(),
+    };
+    jvm.write_packet(&challenge).await.unwrap();
+    decode_packet::<LoginPluginResponse>(&jvm.read_frame(4096).await.unwrap()).unwrap();
+    jvm.write_packet(profile).await.unwrap();
+    decode_packet::<LoginAcknowledged>(&jvm.read_frame(4096).await.unwrap()).unwrap();
+    decode_packet::<ConfigurationClientInformation>(&jvm.read_frame(4096).await.unwrap()).unwrap();
+    if finish {
+        jvm.write_packet(&FinishConfiguration).await.unwrap();
+        decode_packet::<AcknowledgeConfiguration>(&jvm.read_frame(4096).await.unwrap()).unwrap();
+    }
+    jvm
+}
+
+/// Reads frames from `client`, answering configuration keepalives, until one is a `P`.
+async fn client_reads<P: Packet>(client: &mut Transport<DuplexStream>) {
+    loop {
+        let frame = client.read_frame(16384).await.unwrap();
+        match VarInt::decode(&mut frame.as_ref()).unwrap().0 {
+            id if id == P::ID => return,
+            id if id == ConfigurationKeepAlive::ID => {
+                let keep_alive_id = decode_packet::<ConfigurationKeepAlive>(&frame).unwrap().keep_alive_id;
+                client.write_packet(&ConfigurationKeepAliveResponse { keep_alive_id }).await.unwrap();
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_move_whose_destination_retires_during_configuration_keeps_the_player_connected_on_a_new_login() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fixture = Fixture::new().await;
+    {
+        let mut placement = fixture.service.placement.lock().unwrap();
+        placement.manifests.insert("deployment".into(), manifest("hub"));
+        placement.endpoint = Some(listener.local_addr().unwrap().to_string());
+    }
+    fixture.service.logins.lock().unwrap().retired_operations.insert("move".into());
+    let current = retarget(&fixture, "deployment");
+    let (client, public) = tokio::io::duplex(65_536);
+    let profile = LoginSuccess {
+        session_id: chunk_protocol::Uuid([2; 16]),
+        uuid: chunk_protocol::Uuid([1; 16]),
+        username: McString::new("Alex").unwrap(),
+        properties: chunk_protocol::BoundedArray::new(vec![]).unwrap(),
+    };
+    // Reservations name protocol 0.
+    let authenticated =
+        Authenticated { protocol_version: 0, profile: profile.clone(), transport: Transport::new(public) };
+    let serving = {
+        let current = current.clone();
+        tokio::spawn(async move {
+            Box::pin(crate::server::managed::serve(authenticated, &current, Duration::from_secs(30))).await
+        })
+    };
+    let mut client = Transport::new(client);
+    let settings = ConfigurationClientInformation {
+        locale: McString::new("en_US").unwrap(),
+        view_distance: 8,
+        chat_flags: VarInt(0),
+        chat_colors: true,
+        skin_parts: 127,
+        main_hand: VarInt(1),
+        enable_text_filtering: false,
+        enable_server_listing: true,
+        particle_status: ConfigurationClientInformationParticleStatus::All,
+    };
+    client.write_packet(&settings).await.unwrap();
+
+    // Core's topic shows the player's login once it is claimed.
+    let login = loop {
+        let claimed = fixture.service.logins.lock().unwrap().claims.first().cloned();
+        if let Some(login) = claimed {
+            break login;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    };
+    fixture.service.claim.lock().unwrap().operation.clone_from(&login.0);
+    fixture.service.publish();
+    let ((), source) = tokio::join!(
+        async {
+            client_reads::<FinishConfiguration>(&mut client).await;
+            client.write_packet(&AcknowledgeConfiguration).await.unwrap();
+        },
+        jvm_accepts(&listener, &profile, true)
+    );
+
+    // Core queues a move, which the gateway prepares, and the client starts configuring for it.
+    fixture.service.movement.lock().unwrap().pending =
+        Some(GatewayMove { operation_id: "move".into(), destination: Some(demand("hub")) });
+    fixture.service.publish();
+    client_reads::<StartConfiguration>(&mut client).await;
+
+    // The destination's session retires while the client configures: core ends the move.
+    {
+        let mut movement = fixture.service.movement.lock().unwrap();
+        movement.pending = None;
+        movement.vanished = Some("move".into());
+    }
+    fixture.sync().await;
+    client.write_packet(&ConfigurationAcknowledged).await.unwrap();
+
+    // The player's new login reaches a JVM on the connection that was moving.
+    let replacement =
+        tokio::time::timeout(Duration::from_secs(10), jvm_accepts(&listener, &profile, false)).await.unwrap();
+    let (claims, cancels) = {
+        let logins = fixture.service.logins.lock().unwrap();
+        (logins.claims.clone(), logins.cancels.clone())
+    };
+    assert_eq!(claims.len(), 2, "one login for the player, and one fresh login after the retirement");
+    assert_ne!(claims[1].0, login.0);
+    assert_eq!(claims[1].1.connection_id, login.1.connection_id);
+    assert_eq!(claims[1].1.player, login.1.player);
+    assert_eq!(cancels, [login.0, "move".to_owned()], "the source, then the retired destination");
+    {
+        let movement = fixture.service.movement.lock().unwrap();
+        assert_eq!(movement.failure, Some(("move".into(), "destination session retired".into())));
+        assert_eq!(movement.reports, 1);
+    }
+    // The login, the move twice (before cutover and after it), and the new login.
+    assert_eq!(fixture.service.activations.load(Ordering::SeqCst), 4);
+    assert!(!serving.is_finished());
+    serving.abort();
+    drop((source, replacement, client));
     fixture.close().await;
 }

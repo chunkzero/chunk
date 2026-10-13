@@ -73,6 +73,8 @@ pub(super) struct Logins {
     pub cancels: Vec<String>,
     /// Logins routed with this deployment are rejected for routing again.
     pub retired: Option<String>,
+    /// Activating any of these operations finds its session retired, every time.
+    pub retired_operations: BTreeSet<String>,
     /// The next routing waits for this, then fails.
     pub unroutable: Option<tokio::sync::oneshot::Receiver<()>>,
 }
@@ -92,6 +94,8 @@ pub(super) struct Placement {
     pub returns: Option<(String, sync::SessionDemand)>,
     /// The deployment and destination a move's operation already holds a reservation in.
     pub reserved: Option<(String, sync::SessionDemand)>,
+    /// The player listener every reservation names, where the fixture's own is not one.
+    pub endpoint: Option<String>,
 }
 
 #[derive(Default)]
@@ -102,6 +106,8 @@ pub(super) struct Movement {
     pub reports: usize,
     pub lose_report: bool,
     pub stall_retries: bool,
+    /// The operation ID of a move core ended without recording a failure; the gateway's abandonment records it.
+    pub vanished: Option<String>,
     /// The operation ID and reason of the move abandoned.
     pub failure: Option<(String, String)>,
 }
