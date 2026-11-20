@@ -42,6 +42,9 @@ pub(super) struct Observed {
     pub ready_to_suspend: bool,
     /// The status the gateway last answered for each hostname, which edges answer pings with while core sleeps.
     pub pings: Vec<v1::PingStatus>,
+    /// Every deployment resident in the backend, including one loading, which management keeps the assets of. `None`
+    /// when this observation couldn't read them.
+    pub resident_deployments: Option<Vec<String>>,
 }
 
 impl Observed {
@@ -189,6 +192,8 @@ impl Reporter {
                 online_players: observed.online_players,
                 logins: observed.logins,
                 pings: observed.pings,
+                resident_deployments_known: observed.resident_deployments.is_some(),
+                resident_deployment_ids: observed.resident_deployments.unwrap_or_default(),
                 deployment: deployment.or_else(|| sent.progress.as_ref().map(|(_, progress)| progress.clone())),
                 ready_to_suspend: observed.ready_to_suspend,
                 lease: observed.lease,

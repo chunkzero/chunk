@@ -100,6 +100,21 @@ Environments fetch blobs at `GET /blobs/<sha256>` with their bearer token, and p
 serve only blobs of revisions the environment's deployments pin, packs only for the pack URL, streaming them from disk
 or redirecting to a presigned URL of the release bucket.
 
+Each `SetAssetHead` collects the project's unused revisions. A revision is kept while it is the head, one of the
+project's 10 newest ready revisions, or declared by an upload within the last hour (as long as its upload URLs last). It
+is also kept while a deployment of one of the project's environments pins it and is active or unfinished, one of the
+environment's 10 newest (so a rollback to it works), superseded but newer than the environment's active deployment (core
+may still activate it), or in the set of deployments resident in core's backend that the environment's latest accepted
+status report listed. While that report didn't read the set, or none has been accepted since core's latest attach, every
+deployment of the environment is kept. Core decides what stays resident, so no clock or setting of management's can lag
+it. The rest are deleted, and with them every blob no remaining revision holds, from the database; their keys are
+recorded in `asset_deletions` and the release store's objects are deleted in a second transaction that skips a key a new
+upload has claimed again. A delete the store fails stays recorded and is retried by the next collection. A store delete
+still running when management loses its lock, such as to a crash, can land after the same content is uploaded again,
+which pushing the assets again repairs. A rollback to a deployment older than the 10 newest fails once its revision is
+gone. Collection holds a per-project lock that uploads, deployments, activations and head moves share, so it never
+deletes a blob a revision is being declared with or a revision a deployment or the head is pinning.
+
 ## Release storage
 
 Release archives stay on management's disk under `CHUNK_DATA_DIR` unless `CHUNK_RELEASE_STORE_BUCKET` names an

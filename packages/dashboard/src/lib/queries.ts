@@ -73,6 +73,24 @@ export const useDeployments = (environmentId: string) =>
     refetchInterval: refreshMs,
   });
 
+/** The project's ready asset revisions, newest first, and its head's ID. */
+export const useAssetRevisions = (projectId: string) =>
+  useQuery({
+    queryKey: ["assets", projectId],
+    queryFn: async () => {
+      let headId = "";
+      const revisions = await allPages(
+        (pageToken) => api.assets.listAssetRevisions({ projectId, pageToken }),
+        (response) => {
+          headId = response.headId;
+          return response.revisions;
+        },
+      );
+      return { revisions, headId };
+    },
+    refetchInterval: refreshMs,
+  });
+
 export const useSecrets = (environmentId: string) =>
   useQuery({
     queryKey: ["secrets", environmentId],

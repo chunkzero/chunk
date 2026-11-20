@@ -31,7 +31,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -81,6 +81,11 @@ pub(crate) struct Managed<'a> {
     releases: release::Store,
     /// Where each deployment's asset blobs are downloaded to.
     assets: chunk_build::assets::Store,
+    /// Held shared while a load fills `assets`, and exclusively while unused revisions are removed from it. Holds how
+    /// many loads had finished, and which revisions were kept, when the last removal fully succeeded.
+    asset_loads: tokio::sync::RwLock<Option<(u64, BTreeSet<String>)>>,
+    /// How many loads into `assets` have finished, whether they succeeded, failed or were abandoned.
+    asset_loads_finished: Arc<AtomicU64>,
     /// Where the activation management has not yet accepted is recorded.
     activation: PathBuf,
     core: &'a Core,
@@ -123,6 +128,8 @@ struct Deployments {
     unacknowledged: Option<Activation>,
     /// The deployment being loaded.
     loading: Option<String>,
+    /// The asset revision `loading` pins, when it names one.
+    loading_assets: Option<String>,
     /// The latest deployment this core rejected, and why.
     rejected: Option<(String, String)>,
     /// How replaced deployments drain, from the latest desired state this process received.
@@ -170,9 +177,28 @@ struct Work<'a> {
     deployments: &'a Mutex<Deployments>,
 }
 
+/// A load filling the asset store, which removal of unused revisions waits for.
+struct AssetLoad<'a> {
+    _shared: tokio::sync::RwLockReadGuard<'a, Option<(u64, BTreeSet<String>)>>,
+    done: Arc<LoadDone>,
+}
+
+/// Counts a load as finished once dropped. The load shares it with every blocking insert it starts, which keep running
+/// when the load is cancelled or fails, so the count advances only after the last of them is done.
+#[derive(Default)]
+struct LoadDone(Arc<AtomicU64>);
+
+impl Drop for LoadDone {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 impl Drop for Work<'_> {
     fn drop(&mut self) {
-        lock(self.deployments).loading = None;
+        let mut deployments = lock(self.deployments);
+        deployments.loading = None;
+        deployments.loading_assets = None;
     }
 }
 
@@ -206,6 +232,8 @@ impl<'a> Managed<'a> {
             environment: registration.environment,
             releases: release::Store::new(state, core.archives().clone()),
             assets: core.asset_store(),
+            asset_loads: tokio::sync::RwLock::default(),
+            asset_loads_finished: Arc::default(),
             activation: state.join("managed.json"),
             core,
             gateway,
@@ -429,8 +457,21 @@ impl<'a> Managed<'a> {
         }
     }
 
+    /// Keeps unused revisions from being removed from `assets` until the returned guard drops. The load is counted as
+    /// finished once that and the clones of `done` are dropped, as it may have left blobs behind that no revision
+    /// holds.
+    async fn begin_asset_load(&self) -> AssetLoad<'_> {
+        AssetLoad {
+            _shared: self.asset_loads.read().await,
+            done: Arc::new(LoadDone(Arc::clone(&self.asset_loads_finished))),
+        }
+    }
+
     fn start(&self, desired: v1::AttachResponse) -> Work<'_> {
-        lock(&self.deployments).loading = Some(desired.deployment_id.clone());
+        let mut deployments = lock(&self.deployments);
+        deployments.loading = Some(desired.deployment_id.clone());
+        deployments.loading_assets = desired.assets.as_ref().map(|assets| assets.revision_id.clone());
+        drop(deployments);
         let cancel = self.stopping.child_token();
         Work {
             revision: desired.revision,
@@ -508,7 +549,8 @@ impl<'a> Managed<'a> {
         if backend.check_deployment(id).await.is_err() {
             return false;
         }
-        match assets::restore(&self.client, &self.assets, desired.assets.as_ref(), cancel).await {
+        let loading = self.begin_asset_load().await;
+        match assets::restore(&self.client, &self.assets, desired.assets.as_ref(), &loading.done, cancel).await {
             Ok(restored) => restored.is_some(),
             Err(error) => {
                 tracing::warn!(%error, deployment = %desired.deployment_id, "cannot restore the deployment's assets");
@@ -525,10 +567,13 @@ impl<'a> Managed<'a> {
         let Some(loaded) = release::load(&self.client, &self.releases, artifact, cancel).await? else {
             return Ok(false);
         };
-        let revision = assets::load(&self.client, &self.assets, desired.assets.as_ref(), loaded.assets(), cancel);
+        let loading = self.begin_asset_load().await;
+        let revision =
+            assets::load(&self.client, &self.assets, desired.assets.as_ref(), loaded.assets(), &loading.done, cancel);
         let Some(revision) = revision.await? else {
             return Ok(false);
         };
+        drop(loading);
         let deployment = &desired.deployment_id;
         if cancel.is_cancelled() {
             return Ok(false);
@@ -648,6 +693,7 @@ impl<'a> Managed<'a> {
             logins: self.logins(),
             ready_to_suspend: false,
             pings: self.pings(),
+            resident_deployments: None,
         }
     }
 
@@ -656,7 +702,8 @@ impl<'a> Managed<'a> {
             let gateway = self.gateway.get()?;
             self.private_address.gateway(gateway.address()).await
         };
-        let (address, ready_to_suspend) = tokio::join!(address, self.ready_to_suspend(revision));
+        let (address, ready_to_suspend, resident) =
+            tokio::join!(address, self.ready_to_suspend(revision), self.resident_deployments());
         let gateway_addresses = address.as_ref().map(SocketAddr::to_string).into_iter().collect();
         let online_players = self.online_players().unwrap_or_else(|error| {
             tracing::warn!(%error, "online players unknown");
@@ -670,7 +717,17 @@ impl<'a> Managed<'a> {
             logins: self.logins(),
             ready_to_suspend,
             pings: self.pings(),
+            resident_deployments: resident,
         }
+    }
+
+    /// The deployments resident in the backend and the one loading, unless the backend can't be read within
+    /// [`READ_WAIT`]. The loading one is read first, so one that becomes resident meanwhile is counted either way.
+    async fn resident_deployments(&self) -> Option<Vec<String>> {
+        let loading = lock(&self.deployments).loading.clone();
+        let resident = read_within(self.core.backend()?.deployments()).await?;
+        let ids: BTreeSet<String> = resident.iter().map(|id| id.as_str().to_owned()).chain(loading).collect();
+        Some(ids.into_iter().collect())
     }
 
     fn online_players(&self) -> io::Result<u32> {

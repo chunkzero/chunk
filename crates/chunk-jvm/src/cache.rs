@@ -1,6 +1,6 @@
 //! Verified release installs under `<cache>/releases/<release_id>`, AOT caches under
 //! `<cache>/aot/<release_id>/<app>.aot`, and asset blobs in the store at `<cache>/assets`, which may outlive the
-//! machine. An AOT cache is kept outside its release, whose verification hashes every file there.
+//! machine and holds only the revision the last launch ran. An AOT cache is kept outside its release, whose verification hashes every file there.
 
 use crate::Failure;
 use chunk_build::{Installed, VerifiedRelease, assets::Store, install_trusted_release, installed_release};

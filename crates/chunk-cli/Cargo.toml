@@ -25,6 +25,7 @@ chunk-environment = { path = "../chunk-environment", default-features = false }
 chunk-management = { path = "../chunk-management" }
 chunk-proto = { path = "../chunk-proto" }
 clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
 url = { version = "2", features = ["serde"] }
 dirs = "6"
 serde = { version = "1", features = ["derive"] }

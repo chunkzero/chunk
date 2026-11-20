@@ -39,6 +39,16 @@ export function s3ReleaseStore(bucket: ReleaseBucket): ReleaseStore {
 
     exists: (key) => exists(archive(key)),
 
+    async delete(key) {
+      // Both deletes settle before this resolves or rejects, so neither lands once the caller's lock is released.
+      await s3Request("release store deletion", async () => {
+        const results = await Promise.allSettled([client.delete(archive(key)), client.delete(upload(key))]);
+        for (const result of results) {
+          if (result.status === "rejected") throw result.reason;
+        }
+      });
+    },
+
     async complete(key, expected, verify) {
       if (!(await exists(upload(key)))) {
         return (await exists(archive(key))) ? verify(read(archive(key))) : undefined;

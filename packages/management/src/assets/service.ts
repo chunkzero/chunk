@@ -5,6 +5,7 @@ import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
 import { and, desc, eq, lt } from "drizzle-orm";
 
+import type { Db } from "../db.ts";
 import type { Deps } from "../deps.ts";
 import {
   AssetRevisionState,
@@ -17,20 +18,21 @@ import { blobKey } from "../releases/store.ts";
 import { callerOf } from "../rpc/caller.ts";
 import { failedPrecondition, invalid, notFound, page, pageOf, required, seqAfter } from "../rpc/validate.ts";
 import { assetBlobs, assetRevisionBlobs, assetRevisions, projects } from "../schema.ts";
+import { collectAssets, lockAssets, protectedUntil, uploadLifetimeMs } from "./retention.ts";
 import { decodeRevision, revisionBlobs, sha256Hex } from "./revision.ts";
-import { findRevision, heldBlobs, loadReadyRevision, toAssetRevision } from "./store.ts";
+import { eachLimited, findRevision, heldBlobs, loadReadyRevision, toAssetRevision } from "./store.ts";
 
-const uploadLifetimeMs = 60 * 60 * 1000;
 const downloadLifetimeMs = 60 * 60 * 1000;
 /** How many blobs completion verifies at once. */
 const verifyConcurrency = 8;
 /** How many blob existence checks run at once; a revision holds at most 4,096 blobs. */
 const existsConcurrency = 64;
 
-export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof AssetService>> {
+export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetService>> {
+  const { db, releases } = deps;
   /** The project's verified blobs among `digests` that the blob store still holds. */
-  async function storedBlobs(projectId: string, digests: string[]) {
-    const held = await heldBlobs(db, projectId, digests);
+  async function storedBlobs(conn: Db, projectId: string, digests: string[]) {
+    const held = await heldBlobs(conn, projectId, digests);
     await eachLimited([...held.keys()], existsConcurrency, async (sha256) => {
       if (!(await releases.exists(blobKey(projectId, sha256)))) held.delete(sha256);
     });
@@ -50,6 +52,7 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
       const blobs = revisionBlobs(revision);
       const sizeBytes = [...blobs.values()].reduce((total, blob) => total + BigInt(blob.size), 0n);
       await db.transaction(async (tx) => {
+        await lockAssets(tx, project.id, "shared");
         const declared = await tx
           .insert(assetRevisions)
           .values({
@@ -58,17 +61,27 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
             state: AssetRevisionState.UPLOADING,
             manifest: request.manifest,
             size_bytes: sizeBytes,
+            protected_until: protectedUntil(),
           })
           .onConflictDoNothing()
           .returning({ id: assetRevisions.id });
-        if (declared.length === 0 || blobs.size === 0) return;
+        if (declared.length === 0) {
+          // Upload URLs are issued below whether the revision is unfinished or ready, so collection keeps it as long as
+          // they last.
+          await tx
+            .update(assetRevisions)
+            .set({ protected_until: protectedUntil() })
+            .where(and(eq(assetRevisions.project_id, project.id), eq(assetRevisions.id, id)));
+          return;
+        }
+        if (blobs.size === 0) return;
         await tx
           .insert(assetRevisionBlobs)
           .values([...blobs].map(([sha256, { pack }]) => ({ project_id: project.id, revision_id: id, sha256, pack })));
       });
       const row = await findRevision(db, project.id, id);
       if (!row) throw notFound("asset revision");
-      const held = await storedBlobs(project.id, [...blobs.keys()]);
+      const held = await storedBlobs(db, project.id, [...blobs.keys()]);
       const expireTime = new Date(Date.now() + uploadLifetimeMs);
       const uploads = await Promise.all(
         [...blobs]
@@ -90,53 +103,69 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
 
     async completeAssetUpload(request, context) {
       const project = await loadProject(db, callerOf(context), request.projectId);
-      const row = await findRevision(db, project.id, required(request.revisionId, "revision_id"));
-      if (!row) throw notFound("asset revision");
-      const revision = decodeRevision(row.manifest);
-      const blobs = revisionBlobs(revision);
-      const held = await storedBlobs(project.id, [...blobs.keys()]);
-      const missing: string[] = [];
-      const unverified = [...blobs].filter(([sha256]) => !held.has(sha256));
-      await eachLimited(unverified, verifyConcurrency, async ([sha256, { size }]) => {
-        const sizeBytes = BigInt(size);
-        const sha1 = await releases.complete(blobKey(project.id, sha256), { sha256, sizeBytes }, (blob) =>
-          verifyBlob(blob, sha256, sizeBytes).catch((error: unknown) => {
-            throw failedPrecondition(`blob ${sha256} is invalid: ${(error as Error).message}`);
-          }),
-        );
-        if (sha1 === undefined) {
-          missing.push(sha256);
-          return;
+      const revisionId = required(request.revisionId, "revision_id");
+      // The shared lock is taken before the revision is read and held until it is READY, so collection can't delete the
+      // revision or a blob it was checked against in between, and a later declaration of the same manifest can't be
+      // marked READY by an earlier completion.
+      return db.transaction(async (tx) => {
+        await lockAssets(tx, project.id, "shared");
+        const row = await findRevision(tx, project.id, revisionId);
+        if (!row) throw notFound("asset revision");
+        const revision = decodeRevision(row.manifest);
+        const blobs = revisionBlobs(revision);
+        const held = await storedBlobs(tx, project.id, [...blobs.keys()]);
+        const missing: string[] = [];
+        const verified = new Map<string, { size_bytes: bigint; sha1: string }>();
+        const unverified = [...blobs].filter(([sha256]) => !held.has(sha256));
+        await eachLimited(unverified, verifyConcurrency, async ([sha256, { size }]) => {
+          const sizeBytes = BigInt(size);
+          const sha1 = await releases.complete(blobKey(project.id, sha256), { sha256, sizeBytes }, (blob) =>
+            verifyBlob(blob, sha256, sizeBytes).catch((error: unknown) => {
+              throw failedPrecondition(`blob ${sha256} is invalid: ${(error as Error).message}`);
+            }),
+          );
+          if (sha1 === undefined) {
+            missing.push(sha256);
+            return;
+          }
+          verified.set(sha256, { size_bytes: sizeBytes, sha1 });
+          held.set(sha256, { size_bytes: sizeBytes, sha1 });
+        });
+        if (missing.length > 0) {
+          throw failedPrecondition(
+            `${missing.length} of the revision's blobs are not uploaded, such as ${missing.sort()[0]}`,
+          );
         }
-        await db
-          .insert(assetBlobs)
-          .values({ project_id: project.id, sha256, size_bytes: sizeBytes, sha1 })
-          .onConflictDoNothing();
-        held.set(sha256, { size_bytes: sizeBytes, sha1 });
+        for (const [sha256, { size }] of blobs) {
+          if (held.get(sha256)?.size_bytes !== BigInt(size)) {
+            throw failedPrecondition(`blob ${sha256} is not ${size} bytes, as the revision declares`);
+          }
+        }
+        for (const [name, pack] of revision.packs) {
+          if (held.get(pack.sha256)?.sha1 !== pack.sha1) {
+            throw failedPrecondition(`pack ${name}'s SHA-1 does not match its bytes`);
+          }
+        }
+        // One insert in digest order, so concurrent completions that share blobs take their row locks in the same order.
+        if (verified.size > 0) {
+          await tx
+            .insert(assetBlobs)
+            .values(
+              [...verified]
+                .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                .map(([sha256, blob]) => ({ project_id: project.id, sha256, ...blob })),
+            )
+            .onConflictDoNothing();
+        }
+        if (row.state === AssetRevisionState.READY) return { revision: toAssetRevision(row) };
+        const [ready] = await tx
+          .update(assetRevisions)
+          .set({ state: AssetRevisionState.READY })
+          .where(and(eq(assetRevisions.project_id, project.id), eq(assetRevisions.id, row.id)))
+          .returning();
+        if (!ready) throw notFound("asset revision");
+        return { revision: toAssetRevision(ready) };
       });
-      if (missing.length > 0) {
-        throw failedPrecondition(
-          `${missing.length} of the revision's blobs are not uploaded, such as ${missing.sort()[0]}`,
-        );
-      }
-      for (const [sha256, { size }] of blobs) {
-        if (held.get(sha256)?.size_bytes !== BigInt(size)) {
-          throw failedPrecondition(`blob ${sha256} is not ${size} bytes, as the revision declares`);
-        }
-      }
-      for (const [name, pack] of revision.packs) {
-        if (held.get(pack.sha256)?.sha1 !== pack.sha1) {
-          throw failedPrecondition(`pack ${name}'s SHA-1 does not match its bytes`);
-        }
-      }
-      if (row.state === AssetRevisionState.READY) return { revision: toAssetRevision(row) };
-      const [ready] = await db
-        .update(assetRevisions)
-        .set({ state: AssetRevisionState.READY })
-        .where(and(eq(assetRevisions.project_id, project.id), eq(assetRevisions.id, row.id)))
-        .returning();
-      if (!ready) throw notFound("asset revision");
-      return { revision: toAssetRevision(ready) };
     },
 
     async getAssetRevision(request, context) {
@@ -187,19 +216,28 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
 
     async setAssetHead(request, context) {
       const project = await loadProject(db, callerOf(context), request.projectId);
-      const revision = await loadReadyRevision(db, project.id, required(request.revisionId, "revision_id"));
-      const [moved] = await db
-        .update(projects)
-        .set({ asset_head_id: revision.id })
-        .where(and(eq(projects.id, project.id), eq(projects.asset_head_id, request.expectedHeadId)))
-        .returning({ id: projects.id });
-      if (!moved) {
-        const [current] = await db
-          .select({ head: projects.asset_head_id })
-          .from(projects)
-          .where(eq(projects.id, project.id));
-        throw new ConnectError(`the asset head moved to ${current?.head || "nothing"}`, Code.Aborted);
-      }
+      const revisionId = required(request.revisionId, "revision_id");
+      // Shared with uploads, so a collection never deletes the revision between checking it and moving the head to it.
+      await db.transaction(async (tx) => {
+        await lockAssets(tx, project.id, "shared");
+        const revision = await loadReadyRevision(tx, project.id, revisionId);
+        const [moved] = await tx
+          .update(projects)
+          .set({ asset_head_id: revision.id })
+          .where(and(eq(projects.id, project.id), eq(projects.asset_head_id, request.expectedHeadId)))
+          .returning({ id: projects.id });
+        if (!moved) {
+          const [current] = await tx
+            .select({ head: projects.asset_head_id })
+            .from(projects)
+            .where(eq(projects.id, project.id));
+          throw new ConnectError(`the asset head moved to ${current?.head || "nothing"}`, Code.Aborted);
+        }
+      });
+      // Each push moves the head, so the revisions it leaves behind are collected here.
+      await collectAssets(deps, project.id).catch((error: unknown) => {
+        console.error(`collecting project ${project.id}'s unused asset revisions failed:`, error);
+      });
       return { previousHeadId: request.expectedHeadId };
     },
   };
@@ -219,13 +257,4 @@ async function verifyBlob(blob: ReadableStream<Uint8Array>, sha256: string, size
     throw new Error("it does not match the declared size and digest");
   }
   return sha1Hash.digest("hex");
-}
-
-/** Runs `run` on every item, at most `limit` at once. */
-async function eachLimited<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) await run(items[next++] as T);
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }

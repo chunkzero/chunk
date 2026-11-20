@@ -29,6 +29,8 @@ export interface ReleaseStore {
   serve(key: string, audience: Audience): Promise<Response>;
   /** Whether an object is stored under the key. */
   exists(key: string): Promise<boolean>;
+  /** Removes the object stored under the key, and any upload of it; resolves once neither exists. */
+  delete(key: string): Promise<void>;
   /**
    * Streams the object uploaded under the key, or else the one stored there, through `verify`, and stores an uploaded
    * one that matches `expected`. Resolves to what `verify` resolves to, or undefined when there is no object; rejects

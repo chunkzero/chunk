@@ -141,6 +141,10 @@ export const environments = pgTable(
     owner_since: time(),
     // The latest accepted status report under the current lease.
     gateway_addresses: text().array().notNull().default([]),
+    /** The deployments resident in core's backend, loading or not, as that report said. */
+    resident_deployment_ids: text().array().notNull().default([]),
+    /** Whether the latest accepted report under the current lease read the resident set rather than repeating it. */
+    resident_deployments_known: boolean().notNull().default(false),
     pings: jsonb<Record<string, string>>()
       .notNull()
       .default(sql`'{}'::jsonb`),
@@ -222,6 +226,8 @@ export const assetRevisions = pgTable(
     /** The distinct bytes of its blobs. */
     size_bytes: int8().notNull(),
     create_time: createTime(),
+    /** Collection keeps the revision until then, as long as the upload URLs of its latest declaration last. */
+    protected_until: time().notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.project_id, t.id] }), index("asset_revisions_project").on(t.project_id, t.seq)],
 );
@@ -254,6 +260,19 @@ export const assetBlobs = pgTable(
     sha256: text().notNull(),
     size_bytes: int8().notNull(),
     sha1: text().notNull(),
+    create_time: createTime(),
+  },
+  (t) => [primaryKey({ columns: [t.project_id, t.sha256] })],
+);
+
+/** Blobs whose database rows are gone and whose release store objects are yet to be deleted. */
+export const assetDeletions = pgTable(
+  "asset_deletions",
+  {
+    project_id: text()
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    sha256: text().notNull(),
     create_time: createTime(),
   },
   (t) => [primaryKey({ columns: [t.project_id, t.sha256] })],

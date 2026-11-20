@@ -103,6 +103,11 @@ export async function localReleaseStore({
 
     exists: async (key) => (await stored(key)) !== undefined,
 
+    async delete(key) {
+      if (!keyPattern.test(key)) throw new Error(`invalid release store key ${key}`);
+      await rm(join(root, key), { force: true });
+    },
+
     async complete(key, _expected, verify) {
       // Uploads were checked against the key's digest as they were stored, so the stored object is the upload.
       const file = await stored(key);

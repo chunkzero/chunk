@@ -8,7 +8,9 @@ import { assetBlobs, assetRevisions } from "../schema.ts";
 
 export type AssetRevisionRow = typeof assetRevisions.$inferSelect;
 
-export function toAssetRevision(row: Omit<AssetRevisionRow, "manifest"> & { manifest?: Uint8Array }): AssetRevision {
+export function toAssetRevision(
+  row: Omit<AssetRevisionRow, "manifest" | "protected_until"> & { manifest?: Uint8Array },
+): AssetRevision {
   return create(AssetRevisionSchema, {
     id: row.id,
     projectId: row.project_id,
@@ -47,4 +49,24 @@ export async function heldBlobs(
     .from(assetBlobs)
     .where(and(eq(assetBlobs.project_id, projectId), inArray(assetBlobs.sha256, digests)));
   return new Map(rows.map(({ sha256, ...blob }) => [sha256, blob]));
+}
+
+/**
+ * Runs `run` on every item, at most `limit` at once. Once a run fails, it starts no more, waits for those in flight and
+ * rejects with the first failure, so nothing it started is still running when it settles.
+ */
+export async function eachLimited<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  let failure: { error: unknown } | undefined;
+  const worker = async () => {
+    while (!failure && next < items.length) {
+      try {
+        await run(items[next++] as T);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure) throw failure.error;
 }

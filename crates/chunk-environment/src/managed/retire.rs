@@ -7,7 +7,7 @@ use chunk_management::v1;
 use std::{
     collections::BTreeSet,
     convert::Infallible,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError, atomic::Ordering},
     time::Duration,
 };
 use tokio::task::JoinSet;
@@ -76,6 +76,7 @@ impl Managed<'_> {
             tick.tick().await;
             self.retire().await;
             self.remove_unused_releases().await;
+            self.remove_unused_assets().await;
         }
     }
 
@@ -193,6 +194,42 @@ impl Managed<'_> {
         let unused = super::release::set_aside(&self.releases, used);
         if let Err(error) = super::release::remove(unused).await {
             tracing::warn!(%error, "unused releases not removed");
+        }
+    }
+
+    /// Removes the asset revisions and blobs that neither a deployment resident in the backend, whose JVMs read them,
+    /// nor the one loading pins, unless the last removal that fully succeeded kept the same set and no load has
+    /// finished since. Skipped while a load fills the store, and loads wait meanwhile, so none reuses a blob being
+    /// removed.
+    pub(super) async fn remove_unused_assets(&self) {
+        let (Ok(control), Some(backend)) = (self.core.control(), self.core.backend()) else { return };
+        let Ok(mut last_kept) = self.asset_loads.try_write() else { return };
+        // Read before control, so a load that finishes meanwhile has made its deployment control's by then.
+        let mut kept: BTreeSet<String> = lock(&self.deployments).loading_assets.iter().cloned().collect();
+        let resident = match backend.deployments().await {
+            Ok(resident) => resident,
+            Err(error) => return tracing::warn!(%error, "resident deployments unknown"),
+        };
+        for id in &resident {
+            match control.release(id.as_str()) {
+                Ok(release) => kept.extend(release.map(|release| release.assets.revision_id.clone())),
+                Err(error) => return tracing::warn!(%error, "asset revisions in use unknown"),
+            }
+        }
+        kept.remove("");
+        // No load runs while the write lock is held, so the count stays the same until the removal ends.
+        let finished = self.asset_loads_finished.load(Ordering::Relaxed);
+        if matches!(&*last_kept, Some((count, last)) if *count == finished && *last == kept) {
+            return;
+        }
+        match super::assets::prune(&self.assets, kept.clone()).await {
+            Ok(None) => {}
+            Ok(Some(0)) => *last_kept = Some((finished, kept)),
+            Ok(Some(removed)) => {
+                tracing::info!(removed, kept = kept.len(), "unused asset revisions removed");
+                *last_kept = Some((finished, kept));
+            }
+            Err(error) => tracing::warn!(%error, "unused asset revisions not removed"),
         }
     }
 }

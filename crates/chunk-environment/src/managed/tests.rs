@@ -609,7 +609,9 @@ async fn a_stop_previous_activation_stops_every_resident_deployment_even_across_
     harness.expect(1, "dep_a", DeploymentState::Active).await;
     harness.deploy("dep_b", harness.valid());
     harness.expect(2, "dep_b", DeploymentState::InProgress).await;
-    harness.expect(2, "dep_b", DeploymentState::Active).await;
+    let active = harness.expect(2, "dep_b", DeploymentState::Active).await;
+    assert!(active.resident_deployment_ids.contains(&"dep_b".to_owned()), "{:?}", active.resident_deployment_ids);
+    assert!(active.resident_deployments_known);
 
     // dep_c stops dep_a and dep_b, but management doesn't accept it, so dep_b stays as its fallback. Then dep_d
     // arrives before dep_b stops.

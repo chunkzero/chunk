@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { ConnectError } from "@connectrpc/connect";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 
+import { lockAssets } from "../assets/retention.ts";
 import { checkContract, decodeRevision } from "../assets/revision.ts";
 import { loadReadyRevision } from "../assets/store.ts";
 import { newId } from "../crypto.ts";
@@ -68,6 +69,9 @@ export function requireJvmImage(manifest: ReleaseManifest, template: string | un
 
 const unfinished = [DeploymentState.PENDING, DeploymentState.IN_PROGRESS];
 
+/** The values a deployment takes when superseded. */
+const superseded = { state: DeploymentState.SUPERSEDED, update_time: sql`now()` };
+
 /** What a deployment pins: a release and an asset revision of one project. */
 export interface Deployable {
   release_id: string;
@@ -94,6 +98,7 @@ export async function createDeployment(
     throw failedPrecondition("the release has not finished uploading");
   }
   requireJvmImage(release.manifest, jvmImageTemplate);
+  await lockAssets(db, environment.project_id, "shared");
   const assets = await loadReadyRevision(db, environment.project_id, assetRevisionId);
   try {
     checkContract(release.manifest.assets, decodeRevision(assets.manifest));
@@ -102,7 +107,7 @@ export async function createDeployment(
   }
   await db
     .update(deployments)
-    .set({ state: DeploymentState.SUPERSEDED, update_time: sql`now()` })
+    .set(superseded)
     .where(and(eq(deployments.environment_id, environment.id), inArray(deployments.state, unfinished)));
   const [row] = await db
     .insert(deployments)
@@ -168,8 +173,18 @@ export async function deployRestored(
 /**
  * Records that the environment serves a deployment, superseding the one it replaced. A superseded deployment the
  * environment activated anyway counts when it is newer than the active one; newer unfinished deployments stay desired.
+ * Holds the project's shared asset lock until `db`'s transaction ends.
  */
 export async function activateDeployment(db: Db, id: string): Promise<void> {
+  // Shared with uploads and createDeployment, so a collection never interleaves with the activation of a deployment
+  // whose revision it may delete.
+  const [owner] = await db
+    .select({ project_id: environments.project_id })
+    .from(deployments)
+    .innerJoin(environments, eq(environments.id, deployments.environment_id))
+    .where(eq(deployments.id, id));
+  if (!owner) return;
+  await lockAssets(db, owner.project_id, "shared");
   const [row] = await fetchRows<{ environment_id: string }>(
     db,
     sql`
@@ -186,7 +201,7 @@ export async function activateDeployment(db: Db, id: string): Promise<void> {
   if (!row) return;
   await db
     .update(deployments)
-    .set({ state: DeploymentState.SUPERSEDED, update_time: sql`now()` })
+    .set(superseded)
     .where(
       and(
         eq(deployments.environment_id, row.environment_id),

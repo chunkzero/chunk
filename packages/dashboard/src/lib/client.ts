@@ -3,6 +3,7 @@ import { createConnectTransport } from "@connectrpc/connect-web";
 import { QueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
+import { AssetService } from "../gen/chunk/management/v1/assets_pb.ts";
 import { AuthService } from "../gen/chunk/management/v1/auth_pb.ts";
 import { DeploymentService } from "../gen/chunk/management/v1/deployments_pb.ts";
 import { DomainService } from "../gen/chunk/management/v1/domains_pb.ts";
@@ -44,6 +45,7 @@ export const api = {
   auth: createClient(AuthService, transport),
   projects: createClient(ProjectService, transport),
   deployments: createClient(DeploymentService, transport),
+  assets: createClient(AssetService, transport),
   secrets: createClient(SecretService, transport),
   domains: createClient(DomainService, transport),
   logs: createClient(LogService, transport),

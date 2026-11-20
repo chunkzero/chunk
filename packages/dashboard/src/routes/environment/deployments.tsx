@@ -6,7 +6,7 @@ import { ConfirmDialog } from "../../components/confirm-dialog.tsx";
 import { DeployGuideLink } from "../../components/deploy-guide.tsx";
 import { ErrorText } from "../../components/page.tsx";
 import { listStyles, Panel, PanelNote } from "../../components/panel.tsx";
-import { ReleaseId } from "../../components/release.tsx";
+import { ShortId } from "../../components/release.tsx";
 import { Status } from "../../components/status.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { fieldStyles } from "../../components/ui/input.tsx";
@@ -86,9 +86,14 @@ export function Deployments() {
             <li key={deployment.id} {...stylex.props(listStyles.row, styles.row)}>
               <div {...stylex.props(styles.summary)}>
                 <p {...stylex.props(styles.release)}>
-                  <ReleaseId id={deployment.releaseId} />
+                  <ShortId id={deployment.releaseId} />
                   <span {...stylex.props(styles.small)}>{triggerLabels[deployment.trigger]}</span>
                 </p>
+                {deployment.assetRevisionId && (
+                  <p {...stylex.props(styles.release, styles.small)}>
+                    Assets <ShortId id={deployment.assetRevisionId} />
+                  </p>
+                )}
                 {deployment.message && <p {...stylex.props(styles.message)}>{deployment.message}</p>}
               </div>
               <time {...stylex.props(styles.small, styles.time)}>{timeAgo(deployment.createTime)}</time>
@@ -175,7 +180,8 @@ function RollbackDialog({
       title="Roll back"
       description={
         <>
-          Deploys release <span {...stylex.props(styles.id)}>{deployment.releaseId}</span> to {environment.name} again.
+          Deploys release <span {...stylex.props(styles.id)}>{deployment.releaseId}</span> with asset revision{" "}
+          <span {...stylex.props(styles.id)}>{deployment.assetRevisionId}</span> to {environment.name} again.
         </>
       }
       confirmLabel="Roll back"

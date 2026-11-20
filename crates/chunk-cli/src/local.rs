@@ -39,6 +39,13 @@ pub(crate) struct Options {
     /// Control address, shared by every release.
     #[arg(long, default_value = "127.0.0.1:25567")]
     control_bind: SocketAddr,
+    /// Where the resource pack server listens (defaults to an ephemeral loopback port).
+    #[arg(long, default_value = "127.0.0.1:0")]
+    pack_bind: SocketAddr,
+    /// The URL players' clients download packs from, such as `http://192.168.1.20:25568`, when they can't reach
+    /// --pack-bind's address; required when it listens on every address.
+    #[arg(long, value_name = "URL")]
+    pack_url: Option<url::Url>,
     /// Print plain progress lines instead of the terminal UI (automatic when stdout is not a terminal).
     #[arg(long)]
     plain: bool,
@@ -160,7 +167,7 @@ async fn serve(
     let required = built.java.version;
     reporter.running("Java", format!("Checking Java {required}+"));
     let assets = built.asset_store.clone();
-    let packs = packs::Packs::start(assets.clone()).await?;
+    let packs = packs::Packs::start(assets.clone(), options.pack_bind, options.pack_url.as_ref()).await?;
     let pack_url_prefix = Some(packs.url_prefix().to_owned());
     let staged = stage(&project, built, options.java.as_deref(), pack_url_prefix.as_deref(), &stop).await?;
     packs.serve(&staged.control.assets);

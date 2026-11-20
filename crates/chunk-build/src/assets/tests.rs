@@ -117,3 +117,25 @@ fn incomplete_materialized_directories_are_rebuilt() {
     });
     assert_eq!(fs::read(directory.join("worlds/lobby.polar")).unwrap(), POLAR);
 }
+
+#[test]
+fn retaining_revisions_removes_every_other_revision_and_blob() {
+    let project_directory = tempfile::tempdir().unwrap();
+    let root = project_directory.path();
+    project(root);
+    let store = Store::new(root.join("store"));
+    let old = build_revision(root, &store).unwrap();
+    materialize(&store, &old, "arena").unwrap();
+    write(root, "assets/config/game.json", b"changed");
+    let new = build_revision(root, &store).unwrap();
+    let unfinished = store.root().join("blobs/.write-unfinished");
+    fs::write(&unfinished, b"").unwrap();
+
+    assert_eq!(store.retain(&[&new]).unwrap(), 3);
+    assert!(new.blobs().keys().all(|sha256| store.contains(sha256).unwrap()));
+    let changed = &old.shared["config/game.json"].sha256;
+    assert!(!store.contains(changed).unwrap());
+    assert!(store.read_revision(&old.id()).is_err() && !store.root().join("apps").join(old.id()).exists());
+    assert_eq!(store.read_revision(&new.id()).unwrap(), new);
+    assert!(unfinished.exists());
+}

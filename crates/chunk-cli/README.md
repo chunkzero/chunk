@@ -79,7 +79,10 @@ State lives in `PROJECT/.chunk/local`, or `--state DIR`: the backend's data, pub
 `control/nodes/`, and `control.json`, which `chunk players` and `chunk nodes` read to reach control. One `chunk dev`
 runs per project at a time. `--java PATH` overrides the Java executable Gradle selected; it must satisfy the release's
 Java version. `--offline-logins` admits players without Mojang authentication, under offline-mode UUIDs; use it only for
-local testing. `--connection-timeout-seconds` (default 10, from 1 to 3600) sets the gateway's login deadline.
+local testing. `--connection-timeout-seconds` (default 10, from 1 to 3600) sets the gateway's login deadline. Players'
+clients download resource packs over HTTP from an ephemeral loopback port, or from `--pack-bind ADDR`; when they reach
+it at another address, such as from other machines, `--pack-url URL` names it (required when `--pack-bind` listens on
+every address, such as `0.0.0.0:25568`).
 
 Backend functions and the apps' generated `Vars` read `chunk.toml`'s top-level `[vars]`, or with `--env NAME` its
 `[env.NAME.vars]` over them, key by key. Actions read their secrets from `.dev.vars` in the project root: `NAME=value`
@@ -203,13 +206,14 @@ environment holds up to 256 secrets. `chunk secrets list` shows names and versio
 
 An asset revision is an immutable manifest of the project's worlds, resource packs and files by content digest, which
 every build writes beside its release; a deployment pins one release and one revision, so assets change without
-rebuilding the release. `chunk assets push` builds the project as `chunk dev` does, uploads the blobs the project lacks,
-and moves the project's head to the new revision. It records the revision as the base in `.chunk/assets.json`, and
-refuses when someone else moved the head since, until you pull; `--force` replaces the head anyway. `chunk assets pull`
-fetches the head and updates each local file whose source is one file (plain files, `.polar` worlds and `.zip` packs): a
-file you haven't changed since the base is replaced or deleted, and a file you changed is left as it is and reported as
-a conflict, which your next push publishes. Pack directories are listed but never pulled. `chunk assets deploy --env E`
-deploys the environment's active release with the head revision, or the one `--revision ID` names.
+rebuilding the release. `chunk assets push` builds only the project's assets, without Gradle, into the store `chunk dev`
+uses, uploads the blobs the project lacks, and moves the project's head to the new revision. It records the revision as
+the base in `.chunk/assets.json`, and refuses when someone else moved the head since, until you pull; `--force` replaces
+the head anyway. `chunk assets pull` fetches the head and updates each local file whose source is one file (plain files,
+`.polar` worlds and `.zip` packs): a file you haven't changed since the base is replaced or deleted, and a file you
+changed is left as it is and reported as a conflict, which your next push publishes. Pack directories are listed but
+never pulled. `chunk assets deploy --env E` deploys the environment's active release with the head revision, or the one
+`--revision ID` names.
 
 `chunk domains add HOSTNAME --env E` claims a custom hostname and prints its state and the DNS records to create: a TXT
 ownership proof and an SRV record that routes players to the environment. A hostname routes only once it is verified:
