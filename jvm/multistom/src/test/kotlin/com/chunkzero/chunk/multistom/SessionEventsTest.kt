@@ -373,10 +373,7 @@ class SessionEventsTest {
         assertEquals(3, reported.size)
         assertTrue(reported.all { it === listenerFailure })
         assertTrue(global.last() is SessionDestroyEvent)
-        assertNull(
-            session.scope.events.parent
-                ?.parent,
-        )
+        assertNull(session.scope.events.parent)
         assertTrue(process.instanceManager().instances.isEmpty())
     }
 

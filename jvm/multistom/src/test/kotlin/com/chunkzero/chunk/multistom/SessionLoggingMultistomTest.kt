@@ -136,6 +136,27 @@ class SessionLoggingMultistomTest {
         assertNull(SessionLogging.current())
     }
 
+    @Test
+    fun `a failing session listener leaves global listeners running whether or not a session is bound`() {
+        val scope = scope("sess-1")
+        val reported = mutableListOf<Throwable>()
+        process.exceptionManager().setExceptionHandler { reported.add(it) }
+        val order = mutableListOf<String>()
+        val sibling = EventNode.all("sibling").setPriority(20)
+        sibling.addListener(SessionCreateEvent::class.java) { order.add("global") }
+        process.eventHandler().addChild(sibling)
+        scope.events.addListener(SessionCreateEvent::class.java) {
+            order.add("session")
+            error("listener failed")
+        }
+
+        process.eventHandler().call(SessionCreateEvent(scope))
+        SessionLogging.run("sess-1") { process.eventHandler().call(SessionCreateEvent(scope)) }
+
+        assertEquals(listOf("session", "global", "session", "global"), order)
+        assertEquals(2, reported.size)
+    }
+
     private fun scope(id: String): SessionScope {
         lateinit var scope: SessionScope
         val manager =

@@ -14,7 +14,8 @@ import java.util.logging.Logger;
 /**
  * Tags output with the session it runs for. While a thread has a session bound, each line it starts
  * on {@link System#out} or {@link System#err} begins with {@code [session:<id>] }; output from
- * other threads, such as startup and GC, stays untagged.
+ * other threads, such as startup and GC, stays untagged. Output without a newline is written only
+ * on {@code flush()}, so a thread that ends without either loses it.
  */
 public final class SessionLogging {
     private static final ThreadLocal<@Nullable String> CURRENT = new ThreadLocal<>();
@@ -85,18 +86,27 @@ public final class SessionLogging {
     }
 
     private static final class Tagging extends PrintStream {
+        private final PrintStream target;
+
         Tagging(PrintStream target) {
             // No autoflush: PrintStream would flush between the body and the newline of a println.
             super(new TaggingStream(target), false, StandardCharsets.UTF_8);
+            this.target = target;
+        }
+
+        @Override
+        public boolean checkError() {
+            return super.checkError() || target.checkError();
         }
     }
 
     /**
      * Holds each thread's output until its line is complete, then writes the line, tagged with the
      * session bound when it started, to the target in one write. All wrappers write under one lock,
-     * so lines from different threads and streams never interleave. A line longer than {@link
-     * #LINE_LIMIT} is written in pieces; only the first carries the tag. The target receives UTF-8
-     * whatever its own charset. A thread's unflushed partial line is lost when the thread ends.
+     * so every physical line carries one writer's tag and lines from different threads and streams
+     * never interleave. A partial line that is flushed, or reaches {@link #LINE_LIMIT}, is written
+     * as a complete line, so its continuation starts a new tagged line. The target receives UTF-8
+     * whatever its own charset.
      */
     private static final class TaggingStream extends OutputStream {
         private static final int LINE_LIMIT = 8192;
@@ -119,13 +129,14 @@ public final class SessionLogging {
             var line = lines.get();
             var end = offset + length;
             while (offset < end) {
-                if (line.isStart()) line.session = CURRENT.get();
+                if (line.size == 0) line.session = CURRENT.get();
                 var newline = offset;
                 while (newline < end && bytes[newline] != '\n') newline++;
-                var stop = Math.min(newline + 1, end);
-                line.append(bytes, offset, stop - offset);
-                offset = stop;
-                if (newline < end) emit(line, true);
+                var segmentEnd = Math.min(newline + 1, end);
+                var take = Math.min(segmentEnd - offset, LINE_LIMIT - line.size);
+                line.append(bytes, offset, take);
+                offset += take;
+                if (offset == segmentEnd && newline < end) emit(line, true);
                 else if (line.size >= LINE_LIMIT) emit(line, false);
             }
         }
@@ -140,16 +151,15 @@ public final class SessionLogging {
         }
 
         private void emit(Line line, boolean complete) throws IOException {
-            var session = line.continued ? null : line.session;
             var tag =
-                    session == null
+                    line.session == null
                             ? new byte[0]
-                            : ("[session:" + session + "] ").getBytes(StandardCharsets.UTF_8);
-            var output = new byte[tag.length + line.size];
+                            : ("[session:" + line.session + "] ").getBytes(StandardCharsets.UTF_8);
+            var output = new byte[tag.length + line.size + (complete ? 0 : 1)];
             System.arraycopy(tag, 0, output, 0, tag.length);
             System.arraycopy(line.bytes, 0, output, tag.length, line.size);
+            if (!complete) output[output.length - 1] = '\n';
             line.size = 0;
-            line.continued = !complete;
             synchronized (LOCK) {
                 target.write(output, 0, output.length);
                 target.flush();
@@ -157,16 +167,11 @@ public final class SessionLogging {
         }
     }
 
-    /** One thread's pending output on one stream. */
+    /** One thread's pending output on one stream, never longer than the line limit. */
     private static final class Line {
         byte[] bytes = new byte[256];
         int size;
         @Nullable String session;
-        boolean continued;
-
-        boolean isStart() {
-            return size == 0 && !continued;
-        }
 
         void append(byte[] source, int offset, int length) {
             if (size + length > bytes.length) {

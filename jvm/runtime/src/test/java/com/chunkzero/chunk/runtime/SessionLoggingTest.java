@@ -80,6 +80,58 @@ class SessionLoggingTest {
         assertEquals("[session:s] héllo ✓\nplain ✓\n", raw.toString(StandardCharsets.UTF_8));
     }
 
+    @Test
+    void partialLinesAreWrittenWholeSoNoTagContinuesAnother() throws Exception {
+        var raw = new ByteArrayOutputStream();
+        var stream = SessionLogging.wrap(new PrintStream(raw, true, StandardCharsets.UTF_8));
+        var firstPartial = new CountDownLatch(1);
+        var other = new CountDownLatch(1);
+        var first =
+                new Thread(
+                        () ->
+                                SessionLogging.run(
+                                        "A",
+                                        () -> {
+                                            stream.print("progress");
+                                            stream.flush();
+                                            firstPartial.countDown();
+                                            try {
+                                                other.await();
+                                            } catch (InterruptedException interrupted) {
+                                                return;
+                                            }
+                                            stream.println(" done");
+                                        }));
+        first.start();
+        firstPartial.await();
+        SessionLogging.run("B", () -> stream.println("message B"));
+        other.countDown();
+        first.join();
+
+        assertEquals(
+                List.of("[session:A] progress", "[session:B] message B", "[session:A]  done"),
+                raw.toString(StandardCharsets.UTF_8).lines().toList());
+    }
+
+    @Test
+    void aLineLongerThanTheLimitIsWrittenInBoundedTaggedPieces() {
+        var raw = new ByteArrayOutputStream();
+        var stream = SessionLogging.wrap(new PrintStream(raw, true, StandardCharsets.UTF_8));
+        var big = "x".repeat(20_000).getBytes(StandardCharsets.UTF_8);
+
+        SessionLogging.run(
+                "s",
+                () -> {
+                    stream.write(big, 0, big.length);
+                    stream.println();
+                });
+
+        var lines = raw.toString(StandardCharsets.UTF_8).lines().toList();
+        assertEquals(
+                List.of(8192, 8192, 3616), lines.stream().map(line -> line.length() - 12).toList());
+        assertTrue(lines.stream().allMatch(line -> line.startsWith("[session:s] x")));
+    }
+
     private static Thread writer(String session, PrintStream stream, CountDownLatch start) {
         return new Thread(
                 () -> {

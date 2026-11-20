@@ -68,6 +68,7 @@ public final class SessionScope {
     private final Map<Class<?>, AutoCloseable> sharedResources = new HashMap<>();
     private final Set<Player> players = ConcurrentHashMap.newKeySet();
     private final EventNode<Event> events;
+    private final ThreadLocal<@Nullable Event> redispatching = new ThreadLocal<>();
     private final Scheduler scheduler;
     private final List<Task> drivers;
     private boolean disposed;
@@ -339,16 +340,25 @@ public final class SessionScope {
     }
 
     /**
-     * Minestom runs a node's listeners in one dispatch callers can't wrap, so an event this session
-     * owns that arrives unbound is dispatched again with the session bound, and the unbound pass
-     * runs nothing. The bound pass finds the session bound and runs the listeners.
+     * Minestom runs a node's listeners in one dispatch callers can't wrap, and instance and player
+     * ticks run on its dispatcher outside this session's tick. So an event this session owns is
+     * dispatched again through the node with the session bound, and the first pass runs nothing;
+     * the second finds its event in {@link #redispatching} and runs the listeners. Unlike a plain
+     * node, a failing session listener never stops the global listeners after it, bound or not.
      */
     private boolean admit(Event event) {
         if (!owns(event)) return false;
-        if (id.equals(SessionLogging.current())) return true;
+        if (redispatching.get() == event) return true;
         @SuppressWarnings("unchecked")
         var handle = (ListenerHandle<Event>) events.getHandle(event.getClass());
-        SessionLogging.run(id, () -> handle.call(process, event));
+        var outer = redispatching.get();
+        redispatching.set(event);
+        try {
+            SessionLogging.run(id, () -> handle.call(process, event));
+        } finally {
+            if (outer == null) redispatching.remove();
+            else redispatching.set(outer);
+        }
         return false;
     }
 
