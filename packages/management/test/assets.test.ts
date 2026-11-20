@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { Code } from "@connectrpc/connect";
 
+import { keptRecentRevisions } from "../src/assets/retention.ts";
 import { decodeRevision, sha256Hex } from "../src/assets/revision.ts";
 import { issueEnvironmentToken } from "../src/auth/tokens.ts";
 import { desiredState } from "../src/environments/desired.ts";
@@ -179,5 +180,41 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
     expect((await pack(unpinnedPack)).status).toBe(404);
     const otherPrefix = (await desiredState(h.deps, otherId)).message.packUrlPrefix;
     expect((await fetch(`${otherPrefix}${pinnedPack}`)).status).toBe(404);
+  });
+
+  test("collection keeps the head, recent and deployed revisions, and deletes the rest with their blobs", async () => {
+    const { projectId, environmentId } = await createEnvironment(h);
+    const assets = h.client(AssetService);
+    await uploadRelease(h, projectId, "r1");
+    const deployed = assetRevision({ shared: { "d.txt": "deployed", "f.txt": "r0" } });
+    await uploadAssets(h, projectId, deployed);
+    await h.client(DeploymentService).deploy({
+      requestId: crypto.randomUUID(),
+      environmentId,
+      releaseId: "r1",
+      assetRevisionId: deployed.id,
+    });
+    const recent = Array.from({ length: keptRecentRevisions + 2 }, (_, i) =>
+      assetRevision({ shared: { "f.txt": `r${i}` } }),
+    );
+    for (const revision of recent) await uploadAssets(h, projectId, revision);
+    const unfinished = assetRevision({ shared: { "u.txt": "unfinished" } });
+    const [upload] = (await assets.uploadAssets({ projectId, manifest: unfinished.manifest })).uploads;
+    await fetch(upload?.upload?.url ?? "", { method: "PUT", body: unfinished.blobs.get(upload?.sha256 ?? "") });
+    await h.sql`update asset_revisions set create_time = now() - interval '2 hours' where project_id = ${projectId}`;
+    const head = recent[0]?.id ?? "";
+    await assets.setAssetHead({ projectId, revisionId: head, expectedHeadId: "" });
+
+    const remaining = await h.sql<{ id: string }[]>`select id from asset_revisions where project_id = ${projectId}`;
+    const kept = [deployed, ...recent.slice(0, 1), ...recent.slice(2)].map((revision) => revision.id);
+    expect(remaining.map((row) => row.id).sort()).toEqual(kept.sort());
+    const stored = (revision: typeof deployed) =>
+      Promise.all([...revision.blobs.keys()].map((sha256) => h.releases.exists(blobKey(projectId, sha256))));
+    expect(await stored(recent[0] ?? deployed)).toEqual([true]);
+    expect(await stored(recent[1] ?? deployed)).toEqual([false]);
+    expect(await stored(unfinished)).toEqual([false]);
+    expect(await assets.uploadAssets({ projectId, manifest: recent[1]?.manifest ?? new Uint8Array() })).toMatchObject({
+      uploads: [{ sha256: [...(recent[1]?.blobs.keys() ?? [])][0] }],
+    });
   });
 });

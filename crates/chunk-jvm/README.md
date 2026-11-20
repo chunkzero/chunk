@@ -4,10 +4,10 @@ The runner on a JVM machine: the main process of the `chunk-jvm` image, which
 [management](../../packages/management/README.md) starts when core asks for JVM capacity. It asks core what its host
 runs (`chunk:launch`), downloads that release's archive from core (`chunk:archive`), checks its size and SHA-256, and
 unpacks and verifies it with [`chunk-build`](../chunk-build/README.md). It fetches each blob of the deployment's asset
-revision that the app reads and its cache lacks (`chunk:asset-read`), checking each one's size and SHA-256, and
-materializes the app's asset directory. It then starts the app's JVM as a child process and stays in front of it: it
-forwards SIGTERM, SIGINT and SIGQUIT, sends SIGKILL once the stop grace runs out after SIGTERM or SIGINT, and reaps
-orphaned processes when it runs as PID 1.
+revision that the app reads and its cache lacks (`chunk:asset-read`), four at a time, checking each one's size and
+SHA-256, materializes the app's asset directory, and removes every other revision and blob from its cache. It then
+starts the app's JVM as a child process and stays in front of it: it forwards SIGTERM, SIGINT and SIGQUIT, sends SIGKILL
+once the stop grace runs out after SIGTERM or SIGINT, and reaps orphaned processes when it runs as PID 1.
 
 Each run of the runner makes up a new boot ID, and core binds the host to the first boot it sees. A stopped machine is
 replaced, not restarted: a restarted runner exits with code 77.

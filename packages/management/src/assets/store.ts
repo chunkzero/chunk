@@ -48,3 +48,12 @@ export async function heldBlobs(
     .where(and(eq(assetBlobs.project_id, projectId), inArray(assetBlobs.sha256, digests)));
   return new Map(rows.map(({ sha256, ...blob }) => [sha256, blob]));
 }
+
+/** Runs `run` on every item, at most `limit` at once. */
+export async function eachLimited<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) await run(items[next++] as T);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}

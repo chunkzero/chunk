@@ -22,10 +22,11 @@ const styles = stylex.create({
 export function Release({ deploymentId }: { deploymentId: string }) {
   const deployment = useDeployment(deploymentId);
   if (!deploymentId) return <span {...stylex.props(styles.none)}>Nothing deployed</span>;
-  return <ReleaseId id={deployment.data?.releaseId ?? "…"} />;
+  return <ShortId id={deployment.data?.releaseId ?? "…"} />;
 }
 
-export function ReleaseId({ id }: { id: string }) {
+/** A release or asset revision ID, truncated to fit, in full on hover. */
+export function ShortId({ id }: { id: string }) {
   return (
     <span title={id} {...stylex.props(styles.id)}>
       {id}

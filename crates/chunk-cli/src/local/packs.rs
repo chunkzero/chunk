@@ -1,10 +1,10 @@
-//! Serves the resource packs of the releases dev staged to its players' clients, over plain HTTP/1.1 on loopback.
+//! Serves the resource packs of the releases dev staged to its players' clients, over plain HTTP/1.1.
 
 use std::{
     collections::BTreeSet,
     convert::Infallible,
     io,
-    net::Ipv4Addr,
+    net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex, PoisonError},
     time::Duration,
@@ -23,10 +23,13 @@ pub(super) struct Packs {
 }
 
 impl Packs {
-    /// Starts serving packs from the asset store at `store` on an ephemeral loopback port.
-    pub async fn start(store: PathBuf) -> io::Result<Self> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
-        let url_prefix = format!("http://{}/packs/", listener.local_addr()?);
+    /// Starts serving packs from the asset store at `store` on `bind`, to clients that reach it at `public`, or else
+    /// at the address it listens on.
+    pub async fn start(store: PathBuf, bind: SocketAddr, public: Option<&url::Url>) -> io::Result<Self> {
+        let listener = TcpListener::bind(bind)
+            .await
+            .map_err(|error| io::Error::new(error.kind(), format!("cannot serve packs on {bind}: {error}")))?;
+        let url_prefix = url_prefix(listener.local_addr()?, public)?;
         let allowed = Arc::default();
         let server = tokio::spawn(serve(listener, store.join("blobs"), Arc::clone(&allowed))).abort_handle();
         Ok(Self { url_prefix, allowed, server })
@@ -47,6 +50,25 @@ impl Drop for Packs {
     fn drop(&mut self) {
         self.server.abort();
     }
+}
+
+/// Where clients download packs: `public`'s path followed by `packs/`, or else the listening address's.
+pub(super) fn url_prefix(listening: SocketAddr, public: Option<&url::Url>) -> io::Result<String> {
+    let Some(public) = public else {
+        if listening.ip().is_unspecified() {
+            return Err(io::Error::other(format!(
+                "--pack-bind {listening} listens on every address; set --pack-url to the one players' clients reach"
+            )));
+        }
+        return Ok(format!("http://{listening}/packs/"));
+    };
+    if !["http", "https"].contains(&public.scheme()) || public.host().is_none() {
+        return Err(io::Error::other(format!("--pack-url {public} must be an http or https URL with a host")));
+    }
+    if public.query().is_some() || public.fragment().is_some() {
+        return Err(io::Error::other(format!("--pack-url {public} cannot have a query or fragment")));
+    }
+    Ok(format!("{}/packs/", public.as_str().trim_end_matches('/')))
 }
 
 async fn serve(listener: TcpListener, blobs: PathBuf, allowed: Arc<Mutex<BTreeSet<String>>>) {

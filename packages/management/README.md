@@ -100,6 +100,13 @@ Environments fetch blobs at `GET /blobs/<sha256>` with their bearer token, and p
 serve only blobs of revisions the environment's deployments pin, packs only for the pack URL, streaming them from disk
 or redirecting to a presigned URL of the release bucket.
 
+Each `SetAssetHead` collects the project's unused revisions. A revision is kept while it is the head, one of the
+project's 10 newest ready revisions, less than an hour old (as long as its upload URLs last), or pinned by an
+environment's active deployment, an unfinished one or one of its 10 newest. The rest are deleted, and with them every
+blob no remaining revision holds, from the database and the release store; a rollback to an older deployment fails once
+its revision is gone. Collection holds a per-project lock that uploads and deployments share, so it never deletes a blob
+a revision is being declared with or a revision a deployment is pinning.
+
 ## Release storage
 
 Release archives stay on management's disk under `CHUNK_DATA_DIR` unless `CHUNK_RELEASE_STORE_BUCKET` names an

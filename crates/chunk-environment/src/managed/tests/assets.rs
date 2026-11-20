@@ -37,3 +37,21 @@ async fn a_revision_and_its_missing_blobs_load_unless_it_lacks_a_declared_world(
     let renamed = AssetArtifact { revision_id: "0".repeat(64), ..artifact };
     assert!(assets::load(&client, &store, Some(&renamed), &declared("koth"), &cancel).await.is_err());
 }
+
+#[tokio::test]
+async fn pruning_keeps_everything_until_the_store_holds_every_kept_revision() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::new(directory.path());
+    let blob = |bytes: &[u8]| AssetBlob { sha256: format!("{:x}", Sha256::digest(bytes)), size: bytes.len() as u64 };
+    let mut old = AssetRevision { version: chunk_contract::ASSET_REVISION_VERSION, ..AssetRevision::default() };
+    old.shared.insert("old.txt".into(), blob(b"old"));
+    store.insert(&blob(b"old").sha256, b"old").unwrap();
+    store.write_revision(&old).unwrap();
+    let loading = AssetRevision { version: chunk_contract::ASSET_REVISION_VERSION, ..AssetRevision::default() };
+
+    assert_eq!(assets::prune(&store, BTreeSet::from([loading.id()])).await.unwrap(), None);
+    assert!(store.contains(&blob(b"old").sha256).unwrap());
+    store.write_revision(&loading).unwrap();
+    assert_eq!(assets::prune(&store, BTreeSet::from([loading.id()])).await.unwrap(), Some(2));
+    assert!(!store.contains(&blob(b"old").sha256).unwrap());
+}

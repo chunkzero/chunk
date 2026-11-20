@@ -76,6 +76,7 @@ impl Managed<'_> {
             tick.tick().await;
             self.retire().await;
             self.remove_unused_releases().await;
+            self.remove_unused_assets().await;
         }
     }
 
@@ -194,5 +195,36 @@ impl Managed<'_> {
         if let Err(error) = super::release::remove(unused).await {
             tracing::warn!(%error, "unused releases not removed");
         }
+    }
+
+    /// Removes the asset revisions and blobs that neither a deployment resident in the backend, whose JVMs read them,
+    /// nor the one loading pins, whenever that set changes. Skipped while a load fills the store, and loads wait
+    /// meanwhile, so none reuses a blob being removed.
+    async fn remove_unused_assets(&self) {
+        let (Ok(control), Some(backend)) = (self.core.control(), self.core.backend()) else { return };
+        let Ok(mut last_kept) = self.asset_loads.try_write() else { return };
+        // Read before control, so a load that finishes meanwhile has made its deployment control's by then.
+        let mut kept: BTreeSet<String> = lock(&self.deployments).loading_assets.iter().cloned().collect();
+        let resident = match backend.deployments().await {
+            Ok(resident) => resident,
+            Err(error) => return tracing::warn!(%error, "resident deployments unknown"),
+        };
+        for id in &resident {
+            match control.release(id.as_str()) {
+                Ok(release) => kept.extend(release.map(|release| release.assets.revision_id.clone())),
+                Err(error) => return tracing::warn!(%error, "asset revisions in use unknown"),
+            }
+        }
+        kept.remove("");
+        if last_kept.as_ref() == Some(&kept) {
+            return;
+        }
+        match super::assets::prune(&self.assets, kept.clone()).await {
+            Ok(None) => return,
+            Ok(Some(0)) => {}
+            Ok(Some(removed)) => tracing::info!(removed, kept = kept.len(), "unused asset revisions removed"),
+            Err(error) => tracing::warn!(%error, "unused asset revisions not removed"),
+        }
+        *last_kept = Some(kept);
     }
 }

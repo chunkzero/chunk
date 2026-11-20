@@ -77,4 +77,17 @@ export function timeAgo(timestamp: Timestamp | undefined) {
   return "just now";
 }
 
+const byteUnits = ["B", "KiB", "MiB", "GiB", "TiB"];
+
+/** A byte count in binary units, such as `1.5 MiB`. */
+export function formatBytes(bytes: bigint) {
+  let value = Number(bytes);
+  let unit = 0;
+  while (value >= 1024 && unit < byteUnits.length - 1) {
+    value /= 1024;
+    unit++;
+  }
+  return `${unit === 0 ? value : value.toFixed(1)} ${byteUnits[unit]}`;
+}
+
 export const clock = new Intl.DateTimeFormat("en", { hour12: false, timeStyle: "medium" });

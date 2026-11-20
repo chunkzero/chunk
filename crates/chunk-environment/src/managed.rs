@@ -81,6 +81,9 @@ pub(crate) struct Managed<'a> {
     releases: release::Store,
     /// Where each deployment's asset blobs are downloaded to.
     assets: chunk_build::assets::Store,
+    /// Held shared while a load fills `assets`, and exclusively while unused revisions are removed from it. Holds the
+    /// revisions the last removal kept.
+    asset_loads: tokio::sync::RwLock<Option<BTreeSet<String>>>,
     /// Where the activation management has not yet accepted is recorded.
     activation: PathBuf,
     core: &'a Core,
@@ -123,6 +126,8 @@ struct Deployments {
     unacknowledged: Option<Activation>,
     /// The deployment being loaded.
     loading: Option<String>,
+    /// The asset revision `loading` pins, when it names one.
+    loading_assets: Option<String>,
     /// The latest deployment this core rejected, and why.
     rejected: Option<(String, String)>,
     /// How replaced deployments drain, from the latest desired state this process received.
@@ -172,7 +177,9 @@ struct Work<'a> {
 
 impl Drop for Work<'_> {
     fn drop(&mut self) {
-        lock(self.deployments).loading = None;
+        let mut deployments = lock(self.deployments);
+        deployments.loading = None;
+        deployments.loading_assets = None;
     }
 }
 
@@ -206,6 +213,7 @@ impl<'a> Managed<'a> {
             environment: registration.environment,
             releases: release::Store::new(state, core.archives().clone()),
             assets: core.asset_store(),
+            asset_loads: tokio::sync::RwLock::default(),
             activation: state.join("managed.json"),
             core,
             gateway,
@@ -430,7 +438,10 @@ impl<'a> Managed<'a> {
     }
 
     fn start(&self, desired: v1::AttachResponse) -> Work<'_> {
-        lock(&self.deployments).loading = Some(desired.deployment_id.clone());
+        let mut deployments = lock(&self.deployments);
+        deployments.loading = Some(desired.deployment_id.clone());
+        deployments.loading_assets = desired.assets.as_ref().map(|assets| assets.revision_id.clone());
+        drop(deployments);
         let cancel = self.stopping.child_token();
         Work {
             revision: desired.revision,
@@ -508,6 +519,7 @@ impl<'a> Managed<'a> {
         if backend.check_deployment(id).await.is_err() {
             return false;
         }
+        let _loading = self.asset_loads.read().await;
         match assets::restore(&self.client, &self.assets, desired.assets.as_ref(), cancel).await {
             Ok(restored) => restored.is_some(),
             Err(error) => {
@@ -525,10 +537,12 @@ impl<'a> Managed<'a> {
         let Some(loaded) = release::load(&self.client, &self.releases, artifact, cancel).await? else {
             return Ok(false);
         };
+        let loading = self.asset_loads.read().await;
         let revision = assets::load(&self.client, &self.assets, desired.assets.as_ref(), loaded.assets(), cancel);
         let Some(revision) = revision.await? else {
             return Ok(false);
         };
+        drop(loading);
         let deployment = &desired.deployment_id;
         if cancel.is_cancelled() {
             return Ok(false);

@@ -39,6 +39,12 @@ export function s3ReleaseStore(bucket: ReleaseBucket): ReleaseStore {
 
     exists: (key) => exists(archive(key)),
 
+    async delete(key) {
+      await s3Request("release store deletion", () =>
+        Promise.all([client.delete(archive(key)), client.delete(upload(key))]),
+      );
+    },
+
     async complete(key, expected, verify) {
       if (!(await exists(upload(key)))) {
         return (await exists(archive(key))) ? verify(read(archive(key))) : undefined;

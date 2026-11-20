@@ -15,7 +15,7 @@ import { file_chunk_management_v1_common } from "./common_pb.ts";
  * Describes the file chunk/management/v1/environment.proto.
  */
 export const file_chunk_management_v1_environment: GenFile /*@__PURE__*/ = fileDesc(
-  "CiVjaHVuay9tYW5hZ2VtZW50L3YxL2Vudmlyb25tZW50LnByb3RvEhNjaHVuay5tYW5hZ2VtZW50LnYxInIKDUF0dGFjaFJlcXVlc3QSEwoLaW5zdGFuY2VfaWQYASABKAkSDwoHdmVyc2lvbhgCIAEoCRIMCgRjb3JlGAMgASgIEg0KBWVwb2NoGAQgASgEEh4KFnJlc3RvcmVkX2RlcGxveW1lbnRfaWQYBSABKAkipgMKDkF0dGFjaFJlc3BvbnNlEhAKCHJldmlzaW9uGAEgASgEEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhIKCnByb2plY3RfaWQYAyABKAkSFQoNZGVwbG95bWVudF9pZBgEIAEoCRI1CgdyZWxlYXNlGAUgASgLMiQuY2h1bmsubWFuYWdlbWVudC52MS5SZWxlYXNlQXJ0aWZhY3QSMQoHc2VjcmV0cxgGIAMoCzIgLmNodW5rLm1hbmFnZW1lbnQudjEuU2VjcmV0VmFsdWUSMwoJbG9nX3N0b3JlGAcgASgLMiAuY2h1bmsubWFuYWdlbWVudC52MS5PYmplY3RTdG9yZRItCgdyZXN0b3JlGAggASgLMhwuY2h1bmsubWFuYWdlbWVudC52MS5SZXN0b3JlEg0KBWxlYXNlGAkgASgEEhgKEGVudmlyb25tZW50X25hbWUYCiABKAkSMQoFZHJhaW4YCyABKAsyIi5jaHVuay5tYW5hZ2VtZW50LnYxLkRyYWluU2V0dGluZ3MSFQoNc3RvcF9wcmV2aW91cxgMIAEoCCJWCg9SZWxlYXNlQXJ0aWZhY3QSEgoKcmVsZWFzZV9pZBgBIAEoCRILCgN1cmwYAiABKAkSDgoGc2hhMjU2GAMgASgJEhIKCnNpemVfYnl0ZXMYBCABKAQiOwoLU2VjcmV0VmFsdWUSDAoEbmFtZRgBIAEoCRIPCgd2ZXJzaW9uGAIgASgEEg0KBXZhbHVlGAMgASgMIskBCgtPYmplY3RTdG9yZRIQCghlbmRwb2ludBgBIAEoCRIOCgZyZWdpb24YAiABKAkSDgoGYnVja2V0GAMgASgJEg4KBnByZWZpeBgEIAEoCRIVCg1hY2Nlc3Nfa2V5X2lkGAUgASgJEhkKEXNlY3JldF9hY2Nlc3Nfa2V5GAYgASgJEhUKDXNlc3Npb25fdG9rZW4YByABKAkSLwoLZXhwaXJlX3RpbWUYCCABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wIm8KB1Jlc3RvcmUSMAoGc291cmNlGAEgASgLMiAuY2h1bmsubWFuYWdlbWVudC52MS5PYmplY3RTdG9yZRITCgtzbmFwc2hvdF9pZBgCIAEoCRIdChVzb3VyY2VfZW52aXJvbm1lbnRfaWQYAyABKAkizAIKE1JlcG9ydFN0YXR1c1JlcXVlc3QSMAoMb2JzZXJ2ZV90aW1lGAEgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIZChFnYXRld2F5X2FkZHJlc3NlcxgCIAMoCRIWCg5vbmxpbmVfcGxheWVycxgDIAEoDRIuCgVwaW5ncxgEIAMoCzIfLmNodW5rLm1hbmFnZW1lbnQudjEuUGluZ1N0YXR1cxI7CgpkZXBsb3ltZW50GAUgASgLMicuY2h1bmsubWFuYWdlbWVudC52MS5EZXBsb3ltZW50UHJvZ3Jlc3MSGAoQcmVhZHlfdG9fc3VzcGVuZBgGIAEoCBINCgVsZWFzZRgHIAEoBBIQCghzZXF1ZW5jZRgIIAEoBBIYChBkZXNpcmVkX3JldmlzaW9uGAkgASgEEg4KBmxvZ2lucxgKIAEoBCIzCgpQaW5nU3RhdHVzEhAKCGhvc3RuYW1lGAEgASgJEhMKC3N0YXR1c19qc29uGAIgASgJInEKEkRlcGxveW1lbnRQcm9ncmVzcxIVCg1kZXBsb3ltZW50X2lkGAEgASgJEjMKBXN0YXRlGAIgASgOMiQuY2h1bmsubWFuYWdlbWVudC52MS5EZXBsb3ltZW50U3RhdGUSDwoHbWVzc2FnZRgDIAEoCSIWChRSZXBvcnRTdGF0dXNSZXNwb25zZSJ1ChNTZXRXYWtlQWxhcm1SZXF1ZXN0EhIKCmdlbmVyYXRpb24YASABKAQSLAoIZHVlX3RpbWUYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg0KBWVwb2NoGAMgASgEEg0KBWxlYXNlGAQgASgEImcKFFNldFdha2VBbGFybVJlc3BvbnNlEhIKCmdlbmVyYXRpb24YASABKAQSLAoIZHVlX3RpbWUYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg0KBWVwb2NoGAMgASgEIrwBChVFbnN1cmVDYXBhY2l0eVJlcXVlc3QSEgoKcmVxdWVzdF9pZBgBIAEoCRIvCgh3b3JrbG9hZBgCIAEoDjIdLmNodW5rLm1hbmFnZW1lbnQudjEuV29ya2xvYWQSFwoPbWFjaGluZV9wcm9maWxlGAMgASgJEhIKCnJlbGVhc2VfaWQYBCABKAkSDgoGYXBwX2lkGAUgASgJEg0KBWxlYXNlGAYgASgEEhIKCmNyZWRlbnRpYWwYByABKAkiSQoWRW5zdXJlQ2FwYWNpdHlSZXNwb25zZRIvCghjYXBhY2l0eRgBIAEoCzIdLmNodW5rLm1hbmFnZW1lbnQudjEuQ2FwYWNpdHkidgoIQ2FwYWNpdHkSEgoKcmVxdWVzdF9pZBgBIAEoCRIxCgVzdGF0ZRgCIAEoDjIiLmNodW5rLm1hbmFnZW1lbnQudjEuQ2FwYWNpdHlTdGF0ZRISCgptYWNoaW5lX2lkGAMgASgJEg8KB21lc3NhZ2UYBCABKAkiOwoWUmVsZWFzZUNhcGFjaXR5UmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEg0KBWxlYXNlGAIgASgEIkoKF1JlbGVhc2VDYXBhY2l0eVJlc3BvbnNlEi8KCGNhcGFjaXR5GAEgASgLMh0uY2h1bmsubWFuYWdlbWVudC52MS5DYXBhY2l0eSJHChJSZXBvcnRVc2FnZVJlcXVlc3QSMQoHcmVjb3JkcxgBIAMoCzIgLmNodW5rLm1hbmFnZW1lbnQudjEuVXNhZ2VSZWNvcmQipAEKC1VzYWdlUmVjb3JkEgoKAmlkGAEgASgJEi4KCnN0YXJ0X3RpbWUYAiABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEiwKCGVuZF90aW1lGAMgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcBIWCg5wbGF5ZXJfc2Vjb25kcxgEIAEoBBITCgtpbnN0YW5jZV9pZBgFIAEoCSIVChNSZXBvcnRVc2FnZVJlc3BvbnNlIkMKEVJlcG9ydExvZ3NSZXF1ZXN0Ei4KB2VudHJpZXMYASADKAsyHS5jaHVuay5tYW5hZ2VtZW50LnYxLkxvZ0VudHJ5IhQKElJlcG9ydExvZ3NSZXNwb25zZSJKChRSZXBvcnRNZXRyaWNzUmVxdWVzdBIyCgdzYW1wbGVzGAEgAygLMiEuY2h1bmsubWFuYWdlbWVudC52MS5NZXRyaWNTYW1wbGUi2AEKDE1ldHJpY1NhbXBsZRIMCgRuYW1lGAEgASgJEj0KBmxhYmVscxgCIAMoCzItLmNodW5rLm1hbmFnZW1lbnQudjEuTWV0cmljU2FtcGxlLkxhYmVsc0VudHJ5EigKBHRpbWUYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEg0KBXZhbHVlGAQgASgBEhMKC2luc3RhbmNlX2lkGAUgASgJGi0KC0xhYmVsc0VudHJ5EgsKA2tleRgBIAEoCRINCgV2YWx1ZRgCIAEoCToCOAEiFwoVUmVwb3J0TWV0cmljc1Jlc3BvbnNlIkwKF1JlcG9ydEZhaWxlZEF1dGhSZXF1ZXN0EjEKCGZhaWx1cmVzGAEgAygLMh8uY2h1bmsubWFuYWdlbWVudC52MS5GYWlsZWRBdXRoIk4KCkZhaWxlZEF1dGgSFgoOY2xpZW50X2FkZHJlc3MYASABKAkSKAoEdGltZRgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAiGgoYUmVwb3J0RmFpbGVkQXV0aFJlc3BvbnNlKmEKCFdvcmtsb2FkEhgKFFdPUktMT0FEX1VOU1BFQ0lGSUVEEAASEAoMV09SS0xPQURfSlZNEAESFAoQV09SS0xPQURfR0FURVdBWRACIgQIAxADKg1XT1JLTE9BRF9FWEVDKsABCg1DYXBhY2l0eVN0YXRlEh4KGkNBUEFDSVRZX1NUQVRFX1VOU1BFQ0lGSUVEEAASHwobQ0FQQUNJVFlfU1RBVEVfUFJPVklTSU9OSU5HEAESGAoUQ0FQQUNJVFlfU1RBVEVfUkVBRFkQAhIZChVDQVBBQ0lUWV9TVEFURV9GQUlMRUQQAxIbChdDQVBBQ0lUWV9TVEFURV9SRUxFQVNFRBAEEhwKGENBUEFDSVRZX1NUQVRFX1JFTEVBU0lORxAFMqYHChJFbnZpcm9ubWVudFNlcnZpY2USUwoGQXR0YWNoEiIuY2h1bmsubWFuYWdlbWVudC52MS5BdHRhY2hSZXF1ZXN0GiMuY2h1bmsubWFuYWdlbWVudC52MS5BdHRhY2hSZXNwb25zZTABEmMKDFJlcG9ydFN0YXR1cxIoLmNodW5rLm1hbmFnZW1lbnQudjEuUmVwb3J0U3RhdHVzUmVxdWVzdBopLmNodW5rLm1hbmFnZW1lbnQudjEuUmVwb3J0U3RhdHVzUmVzcG9uc2USYwoMU2V0V2FrZUFsYXJtEiguY2h1bmsubWFuYWdlbWVudC52MS5TZXRXYWtlQWxhcm1SZXF1ZXN0GikuY2h1bmsubWFuYWdlbWVudC52MS5TZXRXYWtlQWxhcm1SZXNwb25zZRJpCg5FbnN1cmVDYXBhY2l0eRIqLmNodW5rLm1hbmFnZW1lbnQudjEuRW5zdXJlQ2FwYWNpdHlSZXF1ZXN0GisuY2h1bmsubWFuYWdlbWVudC52MS5FbnN1cmVDYXBhY2l0eVJlc3BvbnNlEmwKD1JlbGVhc2VDYXBhY2l0eRIrLmNodW5rLm1hbmFnZW1lbnQudjEuUmVsZWFzZUNhcGFjaXR5UmVxdWVzdBosLmNodW5rLm1hbmFnZW1lbnQudjEuUmVsZWFzZUNhcGFjaXR5UmVzcG9uc2USYAoLUmVwb3J0VXNhZ2USJy5jaHVuay5tYW5hZ2VtZW50LnYxLlJlcG9ydFVzYWdlUmVxdWVzdBooLmNodW5rLm1hbmFnZW1lbnQudjEuUmVwb3J0VXNhZ2VSZXNwb25zZRJdCgpSZXBvcnRMb2dzEiYuY2h1bmsubWFuYWdlbWVudC52MS5SZXBvcnRMb2dzUmVxdWVzdBonLmNodW5rLm1hbmFnZW1lbnQudjEuUmVwb3J0TG9nc1Jlc3BvbnNlEmYKDVJlcG9ydE1ldHJpY3MSKS5jaHVuay5tYW5hZ2VtZW50LnYxLlJlcG9ydE1ldHJpY3NSZXF1ZXN0GiouY2h1bmsubWFuYWdlbWVudC52MS5SZXBvcnRNZXRyaWNzUmVzcG9uc2USbwoQUmVwb3J0RmFpbGVkQXV0aBIsLmNodW5rLm1hbmFnZW1lbnQudjEuUmVwb3J0RmFpbGVkQXV0aFJlcXVlc3QaLS5jaHVuay5tYW5hZ2VtZW50LnYxLlJlcG9ydEZhaWxlZEF1dGhSZXNwb25zZWIGcHJvdG8z",
+  "CiVjaHVuay9tYW5hZ2VtZW50L3YxL2Vudmlyb25tZW50LnByb3RvEhNjaHVuay5tYW5hZ2VtZW50LnYxInIKDUF0dGFjaFJlcXVlc3QSEwoLaW5zdGFuY2VfaWQYASABKAkSDwoHdmVyc2lvbhgCIAEoCRIMCgRjb3JlGAMgASgIEg0KBWVwb2NoGAQgASgEEh4KFnJlc3RvcmVkX2RlcGxveW1lbnRfaWQYBSABKAki8wMKDkF0dGFjaFJlc3BvbnNlEhAKCHJldmlzaW9uGAEgASgEEhYKDmVudmlyb25tZW50X2lkGAIgASgJEhIKCnByb2plY3RfaWQYAyABKAkSFQoNZGVwbG95bWVudF9pZBgEIAEoCRI1CgdyZWxlYXNlGAUgASgLMiQuY2h1bmsubWFuYWdlbWVudC52MS5SZWxlYXNlQXJ0aWZhY3QSMQoHc2VjcmV0cxgGIAMoCzIgLmNodW5rLm1hbmFnZW1lbnQudjEuU2VjcmV0VmFsdWUSMwoJbG9nX3N0b3JlGAcgASgLMiAuY2h1bmsubWFuYWdlbWVudC52MS5PYmplY3RTdG9yZRItCgdyZXN0b3JlGAggASgLMhwuY2h1bmsubWFuYWdlbWVudC52MS5SZXN0b3JlEg0KBWxlYXNlGAkgASgEEhgKEGVudmlyb25tZW50X25hbWUYCiABKAkSMQoFZHJhaW4YCyABKAsyIi5jaHVuay5tYW5hZ2VtZW50LnYxLkRyYWluU2V0dGluZ3MSFQoNc3RvcF9wcmV2aW91cxgMIAEoCBIyCgZhc3NldHMYDSABKAsyIi5jaHVuay5tYW5hZ2VtZW50LnYxLkFzc2V0QXJ0aWZhY3QSFwoPcGFja191cmxfcHJlZml4GA4gASgJIlYKD1JlbGVhc2VBcnRpZmFjdBISCgpyZWxlYXNlX2lkGAEgASgJEgsKA3VybBgCIAEoCRIOCgZzaGEyNTYYAyABKAkSEgoKc2l6ZV9ieXRlcxgEIAEoBCJPCg1Bc3NldEFydGlmYWN0EhMKC3JldmlzaW9uX2lkGAEgASgJEhAKCG1hbmlmZXN0GAIgASgMEhcKD2Jsb2JfdXJsX3ByZWZpeBgDIAEoCSI7CgtTZWNyZXRWYWx1ZRIMCgRuYW1lGAEgASgJEg8KB3ZlcnNpb24YAiABKAQSDQoFdmFsdWUYAyABKAwiyQEKC09iamVjdFN0b3JlEhAKCGVuZHBvaW50GAEgASgJEg4KBnJlZ2lvbhgCIAEoCRIOCgZidWNrZXQYAyABKAkSDgoGcHJlZml4GAQgASgJEhUKDWFjY2Vzc19rZXlfaWQYBSABKAkSGQoRc2VjcmV0X2FjY2Vzc19rZXkYBiABKAkSFQoNc2Vzc2lvbl90b2tlbhgHIAEoCRIvCgtleHBpcmVfdGltZRgIIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXAibwoHUmVzdG9yZRIwCgZzb3VyY2UYASABKAsyIC5jaHVuay5tYW5hZ2VtZW50LnYxLk9iamVjdFN0b3JlEhMKC3NuYXBzaG90X2lkGAIgASgJEh0KFXNvdXJjZV9lbnZpcm9ubWVudF9pZBgDIAEoCSLMAgoTUmVwb3J0U3RhdHVzUmVxdWVzdBIwCgxvYnNlcnZlX3RpbWUYASABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhkKEWdhdGV3YXlfYWRkcmVzc2VzGAIgAygJEhYKDm9ubGluZV9wbGF5ZXJzGAMgASgNEi4KBXBpbmdzGAQgAygLMh8uY2h1bmsubWFuYWdlbWVudC52MS5QaW5nU3RhdHVzEjsKCmRlcGxveW1lbnQYBSABKAsyJy5jaHVuay5tYW5hZ2VtZW50LnYxLkRlcGxveW1lbnRQcm9ncmVzcxIYChByZWFkeV90b19zdXNwZW5kGAYgASgIEg0KBWxlYXNlGAcgASgEEhAKCHNlcXVlbmNlGAggASgEEhgKEGRlc2lyZWRfcmV2aXNpb24YCSABKAQSDgoGbG9naW5zGAogASgEIjMKClBpbmdTdGF0dXMSEAoIaG9zdG5hbWUYASABKAkSEwoLc3RhdHVzX2pzb24YAiABKAkicQoSRGVwbG95bWVudFByb2dyZXNzEhUKDWRlcGxveW1lbnRfaWQYASABKAkSMwoFc3RhdGUYAiABKA4yJC5jaHVuay5tYW5hZ2VtZW50LnYxLkRlcGxveW1lbnRTdGF0ZRIPCgdtZXNzYWdlGAMgASgJIhYKFFJlcG9ydFN0YXR1c1Jlc3BvbnNlInUKE1NldFdha2VBbGFybVJlcXVlc3QSEgoKZ2VuZXJhdGlvbhgBIAEoBBIsCghkdWVfdGltZRgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDQoFZXBvY2gYAyABKAQSDQoFbGVhc2UYBCABKAQiZwoUU2V0V2FrZUFsYXJtUmVzcG9uc2USEgoKZ2VuZXJhdGlvbhgBIAEoBBIsCghkdWVfdGltZRgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDQoFZXBvY2gYAyABKAQivAEKFUVuc3VyZUNhcGFjaXR5UmVxdWVzdBISCgpyZXF1ZXN0X2lkGAEgASgJEi8KCHdvcmtsb2FkGAIgASgOMh0uY2h1bmsubWFuYWdlbWVudC52MS5Xb3JrbG9hZBIXCg9tYWNoaW5lX3Byb2ZpbGUYAyABKAkSEgoKcmVsZWFzZV9pZBgEIAEoCRIOCgZhcHBfaWQYBSABKAkSDQoFbGVhc2UYBiABKAQSEgoKY3JlZGVudGlhbBgHIAEoCSJJChZFbnN1cmVDYXBhY2l0eVJlc3BvbnNlEi8KCGNhcGFjaXR5GAEgASgLMh0uY2h1bmsubWFuYWdlbWVudC52MS5DYXBhY2l0eSJ2CghDYXBhY2l0eRISCgpyZXF1ZXN0X2lkGAEgASgJEjEKBXN0YXRlGAIgASgOMiIuY2h1bmsubWFuYWdlbWVudC52MS5DYXBhY2l0eVN0YXRlEhIKCm1hY2hpbmVfaWQYAyABKAkSDwoHbWVzc2FnZRgEIAEoCSI7ChZSZWxlYXNlQ2FwYWNpdHlSZXF1ZXN0EhIKCnJlcXVlc3RfaWQYASABKAkSDQoFbGVhc2UYAiABKAQiSgoXUmVsZWFzZUNhcGFjaXR5UmVzcG9uc2USLwoIY2FwYWNpdHkYASABKAsyHS5jaHVuay5tYW5hZ2VtZW50LnYxLkNhcGFjaXR5IkcKElJlcG9ydFVzYWdlUmVxdWVzdBIxCgdyZWNvcmRzGAEgAygLMiAuY2h1bmsubWFuYWdlbWVudC52MS5Vc2FnZVJlY29yZCKkAQoLVXNhZ2VSZWNvcmQSCgoCaWQYASABKAkSLgoKc3RhcnRfdGltZRgCIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASLAoIZW5kX3RpbWUYAyABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEhYKDnBsYXllcl9zZWNvbmRzGAQgASgEEhMKC2luc3RhbmNlX2lkGAUgASgJIhUKE1JlcG9ydFVzYWdlUmVzcG9uc2UiQwoRUmVwb3J0TG9nc1JlcXVlc3QSLgoHZW50cmllcxgBIAMoCzIdLmNodW5rLm1hbmFnZW1lbnQudjEuTG9nRW50cnkiFAoSUmVwb3J0TG9nc1Jlc3BvbnNlIkoKFFJlcG9ydE1ldHJpY3NSZXF1ZXN0EjIKB3NhbXBsZXMYASADKAsyIS5jaHVuay5tYW5hZ2VtZW50LnYxLk1ldHJpY1NhbXBsZSLYAQoMTWV0cmljU2FtcGxlEgwKBG5hbWUYASABKAkSPQoGbGFiZWxzGAIgAygLMi0uY2h1bmsubWFuYWdlbWVudC52MS5NZXRyaWNTYW1wbGUuTGFiZWxzRW50cnkSKAoEdGltZRgDIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXASDQoFdmFsdWUYBCABKAESEwoLaW5zdGFuY2VfaWQYBSABKAkaLQoLTGFiZWxzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASIXChVSZXBvcnRNZXRyaWNzUmVzcG9uc2UiTAoXUmVwb3J0RmFpbGVkQXV0aFJlcXVlc3QSMQoIZmFpbHVyZXMYASADKAsyHy5jaHVuay5tYW5hZ2VtZW50LnYxLkZhaWxlZEF1dGgiTgoKRmFpbGVkQXV0aBIWCg5jbGllbnRfYWRkcmVzcxgBIAEoCRIoCgR0aW1lGAIgASgLMhouZ29vZ2xlLnByb3RvYnVmLlRpbWVzdGFtcCIaChhSZXBvcnRGYWlsZWRBdXRoUmVzcG9uc2UqYQoIV29ya2xvYWQSGAoUV09SS0xPQURfVU5TUEVDSUZJRUQQABIQCgxXT1JLTE9BRF9KVk0QARIUChBXT1JLTE9BRF9HQVRFV0FZEAIiBAgDEAMqDVdPUktMT0FEX0VYRUMqwAEKDUNhcGFjaXR5U3RhdGUSHgoaQ0FQQUNJVFlfU1RBVEVfVU5TUEVDSUZJRUQQABIfChtDQVBBQ0lUWV9TVEFURV9QUk9WSVNJT05JTkcQARIYChRDQVBBQ0lUWV9TVEFURV9SRUFEWRACEhkKFUNBUEFDSVRZX1NUQVRFX0ZBSUxFRBADEhsKF0NBUEFDSVRZX1NUQVRFX1JFTEVBU0VEEAQSHAoYQ0FQQUNJVFlfU1RBVEVfUkVMRUFTSU5HEAUypgcKEkVudmlyb25tZW50U2VydmljZRJTCgZBdHRhY2gSIi5jaHVuay5tYW5hZ2VtZW50LnYxLkF0dGFjaFJlcXVlc3QaIy5jaHVuay5tYW5hZ2VtZW50LnYxLkF0dGFjaFJlc3BvbnNlMAESYwoMUmVwb3J0U3RhdHVzEiguY2h1bmsubWFuYWdlbWVudC52MS5SZXBvcnRTdGF0dXNSZXF1ZXN0GikuY2h1bmsubWFuYWdlbWVudC52MS5SZXBvcnRTdGF0dXNSZXNwb25zZRJjCgxTZXRXYWtlQWxhcm0SKC5jaHVuay5tYW5hZ2VtZW50LnYxLlNldFdha2VBbGFybVJlcXVlc3QaKS5jaHVuay5tYW5hZ2VtZW50LnYxLlNldFdha2VBbGFybVJlc3BvbnNlEmkKDkVuc3VyZUNhcGFjaXR5EiouY2h1bmsubWFuYWdlbWVudC52MS5FbnN1cmVDYXBhY2l0eVJlcXVlc3QaKy5jaHVuay5tYW5hZ2VtZW50LnYxLkVuc3VyZUNhcGFjaXR5UmVzcG9uc2USbAoPUmVsZWFzZUNhcGFjaXR5EisuY2h1bmsubWFuYWdlbWVudC52MS5SZWxlYXNlQ2FwYWNpdHlSZXF1ZXN0GiwuY2h1bmsubWFuYWdlbWVudC52MS5SZWxlYXNlQ2FwYWNpdHlSZXNwb25zZRJgCgtSZXBvcnRVc2FnZRInLmNodW5rLm1hbmFnZW1lbnQudjEuUmVwb3J0VXNhZ2VSZXF1ZXN0GiguY2h1bmsubWFuYWdlbWVudC52MS5SZXBvcnRVc2FnZVJlc3BvbnNlEl0KClJlcG9ydExvZ3MSJi5jaHVuay5tYW5hZ2VtZW50LnYxLlJlcG9ydExvZ3NSZXF1ZXN0GicuY2h1bmsubWFuYWdlbWVudC52MS5SZXBvcnRMb2dzUmVzcG9uc2USZgoNUmVwb3J0TWV0cmljcxIpLmNodW5rLm1hbmFnZW1lbnQudjEuUmVwb3J0TWV0cmljc1JlcXVlc3QaKi5jaHVuay5tYW5hZ2VtZW50LnYxLlJlcG9ydE1ldHJpY3NSZXNwb25zZRJvChBSZXBvcnRGYWlsZWRBdXRoEiwuY2h1bmsubWFuYWdlbWVudC52MS5SZXBvcnRGYWlsZWRBdXRoUmVxdWVzdBotLmNodW5rLm1hbmFnZW1lbnQudjEuUmVwb3J0RmFpbGVkQXV0aFJlc3BvbnNlYgZwcm90bzM",
   [file_chunk_management_v1_common, file_google_protobuf_timestamp],
 );
 
@@ -162,6 +162,22 @@ export type AttachResponse = Message<"chunk.management.v1.AttachResponse"> & {
    * @generated from field: bool stop_previous = 12;
    */
   stopPrevious: boolean;
+
+  /**
+   * The asset revision deployment_id pins; unset with the release.
+   *
+   * @generated from field: chunk.management.v1.AssetArtifact assets = 13;
+   */
+  assets?: AssetArtifact | undefined;
+
+  /**
+   * Where players' clients download the environment's resource packs: this
+   * prefix followed by a pack's lowercase hex SHA-256. It stays valid while
+   * the environment exists, and needs no other credentials.
+   *
+   * @generated from field: string pack_url_prefix = 14;
+   */
+  packUrlPrefix: string;
 };
 
 /**
@@ -215,6 +231,46 @@ export const ReleaseArtifactSchema: GenMessage<ReleaseArtifact> /*@__PURE__*/ = 
 );
 
 /**
+ * An asset revision to download, blob by blob.
+ *
+ * @generated from message chunk.management.v1.AssetArtifact
+ */
+export type AssetArtifact = Message<"chunk.management.v1.AssetArtifact"> & {
+  /**
+   * The lowercase hex SHA-256 of `manifest`.
+   *
+   * @generated from field: string revision_id = 1;
+   */
+  revisionId: string;
+
+  /**
+   * The revision's canonical JSON manifest.
+   *
+   * @generated from field: bytes manifest = 2;
+   */
+  manifest: Uint8Array;
+
+  /**
+   * Fetch a blob with HTTP GET at this prefix followed by its lowercase hex
+   * SHA-256, sending the environment's bearer token. Only blobs of revisions
+   * the environment's deployments pin are served; the response may redirect to
+   * a presigned URL.
+   *
+   * @generated from field: string blob_url_prefix = 3;
+   */
+  blobUrlPrefix: string;
+};
+
+/**
+ * Describes the message chunk.management.v1.AssetArtifact.
+ * Use `create(AssetArtifactSchema)` to create a new message.
+ */
+export const AssetArtifactSchema: GenMessage<AssetArtifact> /*@__PURE__*/ = messageDesc(
+  file_chunk_management_v1_environment,
+  3,
+);
+
+/**
  * @generated from message chunk.management.v1.SecretValue
  */
 export type SecretValue = Message<"chunk.management.v1.SecretValue"> & {
@@ -240,7 +296,7 @@ export type SecretValue = Message<"chunk.management.v1.SecretValue"> & {
  */
 export const SecretValueSchema: GenMessage<SecretValue> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  3,
+  4,
 );
 
 /**
@@ -300,7 +356,7 @@ export type ObjectStore = Message<"chunk.management.v1.ObjectStore"> & {
  */
 export const ObjectStoreSchema: GenMessage<ObjectStore> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  4,
+  5,
 );
 
 /**
@@ -333,7 +389,7 @@ export type Restore = Message<"chunk.management.v1.Restore"> & {
  * Describes the message chunk.management.v1.Restore.
  * Use `create(RestoreSchema)` to create a new message.
  */
-export const RestoreSchema: GenMessage<Restore> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_environment, 5);
+export const RestoreSchema: GenMessage<Restore> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_environment, 6);
 
 /**
  * @generated from message chunk.management.v1.ReportStatusRequest
@@ -428,7 +484,7 @@ export type ReportStatusRequest = Message<"chunk.management.v1.ReportStatusReque
  */
 export const ReportStatusRequestSchema: GenMessage<ReportStatusRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  6,
+  7,
 );
 
 /**
@@ -454,7 +510,7 @@ export type PingStatus = Message<"chunk.management.v1.PingStatus"> & {
  */
 export const PingStatusSchema: GenMessage<PingStatus> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  7,
+  8,
 );
 
 /**
@@ -490,7 +546,7 @@ export type DeploymentProgress = Message<"chunk.management.v1.DeploymentProgress
  */
 export const DeploymentProgressSchema: GenMessage<DeploymentProgress> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  8,
+  9,
 );
 
 /**
@@ -504,7 +560,7 @@ export type ReportStatusResponse = Message<"chunk.management.v1.ReportStatusResp
  */
 export const ReportStatusResponseSchema: GenMessage<ReportStatusResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  9,
+  10,
 );
 
 /**
@@ -546,7 +602,7 @@ export type SetWakeAlarmRequest = Message<"chunk.management.v1.SetWakeAlarmReque
  */
 export const SetWakeAlarmRequestSchema: GenMessage<SetWakeAlarmRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  10,
+  11,
 );
 
 /**
@@ -578,7 +634,7 @@ export type SetWakeAlarmResponse = Message<"chunk.management.v1.SetWakeAlarmResp
  */
 export const SetWakeAlarmResponseSchema: GenMessage<SetWakeAlarmResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  11,
+  12,
 );
 
 /**
@@ -639,7 +695,7 @@ export type EnsureCapacityRequest = Message<"chunk.management.v1.EnsureCapacityR
  */
 export const EnsureCapacityRequestSchema: GenMessage<EnsureCapacityRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  12,
+  13,
 );
 
 /**
@@ -658,7 +714,7 @@ export type EnsureCapacityResponse = Message<"chunk.management.v1.EnsureCapacity
  */
 export const EnsureCapacityResponseSchema: GenMessage<EnsureCapacityResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  13,
+  14,
 );
 
 /**
@@ -694,7 +750,7 @@ export type Capacity = Message<"chunk.management.v1.Capacity"> & {
  * Describes the message chunk.management.v1.Capacity.
  * Use `create(CapacitySchema)` to create a new message.
  */
-export const CapacitySchema: GenMessage<Capacity> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_environment, 14);
+export const CapacitySchema: GenMessage<Capacity> /*@__PURE__*/ = messageDesc(file_chunk_management_v1_environment, 15);
 
 /**
  * @generated from message chunk.management.v1.ReleaseCapacityRequest
@@ -721,7 +777,7 @@ export type ReleaseCapacityRequest = Message<"chunk.management.v1.ReleaseCapacit
  */
 export const ReleaseCapacityRequestSchema: GenMessage<ReleaseCapacityRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  15,
+  16,
 );
 
 /**
@@ -740,7 +796,7 @@ export type ReleaseCapacityResponse = Message<"chunk.management.v1.ReleaseCapaci
  */
 export const ReleaseCapacityResponseSchema: GenMessage<ReleaseCapacityResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  16,
+  17,
 );
 
 /**
@@ -759,7 +815,7 @@ export type ReportUsageRequest = Message<"chunk.management.v1.ReportUsageRequest
  */
 export const ReportUsageRequestSchema: GenMessage<ReportUsageRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  17,
+  18,
 );
 
 /**
@@ -811,7 +867,7 @@ export type UsageRecord = Message<"chunk.management.v1.UsageRecord"> & {
  */
 export const UsageRecordSchema: GenMessage<UsageRecord> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  18,
+  19,
 );
 
 /**
@@ -825,7 +881,7 @@ export type ReportUsageResponse = Message<"chunk.management.v1.ReportUsageRespon
  */
 export const ReportUsageResponseSchema: GenMessage<ReportUsageResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  19,
+  20,
 );
 
 /**
@@ -844,7 +900,7 @@ export type ReportLogsRequest = Message<"chunk.management.v1.ReportLogsRequest">
  */
 export const ReportLogsRequestSchema: GenMessage<ReportLogsRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  20,
+  21,
 );
 
 /**
@@ -858,7 +914,7 @@ export type ReportLogsResponse = Message<"chunk.management.v1.ReportLogsResponse
  */
 export const ReportLogsResponseSchema: GenMessage<ReportLogsResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  21,
+  22,
 );
 
 /**
@@ -877,7 +933,7 @@ export type ReportMetricsRequest = Message<"chunk.management.v1.ReportMetricsReq
  */
 export const ReportMetricsRequestSchema: GenMessage<ReportMetricsRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  22,
+  23,
 );
 
 /**
@@ -918,7 +974,7 @@ export type MetricSample = Message<"chunk.management.v1.MetricSample"> & {
  */
 export const MetricSampleSchema: GenMessage<MetricSample> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  23,
+  24,
 );
 
 /**
@@ -932,7 +988,7 @@ export type ReportMetricsResponse = Message<"chunk.management.v1.ReportMetricsRe
  */
 export const ReportMetricsResponseSchema: GenMessage<ReportMetricsResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  24,
+  25,
 );
 
 /**
@@ -951,7 +1007,7 @@ export type ReportFailedAuthRequest = Message<"chunk.management.v1.ReportFailedA
  */
 export const ReportFailedAuthRequestSchema: GenMessage<ReportFailedAuthRequest> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  25,
+  26,
 );
 
 /**
@@ -977,7 +1033,7 @@ export type FailedAuth = Message<"chunk.management.v1.FailedAuth"> & {
  */
 export const FailedAuthSchema: GenMessage<FailedAuth> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  26,
+  27,
 );
 
 /**
@@ -991,7 +1047,7 @@ export type ReportFailedAuthResponse = Message<"chunk.management.v1.ReportFailed
  */
 export const ReportFailedAuthResponseSchema: GenMessage<ReportFailedAuthResponse> /*@__PURE__*/ = messageDesc(
   file_chunk_management_v1_environment,
-  27,
+  28,
 );
 
 /**

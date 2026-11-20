@@ -2,6 +2,7 @@
 //! assets from.
 
 use std::{
+    collections::BTreeSet,
     fs,
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -111,6 +112,20 @@ impl Store {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("asset revision {id} has another ID")));
         }
         Ok(revision)
+    }
+
+    /// Removes every revision but `kept`, their materialized directories, and the blobs none of `kept` holds. Hidden
+    /// entries, such as writes in progress, stay. Directories materialized from removed blobs keep their hard links.
+    /// Returns how many entries it removed.
+    /// # Errors
+    /// Reports filesystem failures; whatever it removed before one stays removed.
+    pub fn retain(&self, kept: &[&AssetRevision]) -> io::Result<usize> {
+        let ids: BTreeSet<String> = kept.iter().map(|revision| revision.id()).collect();
+        let blobs: BTreeSet<&str> = kept.iter().flat_map(|revision| revision.blobs().into_keys()).collect();
+        let revision = |name: &str| name.strip_suffix(".json").is_some_and(|id| ids.contains(id));
+        Ok(remove_unless(&self.root.join("blobs"), |name| blobs.contains(name))?
+            + remove_unless(&self.root.join("revisions"), revision)?
+            + remove_unless(&self.root.join("apps"), |name| ids.contains(name))?)
     }
 
     fn blob(&self, sha256: &str) -> io::Result<PathBuf> {
@@ -243,6 +258,31 @@ fn sync_parent(path: &Path) -> io::Result<()> {
     #[cfg(not(unix))]
     let _ = path;
     Ok(())
+}
+
+/// Removes the entries of `directory` that are not hidden and whose names `keep` rejects, returning how many.
+fn remove_unless(directory: &Path, keep: impl Fn(&str) -> bool) -> io::Result<usize> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|name| name.starts_with('.') || keep(name)) {
+            continue;
+        }
+        let path = entry.path();
+        let result = if entry.file_type()?.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+        match result {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(removed)
 }
 
 fn check_digest(value: &str) -> io::Result<()> {

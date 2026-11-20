@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { ConnectError } from "@connectrpc/connect";
 import { and, eq, inArray, ne, sql } from "drizzle-orm";
 
+import { lockAssets } from "../assets/retention.ts";
 import { checkContract, decodeRevision } from "../assets/revision.ts";
 import { loadReadyRevision } from "../assets/store.ts";
 import { newId } from "../crypto.ts";
@@ -94,6 +95,7 @@ export async function createDeployment(
     throw failedPrecondition("the release has not finished uploading");
   }
   requireJvmImage(release.manifest, jvmImageTemplate);
+  await lockAssets(db, environment.project_id, "shared");
   const assets = await loadReadyRevision(db, environment.project_id, assetRevisionId);
   try {
     checkContract(release.manifest.assets, decodeRevision(assets.manifest));

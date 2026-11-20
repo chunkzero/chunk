@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
-import { and, desc, eq, lt } from "drizzle-orm";
+import { and, desc, eq, lt, sql } from "drizzle-orm";
 
 import type { Deps } from "../deps.ts";
 import {
@@ -17,17 +17,18 @@ import { blobKey } from "../releases/store.ts";
 import { callerOf } from "../rpc/caller.ts";
 import { failedPrecondition, invalid, notFound, page, pageOf, required, seqAfter } from "../rpc/validate.ts";
 import { assetBlobs, assetRevisionBlobs, assetRevisions, projects } from "../schema.ts";
+import { collectAssets, lockAssets, uploadLifetimeMs } from "./retention.ts";
 import { decodeRevision, revisionBlobs, sha256Hex } from "./revision.ts";
-import { findRevision, heldBlobs, loadReadyRevision, toAssetRevision } from "./store.ts";
+import { eachLimited, findRevision, heldBlobs, loadReadyRevision, toAssetRevision } from "./store.ts";
 
-const uploadLifetimeMs = 60 * 60 * 1000;
 const downloadLifetimeMs = 60 * 60 * 1000;
 /** How many blobs completion verifies at once. */
 const verifyConcurrency = 8;
 /** How many blob existence checks run at once; a revision holds at most 4,096 blobs. */
 const existsConcurrency = 64;
 
-export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof AssetService>> {
+export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetService>> {
+  const { db, releases } = deps;
   /** The project's verified blobs among `digests` that the blob store still holds. */
   async function storedBlobs(projectId: string, digests: string[]) {
     const held = await heldBlobs(db, projectId, digests);
@@ -50,6 +51,7 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
       const blobs = revisionBlobs(revision);
       const sizeBytes = [...blobs.values()].reduce((total, blob) => total + BigInt(blob.size), 0n);
       await db.transaction(async (tx) => {
+        await lockAssets(tx, project.id, "shared");
         const declared = await tx
           .insert(assetRevisions)
           .values({
@@ -61,7 +63,21 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
           })
           .onConflictDoNothing()
           .returning({ id: assetRevisions.id });
-        if (declared.length === 0 || blobs.size === 0) return;
+        if (declared.length === 0) {
+          // Upload URLs are issued again below, so collection keeps an unfinished revision as long as they last.
+          await tx
+            .update(assetRevisions)
+            .set({ create_time: sql`now()` })
+            .where(
+              and(
+                eq(assetRevisions.project_id, project.id),
+                eq(assetRevisions.id, id),
+                eq(assetRevisions.state, AssetRevisionState.UPLOADING),
+              ),
+            );
+          return;
+        }
+        if (blobs.size === 0) return;
         await tx
           .insert(assetRevisionBlobs)
           .values([...blobs].map(([sha256, { pack }]) => ({ project_id: project.id, revision_id: id, sha256, pack })));
@@ -200,6 +216,10 @@ export function assetService({ db, releases }: Deps): Partial<ServiceImpl<typeof
           .where(eq(projects.id, project.id));
         throw new ConnectError(`the asset head moved to ${current?.head || "nothing"}`, Code.Aborted);
       }
+      // Each push moves the head, so the revisions it leaves behind are collected here.
+      await collectAssets(deps, project.id).catch((error: unknown) => {
+        console.error(`collecting project ${project.id}'s unused asset revisions failed:`, error);
+      });
       return { previousHeadId: request.expectedHeadId };
     },
   };
@@ -219,13 +239,4 @@ async function verifyBlob(blob: ReadableStream<Uint8Array>, sha256: string, size
     throw new Error("it does not match the declared size and digest");
   }
   return sha1Hash.digest("hex");
-}
-
-/** Runs `run` on every item, at most `limit` at once. */
-async function eachLimited<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) await run(items[next++] as T);
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }

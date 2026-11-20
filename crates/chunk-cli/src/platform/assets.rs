@@ -3,7 +3,7 @@
 //! runs an environment's release against a revision.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Read, Write as _},
     path::{Component, Path, PathBuf},
@@ -19,6 +19,7 @@ use chunk_management::{
     },
 };
 use clap::{Args, Subcommand};
+use futures_util::TryStreamExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -28,10 +29,12 @@ use super::{
     deploy::{self, mebibytes},
     resources::{table, time},
 };
-use crate::building::{self, BuildMode, progress::Progress};
 use plan::{Entry, Pull, Push};
 
 mod plan;
+
+/// How many blobs a pull downloads at once.
+const CONCURRENT_DOWNLOADS: usize = 4;
 
 #[derive(Args)]
 pub(crate) struct Assets {
@@ -192,19 +195,25 @@ pub(super) async fn upload_revision(
 
 async fn push(session: &Session, path: PathBuf, selector: &ProjectArg, force: bool) -> io::Result<()> {
     let project = session.project(selector).await?;
+    let root = path.canonicalize()?;
     chunk_service::run(|stop| async move {
-        let local = building::prepare(&building::Options { project: path, output: None, frozen: false })?;
         cliclack::log::info("Building assets…")?;
-        let built = building::execute(&local, BuildMode::Dev, stop.clone(), Progress::default()).await?;
+        let store = dev_store(&root);
+        let (project_root, target) = (root.clone(), store.clone());
+        let built = tokio::task::spawn_blocking(move || chunk_build::assets::build_revision(&project_root, &target));
+        let revision = &tokio::select! {
+            built = built => built.map_err(io::Error::other)??,
+            () = stop.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "push stopped")),
+        };
         let client = &session.client;
-        let (revision, id) = (&built.assets, built.assets.id());
+        let id = revision.id();
         let head = head_id(client, &project.id).await?;
-        let base = read_base(&local.root, &project.id)?;
+        let base = read_base(&root, &project.id)?;
         match plan::check_push(&head, base.as_deref(), &id, force) {
             Push::UpToDate => {
                 // Uploads whatever of the head the platform lost; normally nothing.
-                upload_revision(client, &project.id, revision, &built.asset_store).await?;
-                write_base(&local.root, &project.id, &id)?;
+                upload_revision(client, &project.id, revision, store.root()).await?;
+                write_base(&root, &project.id, &id)?;
                 return cliclack::log::info(format!("Nothing to push; the head is already revision {id}"));
             }
             Push::Moved => {
@@ -219,11 +228,11 @@ async fn push(session: &Session, path: PathBuf, selector: &ProjectArg, force: bo
         let previous = if head.is_empty() {
             AssetRevision::default()
         } else {
-            manifest(client, &Store::new(&built.asset_store), &project.id, &head).await?
+            manifest(client, &store, &project.id, &head).await?
         };
         let moved = tokio::select! {
             moved = async {
-                upload_revision(client, &project.id, revision, &built.asset_store).await?;
+                upload_revision(client, &project.id, revision, store.root()).await?;
                 let request = SetAssetHeadRequest {
                     project_id: project.id.clone(),
                     revision_id: id.clone(),
@@ -242,7 +251,7 @@ async fn push(session: &Session, path: PathBuf, selector: &ProjectArg, force: bo
             () = stop.cancelled() => return Err(io::Error::new(io::ErrorKind::Interrupted, "push stopped")),
         };
         moved?;
-        write_base(&local.root, &project.id, &id)?;
+        write_base(&root, &project.id, &id)?;
         let mut message = format!("Pushed assets revision {id}");
         for line in plan::summary(&plan::entries(&previous), &plan::entries(revision)) {
             message.push_str("\n  ");
@@ -298,7 +307,7 @@ async fn pull_head(
     let mut changes = Vec::new();
     let mut conflicts = Vec::new();
     let mut skipped = Vec::new();
-    for entry in base.keys().chain(heads.keys()).collect::<std::collections::BTreeSet<_>>() {
+    for entry in base.keys().chain(heads.keys()).collect::<BTreeSet<_>>() {
         let (before, after) = (base.get(entry).copied(), heads.get(entry).copied());
         if before == after {
             continue;
@@ -321,16 +330,23 @@ async fn pull_head(
             }
         }
     }
-    let blobs: BTreeMap<_, _> =
-        response.downloads.iter().map(|download| (download.sha256.as_str(), download)).collect();
+    let urls: BTreeMap<_, _> =
+        response.downloads.iter().map(|download| (download.sha256.as_str(), download.url.as_str())).collect();
+    let (sizes, mut missing) = (head.blobs(), BTreeSet::new());
     for sha256 in changes.iter().filter_map(|change| change.write) {
-        if store.contains(sha256)? {
-            continue;
+        if !store.contains(sha256)? {
+            missing.insert(sha256);
         }
-        let url =
-            blobs.get(sha256).ok_or_else(|| io::Error::other(format!("The platform gave no download for {sha256}")))?;
-        download(client, &store, sha256, head.blobs()[sha256], &url.url).await?;
     }
+    futures_util::stream::iter(missing.into_iter().map(Ok))
+        .try_for_each_concurrent(CONCURRENT_DOWNLOADS, |sha256| {
+            let (url, size, store) = (urls.get(sha256).copied(), sizes[sha256], &store);
+            async move {
+                let url = url.ok_or_else(|| io::Error::other(format!("The platform gave no download for {sha256}")))?;
+                download(client, store, sha256, size, url).await
+            }
+        })
+        .await?;
     let (mut updated, mut deleted) = (Vec::new(), Vec::new());
     for change in changes {
         let shown = format!("{}: {}", change.entry, change.path.strip_prefix(root).unwrap_or(&change.path).display());
