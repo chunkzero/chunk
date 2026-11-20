@@ -63,6 +63,37 @@ impl Visit for Line {
     }
 }
 
+/// Parsed components of a JVM log line emitted by [`follow_jvms`].
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct JvmLine<'a> {
+    pub host: &'a str,
+    pub session: Option<&'a str>,
+    pub body: &'a str,
+}
+
+/// Splits `<short-host> [[session:<id>] ]<body>` into its host prefix, optional session ID, and message body.
+pub(super) fn parse_jvm_line(line: &str) -> JvmLine<'_> {
+    let Some((host, rest)) = line.split_once(' ') else {
+        return JvmLine { host: "", session: None, body: line };
+    };
+    if let Some((session, body)) = strip_session_tag(rest) {
+        JvmLine { host, session: Some(session), body }
+    } else {
+        JvmLine { host, session: None, body: rest }
+    }
+}
+
+fn strip_session_tag(rest: &str) -> Option<(&str, &str)> {
+    let after_prefix = rest.strip_prefix("[session:")?;
+    let end = after_prefix.find(']')?;
+    let id = &after_prefix[..end];
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_')) {
+        return None;
+    }
+    let trailing = &after_prefix[end + 1..];
+    if trailing.is_empty() { Some((id, "")) } else { trailing.strip_prefix(' ').map(|body| (id, body)) }
+}
+
 /// Follows every `<nodes>/*.jvm.log`, skipping output written before the session started.
 pub(super) async fn follow_jvms(nodes: PathBuf, reporter: Reporter, stop: CancellationToken) {
     let mut offsets = HashMap::new();
@@ -72,7 +103,8 @@ pub(super) async fn follow_jvms(nodes: PathBuf, reporter: Reporter, stop: Cancel
             let offset = offsets.entry(path.clone()).or_insert_with(|| {
                 if first { std::fs::metadata(&path).map_or(0, |metadata| metadata.len()) } else { 0 }
             });
-            let host = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            let file = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+            let host = file.strip_suffix(".jvm.log").unwrap_or(file);
             for line in read_lines(&path, offset) {
                 reporter.log(Source::Jvm, format!("{} {line}", &host[..host.len().min(8)]));
             }
@@ -111,4 +143,33 @@ fn read_lines(path: &Path, offset: &mut u64) -> Vec<String> {
     };
     *offset += end as u64;
     String::from_utf8_lossy(&buffer[..end]).lines().map(str::to_owned).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tagged_and_untagged_jvm_lines() {
+        assert_eq!(
+            parse_jvm_line("5a9e4aba [session:f47ac10b-58cc] player joined"),
+            JvmLine { host: "5a9e4aba", session: Some("f47ac10b-58cc"), body: "player joined" }
+        );
+        assert_eq!(
+            parse_jvm_line("5a9e4aba [session:sess_1]"),
+            JvmLine { host: "5a9e4aba", session: Some("sess_1"), body: "" }
+        );
+        assert_eq!(
+            parse_jvm_line("5a9e4aba JVM started"),
+            JvmLine { host: "5a9e4aba", session: None, body: "JVM started" }
+        );
+        assert_eq!(
+            parse_jvm_line("5a9e4aba [session:invalid id] hi"),
+            JvmLine { host: "5a9e4aba", session: None, body: "[session:invalid id] hi" }
+        );
+        assert_eq!(
+            parse_jvm_line("5a9e4aba [session:] hi"),
+            JvmLine { host: "5a9e4aba", session: None, body: "[session:] hi" }
+        );
+    }
 }

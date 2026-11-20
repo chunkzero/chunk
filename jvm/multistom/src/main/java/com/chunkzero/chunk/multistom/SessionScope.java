@@ -8,12 +8,14 @@ import com.chunkzero.chunk.multistom.event.SessionEvent;
 import com.chunkzero.chunk.runtime.Component;
 import com.chunkzero.chunk.runtime.ComponentRegistry;
 import com.chunkzero.chunk.runtime.MoveResult;
+import com.chunkzero.chunk.runtime.SessionLogging;
 
 import net.minestom.server.ServerProcess;
 import net.minestom.server.entity.Player;
 import net.minestom.server.event.Event;
 import net.minestom.server.event.EventFilter;
 import net.minestom.server.event.EventNode;
+import net.minestom.server.event.ListenerHandle;
 import net.minestom.server.event.trait.EntityEvent;
 import net.minestom.server.event.trait.InstanceEvent;
 import net.minestom.server.event.trait.PlayerEvent;
@@ -66,6 +68,7 @@ public final class SessionScope {
     private final Map<Class<?>, AutoCloseable> sharedResources = new HashMap<>();
     private final Set<Player> players = ConcurrentHashMap.newKeySet();
     private final EventNode<Event> events;
+    private final EventNode<Event> dispatch;
     private final Scheduler scheduler;
     private final List<Task> drivers;
     private boolean disposed;
@@ -92,22 +95,28 @@ public final class SessionScope {
         this.requestFinish = requestFinish;
         this.backend = backend;
         this.components = components;
-        events = EventNode.event("session-" + id, EventFilter.ALL, this::owns);
+        events = EventNode.all("session-" + id);
+        // Minestom runs a node's listeners in one dispatch callers can't wrap, so this parent's
+        // predicate dispatches the session's events itself, with the session bound for logging.
+        // It exists for the event types the session listens to, and lets nothing else run.
+        dispatch = EventNode.event("session-dispatch-" + id, EventFilter.ALL, this::dispatch);
+        dispatch.addChild(events);
         try {
             var schedulers = process.schedulerManager();
             scheduler = schedulers.createScheduler();
             drivers =
                     List.of(
                             schedulers
-                                    .buildTask(scheduler::processTick)
+                                    .buildTask(() -> SessionLogging.run(id, scheduler::processTick))
                                     .repeat(TaskSchedule.nextTick())
                                     .schedule(),
                             schedulers
-                                    .buildTask(scheduler::processTickEnd)
+                                    .buildTask(
+                                            () -> SessionLogging.run(id, scheduler::processTickEnd))
                                     .repeat(TaskSchedule.nextTick())
                                     .executionType(ExecutionType.TICK_END)
                                     .schedule());
-            process.eventHandler().addChild(events);
+            process.eventHandler().addChild(dispatch);
         } catch (RuntimeException | Error failure) {
             if (backend != null) backend.close();
             throw failure;
@@ -130,7 +139,8 @@ public final class SessionScope {
 
     /**
      * Receives this scope's lifecycle notifications, its admitted players' events, and events of
-     * its instances and the entities in them.
+     * its instances and the entities in them. Its listeners run with this session bound for {@link
+     * SessionLogging}.
      */
     public @NotNull EventNode<Event> getEvents() {
         return events;
@@ -250,10 +260,13 @@ public final class SessionScope {
 
     public <T> CompletableFuture<T> onTick(Supplier<T> action) {
         return ticks.submit(
-                () -> {
-                    checkActive();
-                    return action.get();
-                });
+                () ->
+                        SessionLogging.call(
+                                id,
+                                () -> {
+                                    checkActive();
+                                    return action.get();
+                                }));
     }
 
     public CompletableFuture<Void> onTick(Runnable action) {
@@ -318,7 +331,7 @@ public final class SessionScope {
                         () -> closeAll(resources.reversed()),
                         this::unregisterInstances,
                         () -> process.eventHandler().call(new SessionDestroyEvent(this)),
-                        () -> process.eventHandler().removeChild(events)));
+                        () -> process.eventHandler().removeChild(dispatch)));
     }
 
     private void unregisterInstances() throws Exception {
@@ -329,6 +342,15 @@ public final class SessionScope {
                         .<AutoCloseable>map(
                                 instance -> () -> instances.unregisterInstance(instance))
                         .toList());
+    }
+
+    private boolean dispatch(Event event) {
+        if (owns(event)) {
+            @SuppressWarnings("unchecked")
+            var handle = (ListenerHandle<Event>) events.getHandle(event.getClass());
+            SessionLogging.run(id, () -> handle.call(process, event));
+        }
+        return false;
     }
 
     private boolean owns(Event event) {

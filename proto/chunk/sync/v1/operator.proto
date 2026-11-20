@@ -43,6 +43,21 @@ message Node {
   uint64 drain_deadline_ms = 8;
   // While DRAINING or STOPPING: the host's open claims.
   uint32 remaining_claims = 9;
+  // The host's open sessions, ordered by session ID.
+  repeated NodeSession sessions = 10;
+}
+
+// An open session running on a host.
+message NodeSession {
+  string id = 1;
+  // The session type, as `<app>/<session>`.
+  string session_type = 2;
+  // The session's destination key; empty for a session recovery found running without a log row.
+  string key = 3;
+  // Players with an open claim in this session.
+  uint32 players = 4;
+  // Where the session is in its lifecycle.
+  JvmSessionPhase phase = 5;
 }
 
 // Where a host is in its lifecycle.

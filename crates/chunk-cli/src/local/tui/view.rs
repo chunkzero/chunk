@@ -34,7 +34,7 @@ pub(super) fn render(frame: &mut Frame, model: &Model, info: &Info) {
             None => "↑/↓ players · / search · m move · ←/→ tabs · r restart · q quit",
         },
         (true, Tab::Log(Source::Jvm), Focus::Nodes) => {
-            "↑/↓ nodes · Enter logs · ←/→ tabs · b details · r restart · q quit"
+            "↑/↓ select · Enter logs · ←/→ tabs · b details · r restart · q quit"
         }
         (true, Tab::Log(Source::Jvm), Focus::Logs) => "↑/↓ scroll · End follow · Esc/Tab nodes · ←/→ tabs · q quit",
         (true, _, _) => "↑/↓ scroll · End follow · ←/→ tabs · b details · r restart · q quit",
@@ -210,17 +210,8 @@ fn render_output(frame: &mut Frame, model: &Model, area: Rect, title: &str) {
 fn render_lines(frame: &mut Frame, model: &Model, area: Rect) {
     let lines = model.visible();
     let end = lines.len().saturating_sub(model.scroll);
-    let visible: Vec<Line> = lines[end.saturating_sub(usize::from(area.height))..end]
-        .iter()
-        .map(|line| {
-            let line = if model.tab() == Tab::Log(Source::Jvm) && model.node.is_some() {
-                line.split_once(' ').map_or(*line, |(_, line)| line)
-            } else {
-                line
-            };
-            Line::raw(line)
-        })
-        .collect();
+    let visible: Vec<Line> =
+        lines[end.saturating_sub(usize::from(area.height))..end].iter().map(|line| Line::raw(*line)).collect();
     frame.render_widget(Paragraph::new(visible), area);
 }
 

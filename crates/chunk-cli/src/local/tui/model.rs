@@ -3,9 +3,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chunk_proto::sync::v1::Node;
+use chunk_proto::sync::v1::{Node, NodePhase, NodeSession};
 
-use super::super::report::{Deployment, Event, Source, Step};
+use super::super::{
+    logs,
+    report::{Deployment, Event, Source, Step},
+};
 
 mod players;
 
@@ -43,6 +46,18 @@ impl Tab {
 pub(super) enum Focus {
     Logs,
     Nodes,
+}
+
+/// Which JVM log scope is selected in the JVM tab.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum JvmSelection {
+    #[default]
+    All,
+    Node(String),
+    Session {
+        host: String,
+        session: String,
+    },
 }
 
 pub(super) struct Progress {
@@ -89,8 +104,8 @@ pub(super) struct Model {
     /// Lines scrolled up from the newest output of the visible log.
     pub scroll: usize,
     pub focus: Focus,
-    /// Full host identity; None selects the combined JVM output.
-    pub node: Option<String>,
+    /// Selected node or nested session; `All` selects the combined JVM output.
+    pub selection: JvmSelection,
     pub show_details: bool,
     /// Player ID the players tab has selected; the first match when absent or gone.
     pub player: Option<String>,
@@ -121,7 +136,7 @@ impl Model {
             selected: Source::Build.index(),
             scroll: 0,
             focus: Focus::Logs,
-            node: None,
+            selection: JvmSelection::All,
             show_details: false,
             player: None,
             filter: String::new(),
@@ -136,9 +151,18 @@ impl Model {
             Event::Log { source, line } => self.push(source, line),
             Event::Deployments(deployments) => {
                 self.deployments = deployments;
-                if self.node.is_some() && self.selected_node().is_none() {
-                    self.node = None;
-                    self.scroll = 0;
+                match &self.selection {
+                    JvmSelection::All => {}
+                    JvmSelection::Node(_) if self.selected_node().is_some() => {}
+                    JvmSelection::Session { .. } if self.selected_session().is_some() => {}
+                    JvmSelection::Session { host, .. } if self.find_node(host).is_some() => {
+                        self.selection = JvmSelection::Node(host.clone());
+                        self.scroll = 0;
+                    }
+                    JvmSelection::Node(_) | JvmSelection::Session { .. } => {
+                        self.selection = JvmSelection::All;
+                        self.scroll = 0;
+                    }
                 }
             }
         }
@@ -224,16 +248,31 @@ impl Model {
         }
     }
 
-    /// Selecting a node immediately previews its logs; row zero is all nodes.
+    /// Selecting a node or nested session immediately previews its logs; row zero is all nodes.
     pub fn move_node(&mut self, offset: isize) {
         if !self.on_jvm() {
             return;
         }
-        let hosts = self.hosts();
-        let selected = self.node.as_deref().and_then(|node| hosts.iter().position(|host| *host == node));
-        let row = selected.map_or(0, |index| index + 1).saturating_add_signed(offset).min(hosts.len());
-        self.node = row.checked_sub(1).map(|index| hosts[index].to_owned());
+        let entries = self.jvm_entries();
+        let current = entries.iter().position(|entry| entry == &self.selection).unwrap_or(0);
+        let next = current.saturating_add_signed(offset).min(entries.len().saturating_sub(1));
+        self.selection = entries[next].clone();
         self.scroll = 0;
+    }
+
+    pub fn jvm_entries(&self) -> Vec<JvmSelection> {
+        let mut entries = vec![JvmSelection::All];
+        for deployment in &self.deployments {
+            for (host, node) in &deployment.nodes {
+                entries.push(JvmSelection::Node(host.clone()));
+                if node.phase() != NodePhase::Stopped {
+                    for session in &node.sessions {
+                        entries.push(JvmSelection::Session { host: host.clone(), session: session.id.clone() });
+                    }
+                }
+            }
+        }
+        entries
     }
 
     pub fn open_node(&mut self) {
@@ -255,17 +294,41 @@ impl Model {
         self.deployments.iter().flat_map(|deployment| &deployment.nodes).map(|(host, _)| host.as_str()).collect()
     }
 
-    pub fn selected_node(&self) -> Option<(&Deployment, &(String, Node))> {
-        let host = self.node.as_deref()?;
+    fn find_node(&self, host: &str) -> Option<(&Deployment, &(String, Node))> {
         self.deployments
             .iter()
             .find_map(|deployment| deployment.nodes.iter().find(|(id, _)| id == host).map(|node| (deployment, node)))
+    }
+
+    pub fn selected_node(&self) -> Option<(&Deployment, &(String, Node))> {
+        let JvmSelection::Node(host) = &self.selection else { return None };
+        self.find_node(host)
+    }
+
+    pub fn selected_session(&self) -> Option<(&Deployment, &(String, Node), &NodeSession)> {
+        let JvmSelection::Session { host, session } = &self.selection else { return None };
+        let (deployment, node) = self.find_node(host)?;
+        if node.1.phase() == NodePhase::Stopped {
+            return None;
+        }
+        let open = node.1.sessions.iter().find(|candidate| candidate.id == *session)?;
+        Some((deployment, node, open))
+    }
+
+    pub fn sessions(&self) -> usize {
+        self.deployments
+            .iter()
+            .flat_map(|deployment| &deployment.nodes)
+            .filter(|(_, node)| node.phase() != NodePhase::Stopped)
+            .map(|(_, node)| node.sessions.len())
+            .sum()
     }
 
     pub fn players(&self) -> u32 {
         self.deployments
             .iter()
             .flat_map(|deployment| &deployment.nodes)
+            .filter(|(_, node)| node.phase() != NodePhase::Stopped)
             .filter_map(|(_, node)| node.health.as_ref())
             .map(|health| health.players)
             .sum()
@@ -285,10 +348,19 @@ impl Model {
     }
 
     fn shows(&self, line: &str) -> bool {
-        !self.on_jvm()
-            || self.node.as_ref().is_none_or(|host| {
-                line.strip_prefix(&host[..host.len().min(8)]).is_some_and(|rest| rest.starts_with(' '))
-            })
+        if !self.on_jvm() {
+            return true;
+        }
+        match &self.selection {
+            JvmSelection::All => true,
+            // Node views keep untagged JVM-wide lines (startup, GC) alongside every session on that host.
+            JvmSelection::Node(host) => logs::parse_jvm_line(line).host == &host[..host.len().min(8)],
+            // Session views show only lines tagged with that session; untagged JVM lines stay at the node level.
+            JvmSelection::Session { host, session } => {
+                let parsed = logs::parse_jvm_line(line);
+                parsed.host == &host[..host.len().min(8)] && parsed.session == Some(session.as_str())
+            }
+        }
     }
 }
 

@@ -48,6 +48,7 @@ public final class ChunkProcess implements AutoCloseable {
     }
 
     public static ChunkProcess connect() {
+        SessionLogging.install();
         return new ChunkProcess(RuntimeEnvironment.load());
     }
 
