@@ -4,6 +4,7 @@ use crate::{
     Cancellation, Error, Execution, Json, Limits, Write,
     capabilities::{Capabilities, chunk_capabilities},
     deadline::Deadline,
+    exception::Reported,
     model::bounds,
     termination::{Reason, Termination},
 };
@@ -58,11 +59,11 @@ impl State {
         self.runtime.op_state().borrow_mut().put(action);
         self.runtime.op_state().borrow_mut().put(crate::actions::Env(env));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
-            let result = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str(), json_bytes));
+            let output = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str(), json_bytes))?;
             if !is_action {
                 executor.block_on(engine.drain())?;
             }
-            result
+            Ok(output)
         });
         let logs = crate::profile::end(&mut self.runtime);
         let capabilities = self.runtime.op_state().borrow_mut().borrow_mut::<Option<Capabilities>>().take();
@@ -82,6 +83,7 @@ impl State {
         let mut extensions = crate::extensions::web();
         extensions.extend([
             chunk_capabilities::init(),
+            crate::exception::chunk_exceptions::init(),
             crate::profile::chunk_profile::init(),
             crate::actions::chunk_actions::init(),
             crate::jobs::chunk_scheduler::init(),
@@ -110,12 +112,14 @@ impl State {
         runtime.op_state().borrow_mut().put(None::<Capabilities>);
         runtime.op_state().borrow_mut().put(None::<crate::actions::ActionCapabilities>);
         runtime.op_state().borrow_mut().put(crate::actions::Env(Json::empty()));
+        runtime.op_state().borrow_mut().put(Reported::default());
         crate::profile::initialize(&mut runtime);
+        crate::isolate::prepare_interrupts(&mut runtime);
         let heap_signal = termination.clone();
         let handle = runtime.v8_isolate().thread_safe_handle();
         runtime.add_near_heap_limit_callback(move |limit, _| {
             heap_signal.record(Reason::Heap);
-            handle.terminate_execution();
+            crate::isolate::interrupt(&handle);
             limit + bounds::EMERGENCY_HEAP_BYTES
         });
         Self { run: None, namespace: None, runtime, termination, calls: 0 }
@@ -140,11 +144,17 @@ impl State {
         cancellation: &Cancellation,
         run: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        self.runtime.op_state().borrow_mut().put(Reported::default());
         let handle = self.runtime.v8_isolate().thread_safe_handle();
         let guard = deadline.arm(handle, cancellation.clone(), limits.execution, self.termination.clone());
         let result = run(self);
         drop(guard);
-        self.termination.take().map_or(result, Err)
+        let reported = self.runtime.op_state().borrow_mut().borrow_mut::<Reported>().0.take();
+        match (self.termination.take(), reported) {
+            (Some(error), _) => Err(error),
+            (None, Some(message)) => Err(Error::JavaScript(message)),
+            (None, None) => result,
+        }
     }
 
     async fn initialize(&mut self, specifier: &str, source: &str) -> Result<(), Error> {

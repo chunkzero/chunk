@@ -58,16 +58,16 @@ impl Deadline {
                 // Hold the lock through termination so disarming cannot race with
                 // a stale timeout that interrupts the next call or recycled isolate.
                 let active = watch.active.lock().unwrap();
-                if let Some(active) = active.as_ref()
-                    && (active.cancellation.is_cancelled() || watch.now() >= watch.at.load(Ordering::Acquire))
-                {
-                    active.termination.record(if active.cancellation.is_cancelled() {
-                        Reason::Cancelled
-                    } else {
-                        Reason::Deadline
-                    });
-                    active.handle.terminate_execution();
-                    watch.at.store(0, Ordering::Release);
+                let Some(active) = active.as_ref() else { continue };
+                if active.cancellation.is_cancelled() {
+                    active.termination.record(Reason::Cancelled);
+                } else if watch.now() >= watch.at.load(Ordering::Acquire) {
+                    active.termination.record(Reason::Deadline);
+                }
+                // deno_core cancels termination while it converts an exception, and may
+                // run JavaScript afterwards, so a terminated run is interrupted until it ends.
+                if active.termination.is_recorded() {
+                    crate::isolate::interrupt(&active.handle);
                 }
             }
         })?;

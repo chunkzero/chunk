@@ -1,10 +1,41 @@
 #![allow(unsafe_code)]
 
+use deno_core::v8;
+
 use crate::{
     Cancellation, Error, Execution, Limits,
     deadline::Deadline,
     runtime::{Prepared, State},
 };
+
+struct MainContext(v8::Global<v8::Context>);
+
+/// Lets [`interrupt`] enter the runtime's context.
+pub(crate) fn prepare_interrupts(runtime: &mut deno_core::JsRuntime) {
+    let context = runtime.main_context();
+    runtime.v8_isolate().set_slot(MainContext(context));
+}
+
+/// Ends the isolate's JavaScript from any thread. Dispatching `undefined` before terminating
+/// keeps `deno_core`, which converts the dispatched exception, from building its own error,
+/// whose prototype application code controls.
+pub(crate) fn interrupt(handle: &v8::IsolateHandle) {
+    handle.request_interrupt(dispatch, std::ptr::null_mut());
+}
+
+extern "C" fn dispatch(mut isolate: v8::UnsafeRawIsolatePtr, _: *mut std::ffi::c_void) {
+    // SAFETY: V8 runs interrupts on the isolate's thread while it executes JavaScript,
+    // like a function callback.
+    let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut isolate) };
+    let Some(MainContext(context)) = isolate.get_slot::<MainContext>() else { return };
+    let context = context.clone();
+    v8::callback_scope!(unsafe scope, isolate);
+    v8::scope!(let scope, scope);
+    let context = v8::Local::new(scope, context);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let undefined = v8::undefined(scope);
+    deno_core::error::dispatch_exception(scope, undefined.into(), false);
+}
 
 /// A runtime is exited while parked. All access and destruction enter it on its
 /// owning thread. State (and therefore this wrapper) is neither Send nor Sync.

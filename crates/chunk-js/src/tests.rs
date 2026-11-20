@@ -593,3 +593,59 @@ fn imports_at_runtime_reject_without_aborting() {
     ";
     assert!(matches!(Deployment::new("build-a".into(), source.into(), Limits::default()), Err(Error::JavaScript(_))));
 }
+
+#[test]
+fn thrown_values_cannot_abort_or_stall_error_reporting() {
+    let limits = Limits { execution: Duration::from_millis(200), ..Limits::default() };
+    let values = [
+        "Object.assign(new Error('keys'), { [Symbol.for('errorAdditionalPropertyKeys')]: new Array(2 ** 32 - 1) })",
+        "Object.defineProperty(new Error('stalled'), 'message', { get() { for (;;); } })",
+        "new Proxy({}, { get() { for (;;); } })",
+    ];
+    for thrown in values {
+        for failure in [
+            format!("throw {thrown};"),
+            format!("queueMicrotask(() => {{ throw {thrown}; }});"),
+            format!("Promise.reject({thrown});"),
+        ] {
+            let mut engine = deployment(&format!("if (args.fail) {{ {failure} await 0; }} return 42;"), limits);
+            let mut fail = invocation();
+            fail.arguments = json!({"fail": true}).into();
+            let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
+            assert!(matches!(result, Err(Error::JavaScript(_))), "{failure}: {result:?}");
+            assert_eq!(value(&call(&mut engine).unwrap()), json!(42), "{failure}");
+            let source = format!("{failure} export default () => 1;");
+            let result = Deployment::new("build-a".into(), source, limits).map(|_| ());
+            assert!(matches!(result, Err(Error::JavaScript(_))), "top-level {failure}: {result:?}");
+        }
+    }
+    let Err(Error::JavaScript(thrown)) = run(&format!("throw {};", values[0])) else {
+        panic!("expected a JavaScript error");
+    };
+    assert!(thrown.starts_with("Error: keys\n    at default (chunk:deployment/build-a:1:"), "{thrown}");
+}
+
+#[test]
+fn termination_survives_error_prototypes_that_poison_conversion() {
+    let poison = r"
+        const keys = Symbol.for('errorAdditionalPropertyKeys');
+        Error.prototype[keys] = new Array(2 ** 32 - 1);
+        Error.prototype.cause = Object.assign(new Error('cause'), { [keys]: new Array(2 ** 32 - 1) });
+        Object.defineProperty(Error.prototype, 'name', { get() { for (;;); } });
+    ";
+    let time = Limits { execution: Duration::from_millis(200), ..Limits::default() };
+    let heap = Limits { execution: Duration::from_secs(5), heap_bytes: 16 * 1024 * 1024 };
+    for (body, limits, expected) in [
+        ("for (;;);", time, Error::Deadline),
+        ("for (;;) await 0;", time, Error::Deadline),
+        ("const a = []; for (;;) a.push(new Array(10000).fill('x'));", heap, Error::Heap),
+    ] {
+        let kind = |result: Result<(), Error>| std::mem::discriminant(&result.unwrap_err());
+        let expected = std::mem::discriminant(&expected);
+        let result = call(&mut deployment(&format!("{poison} {body}"), limits)).map(|_| ());
+        assert_eq!(kind(result), expected, "{body}");
+        let source = format!("{poison} {body} export default () => 1;");
+        let result = Deployment::new("build-a".into(), source, limits).map(|_| ());
+        assert_eq!(kind(result), expected, "top-level {body}");
+    }
+}

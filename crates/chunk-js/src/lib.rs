@@ -7,6 +7,7 @@ mod allocator;
 mod capabilities;
 mod deadline;
 mod engine;
+mod exception;
 mod extensions;
 mod http;
 mod isolate;
