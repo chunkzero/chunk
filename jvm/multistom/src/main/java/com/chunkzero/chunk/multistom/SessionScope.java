@@ -68,7 +68,6 @@ public final class SessionScope {
     private final Map<Class<?>, AutoCloseable> sharedResources = new HashMap<>();
     private final Set<Player> players = ConcurrentHashMap.newKeySet();
     private final EventNode<Event> events;
-    private final EventNode<Event> dispatch;
     private final Scheduler scheduler;
     private final List<Task> drivers;
     private boolean disposed;
@@ -95,12 +94,7 @@ public final class SessionScope {
         this.requestFinish = requestFinish;
         this.backend = backend;
         this.components = components;
-        events = EventNode.all("session-" + id);
-        // Minestom runs a node's listeners in one dispatch callers can't wrap, so this parent's
-        // predicate dispatches the session's events itself, with the session bound for logging.
-        // It exists for the event types the session listens to, and lets nothing else run.
-        dispatch = EventNode.event("session-dispatch-" + id, EventFilter.ALL, this::dispatch);
-        dispatch.addChild(events);
+        events = EventNode.event("session-" + id, EventFilter.ALL, this::admit);
         try {
             var schedulers = process.schedulerManager();
             scheduler = schedulers.createScheduler();
@@ -116,7 +110,7 @@ public final class SessionScope {
                                     .repeat(TaskSchedule.nextTick())
                                     .executionType(ExecutionType.TICK_END)
                                     .schedule());
-            process.eventHandler().addChild(dispatch);
+            process.eventHandler().addChild(events);
         } catch (RuntimeException | Error failure) {
             if (backend != null) backend.close();
             throw failure;
@@ -331,7 +325,7 @@ public final class SessionScope {
                         () -> closeAll(resources.reversed()),
                         this::unregisterInstances,
                         () -> process.eventHandler().call(new SessionDestroyEvent(this)),
-                        () -> process.eventHandler().removeChild(dispatch)));
+                        () -> process.eventHandler().removeChild(events)));
     }
 
     private void unregisterInstances() throws Exception {
@@ -344,12 +338,17 @@ public final class SessionScope {
                         .toList());
     }
 
-    private boolean dispatch(Event event) {
-        if (owns(event)) {
-            @SuppressWarnings("unchecked")
-            var handle = (ListenerHandle<Event>) events.getHandle(event.getClass());
-            SessionLogging.run(id, () -> handle.call(process, event));
-        }
+    /**
+     * Minestom runs a node's listeners in one dispatch callers can't wrap, so an event this session
+     * owns that arrives unbound is dispatched again with the session bound, and the unbound pass
+     * runs nothing. The bound pass finds the session bound and runs the listeners.
+     */
+    private boolean admit(Event event) {
+        if (!owns(event)) return false;
+        if (id.equals(SessionLogging.current())) return true;
+        @SuppressWarnings("unchecked")
+        var handle = (ListenerHandle<Event>) events.getHandle(event.getClass());
+        SessionLogging.run(id, () -> handle.call(process, event));
         return false;
     }
 

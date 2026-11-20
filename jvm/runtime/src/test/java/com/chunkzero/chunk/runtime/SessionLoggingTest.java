@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.CountDownLatch;
 
 class SessionLoggingTest {
     @Test
@@ -47,6 +48,54 @@ class SessionLoggingTest {
                         "[session:sess-1] back to outer",
                         "gc message"),
                 lines);
+    }
+
+    @Test
+    void concurrentLinesOnBothStreamsKeepTheirOwnTagAndBody() throws Exception {
+        var raw = new ByteArrayOutputStream();
+        var out = SessionLogging.wrap(new PrintStream(raw, true, StandardCharsets.UTF_8));
+        var err = SessionLogging.wrap(new PrintStream(raw, true, StandardCharsets.UTF_8));
+        var start = new CountDownLatch(1);
+        var threads =
+                List.of(writer("A", out, start), writer("B", err, start), writer("C", out, start));
+        threads.forEach(Thread::start);
+        start.countDown();
+        for (var thread : threads) thread.join();
+
+        var lines = raw.toString(StandardCharsets.UTF_8).lines().toList();
+        assertEquals(3 * 2000, lines.size());
+        for (var line : lines) {
+            assertTrue(line.matches("\\[session:(.)\\] \\1 line \\d+"), line);
+        }
+    }
+
+    @Test
+    void encodesInUtf8WhateverTheTargetsCharset() {
+        var raw = new ByteArrayOutputStream();
+        var stream = SessionLogging.wrap(new PrintStream(raw, true, StandardCharsets.UTF_16));
+
+        SessionLogging.run("s", () -> stream.println("héllo ✓"));
+        stream.println("plain ✓");
+
+        assertEquals("[session:s] héllo ✓\nplain ✓\n", raw.toString(StandardCharsets.UTF_8));
+    }
+
+    private static Thread writer(String session, PrintStream stream, CountDownLatch start) {
+        return new Thread(
+                () -> {
+                    try {
+                        start.await();
+                    } catch (InterruptedException interrupted) {
+                        return;
+                    }
+                    SessionLogging.run(
+                            session,
+                            () -> {
+                                for (var i = 0; i < 2000; i++) {
+                                    stream.println(session + " line " + i);
+                                }
+                            });
+                });
     }
 
     @Test

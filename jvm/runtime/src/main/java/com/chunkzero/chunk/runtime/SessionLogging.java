@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.function.Supplier;
 import java.util.logging.ConsoleHandler;
 import java.util.logging.Logger;
@@ -85,48 +86,94 @@ public final class SessionLogging {
 
     private static final class Tagging extends PrintStream {
         Tagging(PrintStream target) {
-            super(new TaggingStream(target), true, target.charset());
+            // No autoflush: PrintStream would flush between the body and the newline of a println.
+            super(new TaggingStream(target), false, StandardCharsets.UTF_8);
         }
     }
 
-    /** Writes through to its target, inserting the bound session's tag at each line start. */
+    /**
+     * Holds each thread's output until its line is complete, then writes the line, tagged with the
+     * session bound when it started, to the target in one write. All wrappers write under one lock,
+     * so lines from different threads and streams never interleave. A line longer than {@link
+     * #LINE_LIMIT} is written in pieces; only the first carries the tag. The target receives UTF-8
+     * whatever its own charset. A thread's unflushed partial line is lost when the thread ends.
+     */
     private static final class TaggingStream extends OutputStream {
+        private static final int LINE_LIMIT = 8192;
+        private static final Object LOCK = new Object();
+
         private final OutputStream target;
-        private boolean lineStart = true;
+        private final ThreadLocal<Line> lines = ThreadLocal.withInitial(Line::new);
 
         TaggingStream(OutputStream target) {
             this.target = target;
         }
 
         @Override
-        public synchronized void write(int b) throws IOException {
+        public void write(int b) throws IOException {
             write(new byte[] {(byte) b}, 0, 1);
         }
 
         @Override
-        public synchronized void write(byte[] bytes, int offset, int length) throws IOException {
-            var session = CURRENT.get();
-            if (session == null) {
-                target.write(bytes, offset, length);
-                if (length > 0) lineStart = bytes[offset + length - 1] == '\n';
-                return;
-            }
-            var tag = ("[session:" + session + "] ").getBytes(StandardCharsets.UTF_8);
+        public void write(byte[] bytes, int offset, int length) throws IOException {
+            var line = lines.get();
             var end = offset + length;
             while (offset < end) {
-                if (lineStart) target.write(tag);
+                if (line.isStart()) line.session = CURRENT.get();
                 var newline = offset;
                 while (newline < end && bytes[newline] != '\n') newline++;
                 var stop = Math.min(newline + 1, end);
-                target.write(bytes, offset, stop - offset);
-                lineStart = newline < end;
+                line.append(bytes, offset, stop - offset);
                 offset = stop;
+                if (newline < end) emit(line, true);
+                else if (line.size >= LINE_LIMIT) emit(line, false);
             }
         }
 
         @Override
-        public synchronized void flush() throws IOException {
-            target.flush();
+        public void flush() throws IOException {
+            var line = lines.get();
+            if (line.size > 0) emit(line, false);
+            synchronized (LOCK) {
+                target.flush();
+            }
+        }
+
+        private void emit(Line line, boolean complete) throws IOException {
+            var session = line.continued ? null : line.session;
+            var tag =
+                    session == null
+                            ? new byte[0]
+                            : ("[session:" + session + "] ").getBytes(StandardCharsets.UTF_8);
+            var output = new byte[tag.length + line.size];
+            System.arraycopy(tag, 0, output, 0, tag.length);
+            System.arraycopy(line.bytes, 0, output, tag.length, line.size);
+            line.size = 0;
+            line.continued = !complete;
+            synchronized (LOCK) {
+                target.write(output, 0, output.length);
+                target.flush();
+            }
+        }
+    }
+
+    /** One thread's pending output on one stream. */
+    private static final class Line {
+        byte[] bytes = new byte[256];
+        int size;
+        @Nullable String session;
+        boolean continued;
+
+        boolean isStart() {
+            return size == 0 && !continued;
+        }
+
+        void append(byte[] source, int offset, int length) {
+            if (size + length > bytes.length) {
+                bytes = Arrays.copyOf(bytes, Math.max(bytes.length * 2, size + length));
+            }
+            System.arraycopy(source, offset, bytes, size, length);
+            size += length;
         }
     }
 }
