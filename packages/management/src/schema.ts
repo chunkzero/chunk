@@ -141,6 +141,8 @@ export const environments = pgTable(
     owner_since: time(),
     // The latest accepted status report under the current lease.
     gateway_addresses: text().array().notNull().default([]),
+    /** The deployments resident in core's backend, loading or not, as that report said. */
+    resident_deployment_ids: text().array().notNull().default([]),
     pings: jsonb<Record<string, string>>()
       .notNull()
       .default(sql`'{}'::jsonb`),
@@ -290,8 +292,6 @@ export const deployments = pgTable(
     /** Stop the deployments this one replaces at once instead of draining them. */
     stop_previous: boolean().notNull().default(false),
     asset_revision_id: text().notNull(),
-    /** When a superseded deployment stops draining: its environment's drain deadline after it was superseded. */
-    drain_until: time(),
   },
   (t) => [index("deployments_environment").on(t.environment_id, t.seq)],
 );

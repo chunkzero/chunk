@@ -1,0 +1,1 @@
+ALTER TABLE "environments" ADD COLUMN "resident_deployment_ids" text[] DEFAULT '{}' NOT NULL;

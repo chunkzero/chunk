@@ -115,6 +115,7 @@ export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetServic
         const blobs = revisionBlobs(revision);
         const held = await storedBlobs(tx, project.id, [...blobs.keys()]);
         const missing: string[] = [];
+        const verified = new Map<string, { size_bytes: bigint; sha1: string }>();
         const unverified = [...blobs].filter(([sha256]) => !held.has(sha256));
         await eachLimited(unverified, verifyConcurrency, async ([sha256, { size }]) => {
           const sizeBytes = BigInt(size);
@@ -127,10 +128,7 @@ export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetServic
             missing.push(sha256);
             return;
           }
-          await tx
-            .insert(assetBlobs)
-            .values({ project_id: project.id, sha256, size_bytes: sizeBytes, sha1 })
-            .onConflictDoNothing();
+          verified.set(sha256, { size_bytes: sizeBytes, sha1 });
           held.set(sha256, { size_bytes: sizeBytes, sha1 });
         });
         if (missing.length > 0) {
@@ -147,6 +145,17 @@ export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetServic
           if (held.get(pack.sha256)?.sha1 !== pack.sha1) {
             throw failedPrecondition(`pack ${name}'s SHA-1 does not match its bytes`);
           }
+        }
+        // One insert in digest order, so concurrent completions that share blobs take their row locks in the same order.
+        if (verified.size > 0) {
+          await tx
+            .insert(assetBlobs)
+            .values(
+              [...verified]
+                .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+                .map(([sha256, blob]) => ({ project_id: project.id, sha256, ...blob })),
+            )
+            .onConflictDoNothing();
         }
         if (row.state === AssetRevisionState.READY) return { revision: toAssetRevision(row) };
         const [ready] = await tx

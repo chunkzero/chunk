@@ -2,12 +2,14 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { Code } from "@connectrpc/connect";
 
-import { collectAssets, keptRecentRevisions } from "../src/assets/retention.ts";
+import { collectAssets, keptRecentDeployments, keptRecentRevisions } from "../src/assets/retention.ts";
 import { decodeRevision, sha256Hex } from "../src/assets/revision.ts";
 import { issueEnvironmentToken } from "../src/auth/tokens.ts";
 import { desiredState } from "../src/environments/desired.ts";
 import { AssetRevisionState, AssetService } from "../src/gen/chunk/management/v1/assets_pb.ts";
+import { DeploymentState } from "../src/gen/chunk/management/v1/common_pb.ts";
 import { DeploymentService } from "../src/gen/chunk/management/v1/deployments_pb.ts";
+import { EnvironmentService } from "../src/gen/chunk/management/v1/environment_pb.ts";
 import { ProjectService } from "../src/gen/chunk/management/v1/projects_pb.ts";
 import { blobKey } from "../src/releases/store.ts";
 import { assetRevision } from "./fixtures.ts";
@@ -218,37 +220,104 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
     });
   });
 
-  test("a deployment keeps its revision while it drains, and not past its environment's drain deadline", async () => {
+  /**
+   * An environment whose project holds an old revision, `old`, and enough newer ones and unfinished deployments that
+   * neither the recent-revision nor the recent-deployment rule keeps anything of `old`, with a core attached to it.
+   */
+  async function aged() {
     const { projectId, environmentId } = await createEnvironment(h);
     const deploy = h.client(DeploymentService);
     await uploadRelease(h, projectId, "r1");
-    const draining = assetRevision({ shared: { "f.txt": "draining" } });
-    await uploadAssets(h, projectId, draining);
+    const [first, second] = [
+      assetRevision({ shared: { "f.txt": "first" } }),
+      assetRevision({ shared: { "f.txt": "second" } }),
+    ];
+    for (const revision of [first, second]) await uploadAssets(h, projectId, revision);
     const fillers = Array.from({ length: keptRecentRevisions + 1 }, (_, i) =>
       assetRevision({ shared: { "f.txt": `filler${i}` } }),
     );
     for (const filler of fillers) await uploadAssets(h, projectId, filler);
-    const pin = (assetRevisionId: string) =>
-      deploy.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId: "r1", assetRevisionId });
-    await pin(draining.id);
-    for (let i = 0; i < 11; i++) await pin(fillers[0]?.id ?? "");
-    await h.sql`update asset_revisions set protected_until = now() - interval '1 minute' where project_id = ${projectId}`;
-    await h.sql`update projects set asset_head_id = ${fillers[1]?.id ?? ""} where id = ${projectId}`;
-    const stored = async () =>
-      (await h.sql<{ id: string }[]>`select id from asset_revisions where project_id = ${projectId}`).some(
-        (row) => row.id === draining.id,
-      );
+    await h.sql`update projects set asset_head_id = ${fillers[0]?.id ?? ""} where id = ${projectId}`;
+    const pin = async (assetRevisionId: string) =>
+      (await deploy.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId: "r1", assetRevisionId }))
+        .deployment?.id ?? "";
+    const client = h.client(EnvironmentService, await issueEnvironmentToken(h.db, environmentId));
+    const abort = new AbortController();
+    const stream = client.attach({ instanceId: crypto.randomUUID(), core: true, epoch: 1n }, { signal: abort.signal });
+    const { lease, revision } = (await stream[Symbol.asyncIterator]().next()).value;
+    let sequence = 0n;
+    return {
+      projectId,
+      first,
+      second,
+      fillers,
+      pin,
+      /** Pins `fillers[0]` enough times that the deployments before them are none of the newest. */
+      bury: async () => {
+        for (let i = 0; i < keptRecentDeployments + 1; i++) await pin(fillers[0]?.id ?? "");
+        await h.sql`update asset_revisions set protected_until = now() - interval '1 minute' where project_id = ${projectId}`;
+      },
+      report: (resident: string[], deployment?: { deploymentId: string; state: DeploymentState }) =>
+        client.reportStatus({
+          lease,
+          sequence: ++sequence,
+          desiredRevision: revision,
+          residentDeploymentIds: resident,
+          ...(deployment ? { deployment } : {}),
+        }),
+      /** A report sent now whose arrival is delayed until the returned function is called. */
+      delayed: (resident: string[], deployment: { deploymentId: string; state: DeploymentState }) => {
+        const delayedSequence = ++sequence;
+        return () =>
+          client.reportStatus({
+            lease,
+            sequence: delayedSequence,
+            desiredRevision: revision,
+            residentDeploymentIds: resident,
+            deployment,
+          });
+      },
+      stored: async (id: string) =>
+        (await h.sql<{ id: string }[]>`select id from asset_revisions where project_id = ${projectId} and id = ${id}`)
+          .length > 0,
+      close: () => abort.abort(),
+    };
+  }
 
-    await collectAssets(h.deps, projectId);
-    expect(await stored()).toBe(true);
-    // Shortening the deadline doesn't release what the deployment's own deadline, set when it was superseded, keeps.
-    await h.sql`update environments set drain_max_age_seconds = 60, drain_deadline_seconds = 60 where id = ${environmentId}`;
-    await h.sql`update deployments set update_time = now() - interval '5 hours' where asset_revision_id = ${draining.id}`;
-    await collectAssets(h.deps, projectId);
-    expect(await stored()).toBe(true);
-    await h.sql`update deployments set drain_until = now() - interval '1 minute' where asset_revision_id = ${draining.id}`;
-    await collectAssets(h.deps, projectId);
-    expect(await stored()).toBe(false);
+  test("a deployment core activated, whose report is delayed past newer deployments, activates with its revision present", async () => {
+    const env = await aged();
+    const active = await env.pin(env.first.id);
+    await env.report([active], { deploymentId: active, state: DeploymentState.ACTIVE });
+    const activated = await env.pin(env.second.id);
+    const lateReport = env.delayed([active, activated], { deploymentId: activated, state: DeploymentState.ACTIVE });
+    await env.bury();
+
+    await collectAssets(h.deps, env.projectId);
+    expect(await env.stored(env.second.id)).toBe(true);
+
+    await lateReport();
+    const { deployment } = await h.client(DeploymentService).getDeployment({ deploymentId: activated });
+    expect(deployment?.state).toBe(DeploymentState.ACTIVE);
+    expect(await env.stored(deployment?.assetRevisionId ?? "")).toBe(true);
+    env.close();
+  });
+
+  test("a superseded deployment in core's reported resident set keeps its revision until a report omits it", async () => {
+    const env = await aged();
+    const old = await env.pin(env.first.id);
+    await env.report([old], { deploymentId: old, state: DeploymentState.ACTIVE });
+    const current = await env.pin(env.second.id);
+    await env.report([old, current], { deploymentId: current, state: DeploymentState.ACTIVE });
+    await env.bury();
+
+    await collectAssets(h.deps, env.projectId);
+    expect(await env.stored(env.first.id)).toBe(true);
+
+    await env.report([current]);
+    await collectAssets(h.deps, env.projectId);
+    expect(await env.stored(env.first.id)).toBe(false);
+    expect(await env.stored(env.second.id)).toBe(true);
+    env.close();
   });
 
   test("a completion paused after verifying its blobs holds off collection, so the revision does not become ready without them", async () => {

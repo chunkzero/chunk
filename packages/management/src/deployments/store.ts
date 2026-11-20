@@ -69,13 +69,8 @@ export function requireJvmImage(manifest: ReleaseManifest, template: string | un
 
 const unfinished = [DeploymentState.PENDING, DeploymentState.IN_PROGRESS];
 
-/** The values a deployment takes when superseded; its environment's drain deadline, as of now, bounds its draining. */
-const superseded = {
-  state: DeploymentState.SUPERSEDED,
-  update_time: sql`now()`,
-  drain_until: sql`now() + make_interval(secs => (
-    select e.drain_deadline_seconds from environments e where e.id = ${deployments.environment_id}))`,
-};
+/** The values a deployment takes when superseded. */
+const superseded = { state: DeploymentState.SUPERSEDED, update_time: sql`now()` };
 
 /** What a deployment pins: a release and an asset revision of one project. */
 export interface Deployable {
@@ -178,8 +173,18 @@ export async function deployRestored(
 /**
  * Records that the environment serves a deployment, superseding the one it replaced. A superseded deployment the
  * environment activated anyway counts when it is newer than the active one; newer unfinished deployments stay desired.
+ * Holds the project's shared asset lock until `db`'s transaction ends.
  */
 export async function activateDeployment(db: Db, id: string): Promise<void> {
+  // Shared with uploads and createDeployment, so a collection never interleaves with the activation of a deployment
+  // whose revision it may delete.
+  const [owner] = await db
+    .select({ project_id: environments.project_id })
+    .from(deployments)
+    .innerJoin(environments, eq(environments.id, deployments.environment_id))
+    .where(eq(deployments.id, id));
+  if (!owner) return;
+  await lockAssets(db, owner.project_id, "shared");
   const [row] = await fetchRows<{ environment_id: string }>(
     db,
     sql`

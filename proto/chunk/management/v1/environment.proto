@@ -218,6 +218,12 @@ message ReportStatusRequest {
   // so a report carries every login since the last one, even players who have
   // already left. The management plane refunds pending login wakes from it.
   uint64 logins = 10;
+  // The IDs of every deployment resident in core's backend, including one that
+  // is loading. The management plane keeps the asset revisions of these
+  // deployments, which core's JVMs may still read, whatever their state there.
+  // It stores the set of the latest accepted report, so each report carries the
+  // whole set.
+  repeated string resident_deployment_ids = 11;
 }
 
 message PingStatus {

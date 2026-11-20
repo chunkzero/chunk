@@ -693,6 +693,7 @@ impl<'a> Managed<'a> {
             logins: self.logins(),
             ready_to_suspend: false,
             pings: self.pings(),
+            resident_deployments: self.reporter.resident(None),
         }
     }
 
@@ -701,7 +702,8 @@ impl<'a> Managed<'a> {
             let gateway = self.gateway.get()?;
             self.private_address.gateway(gateway.address()).await
         };
-        let (address, ready_to_suspend) = tokio::join!(address, self.ready_to_suspend(revision));
+        let (address, ready_to_suspend, resident) =
+            tokio::join!(address, self.ready_to_suspend(revision), self.resident_deployments());
         let gateway_addresses = address.as_ref().map(SocketAddr::to_string).into_iter().collect();
         let online_players = self.online_players().unwrap_or_else(|error| {
             tracing::warn!(%error, "online players unknown");
@@ -715,7 +717,17 @@ impl<'a> Managed<'a> {
             logins: self.logins(),
             ready_to_suspend,
             pings: self.pings(),
+            resident_deployments: self.reporter.resident(resident),
         }
+    }
+
+    /// The deployments resident in the backend and the one loading, unless the backend can't be read within
+    /// [`READ_WAIT`]. The loading one is read first, so one that becomes resident meanwhile is counted either way.
+    async fn resident_deployments(&self) -> Option<Vec<String>> {
+        let loading = lock(&self.deployments).loading.clone();
+        let resident = read_within(self.core.backend()?.deployments()).await?;
+        let ids: BTreeSet<String> = resident.iter().map(|id| id.as_str().to_owned()).chain(loading).collect();
+        Some(ids.into_iter().collect())
     }
 
     fn online_players(&self) -> io::Result<u32> {

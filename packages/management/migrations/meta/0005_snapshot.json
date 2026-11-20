@@ -1,5 +1,5 @@
 {
-  "id": "60010118-6540-48a6-a4c3-05428489739b",
+  "id": "bf9cf375-edd0-4e43-a3e0-abd64104c853",
   "prevId": "36c1afcc-4b11-42d9-898f-63e998d7b7dc",
   "version": "7",
   "dialect": "postgresql",
@@ -128,12 +128,8 @@
           "name": "api_tokens_project_id_projects_id_fk",
           "tableFrom": "api_tokens",
           "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["project_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -141,12 +137,8 @@
           "name": "api_tokens_environment_id_environments_id_fk",
           "tableFrom": "api_tokens",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -156,16 +148,12 @@
         "api_tokens_seq_unique": {
           "name": "api_tokens_seq_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "seq"
-          ]
+          "columns": ["seq"]
         },
         "api_tokens_secret_hash_unique": {
           "name": "api_tokens_secret_hash_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "secret_hash"
-          ]
+          "columns": ["secret_hash"]
         }
       },
       "policies": {},
@@ -214,12 +202,8 @@
           "name": "asset_blobs_project_id_projects_id_fk",
           "tableFrom": "asset_blobs",
           "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["project_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -227,10 +211,7 @@
       "compositePrimaryKeys": {
         "asset_blobs_project_id_sha256_pk": {
           "name": "asset_blobs_project_id_sha256_pk",
-          "columns": [
-            "project_id",
-            "sha256"
-          ]
+          "columns": ["project_id", "sha256"]
         }
       },
       "uniqueConstraints": {},
@@ -268,12 +249,8 @@
           "name": "asset_deletions_project_id_projects_id_fk",
           "tableFrom": "asset_deletions",
           "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["project_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -281,10 +258,7 @@
       "compositePrimaryKeys": {
         "asset_deletions_project_id_sha256_pk": {
           "name": "asset_deletions_project_id_sha256_pk",
-          "columns": [
-            "project_id",
-            "sha256"
-          ]
+          "columns": ["project_id", "sha256"]
         }
       },
       "uniqueConstraints": {},
@@ -327,14 +301,8 @@
           "name": "asset_revision_blobs_project_id_revision_id_asset_revisions_project_id_id_fk",
           "tableFrom": "asset_revision_blobs",
           "tableTo": "asset_revisions",
-          "columnsFrom": [
-            "project_id",
-            "revision_id"
-          ],
-          "columnsTo": [
-            "project_id",
-            "id"
-          ],
+          "columnsFrom": ["project_id", "revision_id"],
+          "columnsTo": ["project_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -342,11 +310,7 @@
       "compositePrimaryKeys": {
         "asset_revision_blobs_project_id_revision_id_sha256_pk": {
           "name": "asset_revision_blobs_project_id_revision_id_sha256_pk",
-          "columns": [
-            "project_id",
-            "revision_id",
-            "sha256"
-          ]
+          "columns": ["project_id", "revision_id", "sha256"]
         }
       },
       "uniqueConstraints": {},
@@ -437,12 +401,8 @@
           "name": "asset_revisions_project_id_projects_id_fk",
           "tableFrom": "asset_revisions",
           "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["project_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -450,19 +410,14 @@
       "compositePrimaryKeys": {
         "asset_revisions_project_id_id_pk": {
           "name": "asset_revisions_project_id_id_pk",
-          "columns": [
-            "project_id",
-            "id"
-          ]
+          "columns": ["project_id", "id"]
         }
       },
       "uniqueConstraints": {
         "asset_revisions_seq_unique": {
           "name": "asset_revisions_seq_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "seq"
-          ]
+          "columns": ["seq"]
         }
       },
       "policies": {},
@@ -498,12 +453,8 @@
           "name": "blocked_addresses_environment_id_environments_id_fk",
           "tableFrom": "blocked_addresses",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -511,10 +462,7 @@
       "compositePrimaryKeys": {
         "blocked_addresses_environment_id_address_pk": {
           "name": "blocked_addresses_environment_id_address_pk",
-          "columns": [
-            "environment_id",
-            "address"
-          ]
+          "columns": ["environment_id", "address"]
         }
       },
       "uniqueConstraints": {},
@@ -654,12 +602,8 @@
           "name": "capacity_requests_environment_id_environments_id_fk",
           "tableFrom": "capacity_requests",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -667,10 +611,7 @@
       "compositePrimaryKeys": {
         "capacity_requests_environment_id_request_id_pk": {
           "name": "capacity_requests_environment_id_request_id_pk",
-          "columns": [
-            "environment_id",
-            "request_id"
-          ]
+          "columns": ["environment_id", "request_id"]
         }
       },
       "uniqueConstraints": {},
@@ -757,12 +698,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "drain_until": {
-          "name": "drain_until",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -793,12 +728,8 @@
           "name": "deployments_environment_id_environments_id_fk",
           "tableFrom": "deployments",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -808,9 +739,7 @@
         "deployments_seq_unique": {
           "name": "deployments_seq_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "seq"
-          ]
+          "columns": ["seq"]
         }
       },
       "policies": {},
@@ -888,12 +817,8 @@
           "name": "domains_environment_id_environments_id_fk",
           "tableFrom": "domains",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -903,17 +828,12 @@
         "domains_seq_unique": {
           "name": "domains_seq_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "seq"
-          ]
+          "columns": ["seq"]
         },
         "domains_environment_id_hostname_unique": {
           "name": "domains_environment_id_hostname_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "environment_id",
-            "hostname"
-          ]
+          "columns": ["environment_id", "hostname"]
         }
       },
       "policies": {},
@@ -1038,6 +958,13 @@
         },
         "gateway_addresses": {
           "name": "gateway_addresses",
+          "type": "text[]",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'"
+        },
+        "resident_deployment_ids": {
+          "name": "resident_deployment_ids",
           "type": "text[]",
           "primaryKey": false,
           "notNull": true,
@@ -1180,12 +1107,8 @@
           "name": "environments_project_id_projects_id_fk",
           "tableFrom": "environments",
           "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["project_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1195,24 +1118,17 @@
         "environments_seq_unique": {
           "name": "environments_seq_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "seq"
-          ]
+          "columns": ["seq"]
         },
         "environments_pack_token_unique": {
           "name": "environments_pack_token_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "pack_token"
-          ]
+          "columns": ["pack_token"]
         },
         "environments_project_id_name_unique": {
           "name": "environments_project_id_name_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "project_id",
-            "name"
-          ]
+          "columns": ["project_id", "name"]
         }
       },
       "policies": {},
@@ -1285,10 +1201,7 @@
       "compositePrimaryKeys": {
         "idempotent_requests_scope_request_id_pk": {
           "name": "idempotent_requests_scope_request_id_pk",
-          "columns": [
-            "scope",
-            "request_id"
-          ]
+          "columns": ["scope", "request_id"]
         }
       },
       "uniqueConstraints": {},
@@ -1408,12 +1321,8 @@
           "name": "log_entries_environment_id_environments_id_fk",
           "tableFrom": "log_entries",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1423,11 +1332,7 @@
         "log_entries_environment_id_instance_id_sequence_unique": {
           "name": "log_entries_environment_id_instance_id_sequence_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "environment_id",
-            "instance_id",
-            "sequence"
-          ]
+          "columns": ["environment_id", "instance_id", "sequence"]
         }
       },
       "policies": {},
@@ -1495,9 +1400,7 @@
         "logins_user_code_unique": {
           "name": "logins_user_code_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "user_code"
-          ]
+          "columns": ["user_code"]
         }
       },
       "policies": {},
@@ -1551,12 +1454,8 @@
           "name": "metric_samples_environment_id_environments_id_fk",
           "tableFrom": "metric_samples",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1564,12 +1463,7 @@
       "compositePrimaryKeys": {
         "metric_samples_environment_id_instance_id_name_labels_pk": {
           "name": "metric_samples_environment_id_instance_id_name_labels_pk",
-          "columns": [
-            "environment_id",
-            "instance_id",
-            "name",
-            "labels"
-          ]
+          "columns": ["environment_id", "instance_id", "name", "labels"]
         }
       },
       "uniqueConstraints": {},
@@ -1627,17 +1521,12 @@
         "projects_seq_unique": {
           "name": "projects_seq_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "seq"
-          ]
+          "columns": ["seq"]
         },
         "projects_owner_id_name_unique": {
           "name": "projects_owner_id_name_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "owner_id",
-            "name"
-          ]
+          "columns": ["owner_id", "name"]
         }
       },
       "policies": {},
@@ -1717,12 +1606,8 @@
           "name": "releases_project_id_projects_id_fk",
           "tableFrom": "releases",
           "tableTo": "projects",
-          "columnsFrom": [
-            "project_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["project_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1730,10 +1615,7 @@
       "compositePrimaryKeys": {
         "releases_project_id_id_pk": {
           "name": "releases_project_id_id_pk",
-          "columns": [
-            "project_id",
-            "id"
-          ]
+          "columns": ["project_id", "id"]
         }
       },
       "uniqueConstraints": {},
@@ -1783,12 +1665,8 @@
           "name": "secrets_environment_id_environments_id_fk",
           "tableFrom": "secrets",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1796,10 +1674,7 @@
       "compositePrimaryKeys": {
         "secrets_environment_id_name_pk": {
           "name": "secrets_environment_id_name_pk",
-          "columns": [
-            "environment_id",
-            "name"
-          ]
+          "columns": ["environment_id", "name"]
         }
       },
       "uniqueConstraints": {},
@@ -1843,12 +1718,8 @@
           "name": "superseded_instances_environment_id_environments_id_fk",
           "tableFrom": "superseded_instances",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1856,10 +1727,7 @@
       "compositePrimaryKeys": {
         "superseded_instances_environment_id_instance_id_pk": {
           "name": "superseded_instances_environment_id_instance_id_pk",
-          "columns": [
-            "environment_id",
-            "instance_id"
-          ]
+          "columns": ["environment_id", "instance_id"]
         }
       },
       "uniqueConstraints": {},
@@ -1915,12 +1783,8 @@
           "name": "usage_records_environment_id_environments_id_fk",
           "tableFrom": "usage_records",
           "tableTo": "environments",
-          "columnsFrom": [
-            "environment_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["environment_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -1928,10 +1792,7 @@
       "compositePrimaryKeys": {
         "usage_records_environment_id_id_pk": {
           "name": "usage_records_environment_id_id_pk",
-          "columns": [
-            "environment_id",
-            "id"
-          ]
+          "columns": ["environment_id", "id"]
         }
       },
       "uniqueConstraints": {},

@@ -105,6 +105,7 @@ export function environmentService(deps: Deps): Partial<ServiceImpl<typeof Envir
           .update(environments)
           .set({
             gateway_addresses: gateways,
+            resident_deployment_ids: request.residentDeploymentIds,
             pings,
             online_players: request.onlinePlayers,
             wake_count: sql`case
