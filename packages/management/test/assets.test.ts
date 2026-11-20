@@ -244,10 +244,12 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
     const client = h.client(EnvironmentService, await issueEnvironmentToken(h.db, environmentId));
     const abort = new AbortController();
     const stream = client.attach({ instanceId: crypto.randomUUID(), core: true, epoch: 1n }, { signal: abort.signal });
-    const { lease, revision } = (await stream[Symbol.asyncIterator]().next()).value;
+    const { lease: attachedLease, revision } = (await stream[Symbol.asyncIterator]().next()).value;
     let sequence = 0n;
+    let lease = attachedLease;
     return {
       projectId,
+      environmentId,
       first,
       second,
       fillers,
@@ -257,14 +259,25 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
         for (let i = 0; i < keptRecentDeployments + 1; i++) await pin(fillers[0]?.id ?? "");
         await h.sql`update asset_revisions set protected_until = now() - interval '1 minute' where project_id = ${projectId}`;
       },
-      report: (resident: string[], deployment?: { deploymentId: string; state: DeploymentState }) =>
+      report: (resident: string[], deployment?: { deploymentId: string; state: DeploymentState }, known = true) =>
         client.reportStatus({
           lease,
           sequence: ++sequence,
           desiredRevision: revision,
           residentDeploymentIds: resident,
+          residentDeploymentsKnown: known,
           ...(deployment ? { deployment } : {}),
         }),
+      /** Attaches the core again, which starts a new lease whose reports haven't read the resident set. */
+      reattach: async () => {
+        const next = client.attach(
+          { instanceId: crypto.randomUUID(), core: true, epoch: 2n },
+          { signal: abort.signal },
+        );
+        const first = (await next[Symbol.asyncIterator]().next()).value;
+        lease = first.lease;
+        sequence = 0n;
+      },
       /** A report sent now whose arrival is delayed until the returned function is called. */
       delayed: (resident: string[], deployment: { deploymentId: string; state: DeploymentState }) => {
         const delayedSequence = ++sequence;
@@ -274,6 +287,7 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
             sequence: delayedSequence,
             desiredRevision: revision,
             residentDeploymentIds: resident,
+            residentDeploymentsKnown: true,
             deployment,
           });
       },
@@ -317,6 +331,47 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
     await collectAssets(h.deps, env.projectId);
     expect(await env.stored(env.first.id)).toBe(false);
     expect(await env.stored(env.second.id)).toBe(true);
+    env.close();
+  });
+
+  test("a report that didn't read the resident set keeps the stored set and every revision of the environment", async () => {
+    const env = await aged();
+    const old = await env.pin(env.first.id);
+    await env.report([old], { deploymentId: old, state: DeploymentState.ACTIVE });
+    const current = await env.pin(env.second.id);
+    await env.report([current], { deploymentId: current, state: DeploymentState.ACTIVE });
+    await env.bury();
+
+    await env.report([], undefined, false);
+    await collectAssets(h.deps, env.projectId);
+    expect(await env.stored(env.first.id)).toBe(true);
+    expect(
+      await h.sql<
+        { resident_deployment_ids: string[] }[]
+      >`select resident_deployment_ids from environments where id = ${env.environmentId}`,
+    ).toEqual([{ resident_deployment_ids: [current] }]);
+
+    await env.report([current]);
+    await collectAssets(h.deps, env.projectId);
+    expect(await env.stored(env.first.id)).toBe(false);
+    env.close();
+  });
+
+  test("a new lease keeps every revision of the environment until a report reads the resident set", async () => {
+    const env = await aged();
+    const old = await env.pin(env.first.id);
+    await env.report([old], { deploymentId: old, state: DeploymentState.ACTIVE });
+    const current = await env.pin(env.second.id);
+    await env.report([current], { deploymentId: current, state: DeploymentState.ACTIVE });
+    await env.bury();
+
+    await env.reattach();
+    await collectAssets(h.deps, env.projectId);
+    expect(await env.stored(env.first.id)).toBe(true);
+
+    await env.report([current]);
+    await collectAssets(h.deps, env.projectId);
+    expect(await env.stored(env.first.id)).toBe(false);
     env.close();
   });
 

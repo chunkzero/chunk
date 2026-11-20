@@ -221,9 +221,16 @@ message ReportStatusRequest {
   // The IDs of every deployment resident in core's backend, including one that
   // is loading. The management plane keeps the asset revisions of these
   // deployments, which core's JVMs may still read, whatever their state there.
-  // It stores the set of the latest accepted report, so each report carries the
-  // whole set.
+  // It stores the set of the latest accepted report that read it, so each such
+  // report carries the whole set. Meaningful only when
+  // resident_deployments_known is true.
   repeated string resident_deployment_ids = 11;
+  // True only when this observation read core's resident set successfully. A
+  // report that repeats an earlier read or couldn't read the set leaves it
+  // false, and the management plane then keeps the stored IDs but also keeps
+  // the assets of every deployment of the environment, as it does after a new
+  // lease until a report reads the set.
+  bool resident_deployments_known = 12;
 }
 
 message PingStatus {

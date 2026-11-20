@@ -970,6 +970,13 @@
           "notNull": true,
           "default": "'{}'"
         },
+        "resident_deployments_known": {
+          "name": "resident_deployments_known",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
         "pings": {
           "name": "pings",
           "type": "jsonb",

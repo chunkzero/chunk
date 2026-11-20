@@ -38,8 +38,9 @@ export async function lockAssets(tx: Db, projectId: string, mode: "shared" | "ex
  * ready revisions, or protected by an upload declared within `uploadLifetimeMs`. It is also kept while an environment
  * has a deployment that pins it and is active, unfinished, one of the environment's `keptRecentDeployments` newest,
  * superseded but still activatable (newer than the active one, as `activateDeployment` accepts), or resident in core's
- * backend as of the latest status report management accepted. Core decides what stays resident, so no clock or setting
- * of management's can lag it. Returns how many revisions it deleted and how many blobs it removed from the release store.
+ * backend as of the latest status report management accepted that read it, or whenever the environment's latest
+ * accepted report didn't read it or none has been accepted under the current lease. Core decides what stays resident,
+ * so no clock or setting of management's can lag it. Returns how many revisions it deleted and how many blobs it removed from the release store.
  *
  * The database rows are deleted first, recording the blobs' keys in `asset_deletions`; a later transaction deletes the
  * bytes of each key no row has claimed again. A store delete that fails leaves its key recorded, so the next
@@ -95,7 +96,7 @@ async function deleteUnusedRows(tx: Db, projectId: string): Promise<number> {
           select max(a.seq) from deployments a
           where a.environment_id = d.environment_id and a.state = ${DeploymentState.ACTIVE}
         ), 0) as activatable,
-        d.id = any(e.resident_deployment_ids) as resident,
+        not e.resident_deployments_known or d.id = any(e.resident_deployment_ids) as resident,
         row_number() over (partition by d.environment_id order by d.seq desc) as recency
       from deployments d join environments e on e.id = d.environment_id
       where e.project_id = ${projectId}

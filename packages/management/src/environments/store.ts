@@ -92,6 +92,7 @@ export async function claimLease(
         report_sequence: 0n,
         report_desired_revision: 0n,
         ready_to_suspend: false,
+        resident_deployments_known: false,
         report_logins: sql`case when ${sameOwner} then report_logins else 0 end`,
         gateway_addresses: sql`case when ${sameOwner} then gateway_addresses else '{}' end`,
       })

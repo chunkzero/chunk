@@ -65,13 +65,13 @@ non-zero if stopped before management answered. It downloads each release archiv
 deployment pins against the worlds and packs the release declares, and downloads each blob that JVMs read and
 `$CHUNK_STATE/assets/` lacks, four at a time, verified against its digest, then writes the revision there; packs reach
 players' clients from management, never through core. Once no deployment resident in the backend, nor the one loading,
-pins a revision, core removes it and the blobs no kept revision holds. Each status report lists those resident
-deployments and the one loading, which management keeps the asset revisions of. Only then does it make the deployment
-the backend's and control's current release, and report it `ACTIVE`. A deployment it rejects is reported `FAILED`, and
-the previous deployment keeps serving. The gateway starts with the first active deployment. Core retires the versions it
-no longer needs, stopping their JVMs first, and removes their unpacked releases. JVMs run on machines core asks
-management for (`EnsureCapacity`), each running [`chunk-jvm`](../chunk-jvm/README.md). A core that management fences
-stops.
+pins a revision, core removes it and the blobs no kept revision holds. A status report lists those resident deployments
+and the one loading, which management keeps the asset revisions of, only when it read them; otherwise it says so, and
+management keeps the assets of every deployment. Only then does it make the deployment the backend's and control's
+current release, and report it `ACTIVE`. A deployment it rejects is reported `FAILED`, and the previous deployment keeps
+serving. The gateway starts with the first active deployment. Core retires the versions it no longer needs, stopping
+their JVMs first, and removes their unpacked releases. JVMs run on machines core asks management for (`EnsureCapacity`),
+each running [`chunk-jvm`](../chunk-jvm/README.md). A core that management fences stops.
 
 Core reports its status about every 15 seconds, and at once when it changes. Each report carries the server-list status
 the gateway last answered for each hostname, which the [edge](../chunk-edge/README.md) answers pings with while the

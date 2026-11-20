@@ -1,1 +1,2 @@
-ALTER TABLE "environments" ADD COLUMN "resident_deployment_ids" text[] DEFAULT '{}' NOT NULL;
+ALTER TABLE "environments" ADD COLUMN "resident_deployment_ids" text[] DEFAULT '{}' NOT NULL;--> statement-breakpoint
+ALTER TABLE "environments" ADD COLUMN "resident_deployments_known" boolean DEFAULT false NOT NULL;

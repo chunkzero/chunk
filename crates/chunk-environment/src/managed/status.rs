@@ -42,8 +42,9 @@ pub(super) struct Observed {
     pub ready_to_suspend: bool,
     /// The status the gateway last answered for each hostname, which edges answer pings with while core sleeps.
     pub pings: Vec<v1::PingStatus>,
-    /// Every deployment resident in the backend, including one loading, which management keeps the assets of.
-    pub resident_deployments: Vec<String>,
+    /// Every deployment resident in the backend, including one loading, which management keeps the assets of. `None`
+    /// when this observation couldn't read them.
+    pub resident_deployments: Option<Vec<String>>,
 }
 
 impl Observed {
@@ -75,8 +76,6 @@ struct Sent {
     lease: u64,
     /// The gateway addresses of the latest report management accepted, under this lease or an earlier one.
     addresses: Vec<String>,
-    /// The resident deployments last read, under this lease or an earlier one.
-    resident: Vec<String>,
     sequence: u64,
     /// What the latest report started said.
     latest: Option<Said>,
@@ -175,12 +174,8 @@ impl Reporter {
                 return Ok(false);
             }
             if observed.lease > sent.lease {
-                *sent = Sent {
-                    lease: observed.lease,
-                    addresses: std::mem::take(&mut sent.addresses),
-                    resident: std::mem::take(&mut sent.resident),
-                    ..Sent::default()
-                };
+                *sent =
+                    Sent { lease: observed.lease, addresses: std::mem::take(&mut sent.addresses), ..Sent::default() };
             }
             sent.sequence += 1;
             let sequence = sent.sequence;
@@ -197,7 +192,8 @@ impl Reporter {
                 online_players: observed.online_players,
                 logins: observed.logins,
                 pings: observed.pings,
-                resident_deployment_ids: observed.resident_deployments,
+                resident_deployments_known: observed.resident_deployments.is_some(),
+                resident_deployment_ids: observed.resident_deployments.unwrap_or_default(),
                 deployment: deployment.or_else(|| sent.progress.as_ref().map(|(_, progress)| progress.clone())),
                 ready_to_suspend: observed.ready_to_suspend,
                 lease: observed.lease,
@@ -213,16 +209,6 @@ impl Reporter {
             sent.finished(request.sequence, sent_at, result.is_ok().then_some(request.gateway_addresses));
         }
         result.map(|_| true)
-    }
-
-    /// The deployments resident in the backend: `read` when it could be read, which is remembered, and else the ones
-    /// last read.
-    pub(super) fn resident(&self, read: Option<Vec<String>>) -> Vec<String> {
-        let mut sent = lock(&self.sent);
-        if let Some(read) = read {
-            sent.resident = read;
-        }
-        sent.resident.clone()
     }
 
     /// The gateway addresses of the latest report management accepted.

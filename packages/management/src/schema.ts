@@ -143,6 +143,8 @@ export const environments = pgTable(
     gateway_addresses: text().array().notNull().default([]),
     /** The deployments resident in core's backend, loading or not, as that report said. */
     resident_deployment_ids: text().array().notNull().default([]),
+    /** Whether the latest accepted report under the current lease read the resident set rather than repeating it. */
+    resident_deployments_known: boolean().notNull().default(false),
     pings: jsonb<Record<string, string>>()
       .notNull()
       .default(sql`'{}'::jsonb`),

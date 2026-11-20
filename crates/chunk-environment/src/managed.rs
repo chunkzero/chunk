@@ -693,7 +693,7 @@ impl<'a> Managed<'a> {
             logins: self.logins(),
             ready_to_suspend: false,
             pings: self.pings(),
-            resident_deployments: self.reporter.resident(None),
+            resident_deployments: None,
         }
     }
 
@@ -717,7 +717,7 @@ impl<'a> Managed<'a> {
             logins: self.logins(),
             ready_to_suspend,
             pings: self.pings(),
-            resident_deployments: self.reporter.resident(resident),
+            resident_deployments: resident,
         }
     }
 
