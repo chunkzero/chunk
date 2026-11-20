@@ -55,3 +55,31 @@ async fn pruning_keeps_everything_until_the_store_holds_every_kept_revision() {
     assert_eq!(assets::prune(&store, BTreeSet::from([loading.id()])).await.unwrap(), Some(2));
     assert!(!store.contains(&blob(b"old").sha256).unwrap());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tick_after_a_failed_load_prunes_the_blobs_it_left_behind() {
+    let harness = Harness::new().await;
+    let core = crate::Core::start(harness.core(), || {}).await.unwrap();
+    let (gateway, lease) = (std::sync::OnceLock::new(), watch::Sender::new(crate::managed::Lease::Waiting));
+    let managed = crate::managed::Managed::new(
+        &harness.management_config(),
+        lease,
+        crate::managed::Registration::local("env_test"),
+        &harness.state(),
+        &core,
+        &gateway,
+        None,
+    );
+    let store = core.asset_store();
+    let blob = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+
+    store.insert(&blob(b"first"), b"first").unwrap();
+    managed.remove_unused_assets().await;
+    assert!(!store.contains(&blob(b"first")).unwrap());
+
+    // A load that fails after downloading leaves its blob behind, and the kept set stays the same.
+    store.insert(&blob(b"second"), b"second").unwrap();
+    drop(managed.begin_asset_load().await);
+    managed.remove_unused_assets().await;
+    assert!(!store.contains(&blob(b"second")).unwrap());
+}

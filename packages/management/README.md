@@ -101,11 +101,14 @@ serve only blobs of revisions the environment's deployments pin, packs only for 
 or redirecting to a presigned URL of the release bucket.
 
 Each `SetAssetHead` collects the project's unused revisions. A revision is kept while it is the head, one of the
-project's 10 newest ready revisions, less than an hour old (as long as its upload URLs last), or pinned by an
-environment's active deployment, an unfinished one or one of its 10 newest. The rest are deleted, and with them every
-blob no remaining revision holds, from the database and the release store; a rollback to an older deployment fails once
-its revision is gone. Collection holds a per-project lock that uploads and deployments share, so it never deletes a blob
-a revision is being declared with or a revision a deployment is pinning.
+project's 10 newest ready revisions, declared by an upload within the last hour (as long as its upload URLs last),
+pinned by an environment's active deployment, an unfinished one or one of its 10 newest, or pinned by a superseded
+deployment still within its environment's drain deadline. The rest are deleted, and with them every blob no remaining
+revision holds, from the database; their keys are recorded in `asset_deletions` and the release store's objects are
+deleted in a second transaction that skips a key a new upload has claimed again. A delete the store fails stays recorded
+and is retried by the next collection. A rollback to an older deployment fails once its revision is gone. Collection
+holds a per-project lock that uploads, deployments and head moves share, so it never deletes a blob a revision is being
+declared with or a revision a deployment or the head is pinning.
 
 ## Release storage
 

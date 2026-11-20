@@ -8,7 +8,9 @@ import { assetBlobs, assetRevisions } from "../schema.ts";
 
 export type AssetRevisionRow = typeof assetRevisions.$inferSelect;
 
-export function toAssetRevision(row: Omit<AssetRevisionRow, "manifest"> & { manifest?: Uint8Array }): AssetRevision {
+export function toAssetRevision(
+  row: Omit<AssetRevisionRow, "manifest" | "protected_until"> & { manifest?: Uint8Array },
+): AssetRevision {
   return create(AssetRevisionSchema, {
     id: row.id,
     projectId: row.project_id,

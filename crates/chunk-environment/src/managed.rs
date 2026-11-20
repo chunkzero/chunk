@@ -31,7 +31,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex, MutexGuard, OnceLock, PoisonError,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -81,9 +81,11 @@ pub(crate) struct Managed<'a> {
     releases: release::Store,
     /// Where each deployment's asset blobs are downloaded to.
     assets: chunk_build::assets::Store,
-    /// Held shared while a load fills `assets`, and exclusively while unused revisions are removed from it. Holds the
-    /// revisions the last removal kept.
-    asset_loads: tokio::sync::RwLock<Option<BTreeSet<String>>>,
+    /// Held shared while a load fills `assets`, and exclusively while unused revisions are removed from it. Holds how
+    /// many loads had finished, and which revisions were kept, when the last removal fully succeeded.
+    asset_loads: tokio::sync::RwLock<Option<(u64, BTreeSet<String>)>>,
+    /// How many loads into `assets` have finished, whether they succeeded, failed or were abandoned.
+    asset_loads_finished: AtomicU64,
     /// Where the activation management has not yet accepted is recorded.
     activation: PathBuf,
     core: &'a Core,
@@ -175,6 +177,18 @@ struct Work<'a> {
     deployments: &'a Mutex<Deployments>,
 }
 
+/// A load filling the asset store, which removal of unused revisions waits for.
+struct AssetLoad<'a> {
+    _shared: tokio::sync::RwLockReadGuard<'a, Option<(u64, BTreeSet<String>)>>,
+    finished: &'a AtomicU64,
+}
+
+impl Drop for AssetLoad<'_> {
+    fn drop(&mut self) {
+        self.finished.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 impl Drop for Work<'_> {
     fn drop(&mut self) {
         let mut deployments = lock(self.deployments);
@@ -214,6 +228,7 @@ impl<'a> Managed<'a> {
             releases: release::Store::new(state, core.archives().clone()),
             assets: core.asset_store(),
             asset_loads: tokio::sync::RwLock::default(),
+            asset_loads_finished: AtomicU64::default(),
             activation: state.join("managed.json"),
             core,
             gateway,
@@ -437,6 +452,12 @@ impl<'a> Managed<'a> {
         }
     }
 
+    /// Keeps unused revisions from being removed from `assets` until the returned guard drops, which also records that
+    /// a load finished, as it may have left blobs behind that no revision holds.
+    async fn begin_asset_load(&self) -> AssetLoad<'_> {
+        AssetLoad { _shared: self.asset_loads.read().await, finished: &self.asset_loads_finished }
+    }
+
     fn start(&self, desired: v1::AttachResponse) -> Work<'_> {
         let mut deployments = lock(&self.deployments);
         deployments.loading = Some(desired.deployment_id.clone());
@@ -519,7 +540,7 @@ impl<'a> Managed<'a> {
         if backend.check_deployment(id).await.is_err() {
             return false;
         }
-        let _loading = self.asset_loads.read().await;
+        let _loading = self.begin_asset_load().await;
         match assets::restore(&self.client, &self.assets, desired.assets.as_ref(), cancel).await {
             Ok(restored) => restored.is_some(),
             Err(error) => {
@@ -537,7 +558,7 @@ impl<'a> Managed<'a> {
         let Some(loaded) = release::load(&self.client, &self.releases, artifact, cancel).await? else {
             return Ok(false);
         };
-        let loading = self.asset_loads.read().await;
+        let loading = self.begin_asset_load().await;
         let revision = assets::load(&self.client, &self.assets, desired.assets.as_ref(), loaded.assets(), cancel);
         let Some(revision) = revision.await? else {
             return Ok(false);

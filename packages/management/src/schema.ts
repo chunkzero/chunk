@@ -222,6 +222,8 @@ export const assetRevisions = pgTable(
     /** The distinct bytes of its blobs. */
     size_bytes: int8().notNull(),
     create_time: createTime(),
+    /** Collection keeps the revision until then, as long as the upload URLs of its latest declaration last. */
+    protected_until: time().notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.project_id, t.id] }), index("asset_revisions_project").on(t.project_id, t.seq)],
 );
@@ -254,6 +256,19 @@ export const assetBlobs = pgTable(
     sha256: text().notNull(),
     size_bytes: int8().notNull(),
     sha1: text().notNull(),
+    create_time: createTime(),
+  },
+  (t) => [primaryKey({ columns: [t.project_id, t.sha256] })],
+);
+
+/** Blobs whose database rows are gone and whose release store objects are yet to be deleted. */
+export const assetDeletions = pgTable(
+  "asset_deletions",
+  {
+    project_id: text()
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    sha256: text().notNull(),
     create_time: createTime(),
   },
   (t) => [primaryKey({ columns: [t.project_id, t.sha256] })],

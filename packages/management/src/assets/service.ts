@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { create } from "@bufbuild/protobuf";
 import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
-import { and, desc, eq, lt, sql } from "drizzle-orm";
+import { and, desc, eq, lt } from "drizzle-orm";
 
 import type { Deps } from "../deps.ts";
 import {
@@ -17,7 +17,7 @@ import { blobKey } from "../releases/store.ts";
 import { callerOf } from "../rpc/caller.ts";
 import { failedPrecondition, invalid, notFound, page, pageOf, required, seqAfter } from "../rpc/validate.ts";
 import { assetBlobs, assetRevisionBlobs, assetRevisions, projects } from "../schema.ts";
-import { collectAssets, lockAssets, uploadLifetimeMs } from "./retention.ts";
+import { collectAssets, lockAssets, protectedUntil, uploadLifetimeMs } from "./retention.ts";
 import { decodeRevision, revisionBlobs, sha256Hex } from "./revision.ts";
 import { eachLimited, findRevision, heldBlobs, loadReadyRevision, toAssetRevision } from "./store.ts";
 
@@ -60,21 +60,17 @@ export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetServic
             state: AssetRevisionState.UPLOADING,
             manifest: request.manifest,
             size_bytes: sizeBytes,
+            protected_until: protectedUntil(),
           })
           .onConflictDoNothing()
           .returning({ id: assetRevisions.id });
         if (declared.length === 0) {
-          // Upload URLs are issued again below, so collection keeps an unfinished revision as long as they last.
+          // Upload URLs are issued below whether the revision is unfinished or ready, so collection keeps it as long as
+          // they last.
           await tx
             .update(assetRevisions)
-            .set({ create_time: sql`now()` })
-            .where(
-              and(
-                eq(assetRevisions.project_id, project.id),
-                eq(assetRevisions.id, id),
-                eq(assetRevisions.state, AssetRevisionState.UPLOADING),
-              ),
-            );
+            .set({ protected_until: protectedUntil() })
+            .where(and(eq(assetRevisions.project_id, project.id), eq(assetRevisions.id, id)));
           return;
         }
         if (blobs.size === 0) return;
@@ -203,19 +199,24 @@ export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetServic
 
     async setAssetHead(request, context) {
       const project = await loadProject(db, callerOf(context), request.projectId);
-      const revision = await loadReadyRevision(db, project.id, required(request.revisionId, "revision_id"));
-      const [moved] = await db
-        .update(projects)
-        .set({ asset_head_id: revision.id })
-        .where(and(eq(projects.id, project.id), eq(projects.asset_head_id, request.expectedHeadId)))
-        .returning({ id: projects.id });
-      if (!moved) {
-        const [current] = await db
-          .select({ head: projects.asset_head_id })
-          .from(projects)
-          .where(eq(projects.id, project.id));
-        throw new ConnectError(`the asset head moved to ${current?.head || "nothing"}`, Code.Aborted);
-      }
+      const revisionId = required(request.revisionId, "revision_id");
+      // Shared with uploads, so a collection never deletes the revision between checking it and moving the head to it.
+      await db.transaction(async (tx) => {
+        await lockAssets(tx, project.id, "shared");
+        const revision = await loadReadyRevision(tx, project.id, revisionId);
+        const [moved] = await tx
+          .update(projects)
+          .set({ asset_head_id: revision.id })
+          .where(and(eq(projects.id, project.id), eq(projects.asset_head_id, request.expectedHeadId)))
+          .returning({ id: projects.id });
+        if (!moved) {
+          const [current] = await tx
+            .select({ head: projects.asset_head_id })
+            .from(projects)
+            .where(eq(projects.id, project.id));
+          throw new ConnectError(`the asset head moved to ${current?.head || "nothing"}`, Code.Aborted);
+        }
+      });
       // Each push moves the head, so the revisions it leaves behind are collected here.
       await collectAssets(deps, project.id).catch((error: unknown) => {
         console.error(`collecting project ${project.id}'s unused asset revisions failed:`, error);

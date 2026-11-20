@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 
 import { Code } from "@connectrpc/connect";
 
-import { keptRecentRevisions } from "../src/assets/retention.ts";
+import { collectAssets, keptRecentRevisions } from "../src/assets/retention.ts";
 import { decodeRevision, sha256Hex } from "../src/assets/revision.ts";
 import { issueEnvironmentToken } from "../src/auth/tokens.ts";
 import { desiredState } from "../src/environments/desired.ts";
@@ -201,7 +201,7 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
     const unfinished = assetRevision({ shared: { "u.txt": "unfinished" } });
     const [upload] = (await assets.uploadAssets({ projectId, manifest: unfinished.manifest })).uploads;
     await fetch(upload?.upload?.url ?? "", { method: "PUT", body: unfinished.blobs.get(upload?.sha256 ?? "") });
-    await h.sql`update asset_revisions set create_time = now() - interval '2 hours' where project_id = ${projectId}`;
+    await h.sql`update asset_revisions set protected_until = now() - interval '1 minute' where project_id = ${projectId}`;
     const head = recent[0]?.id ?? "";
     await assets.setAssetHead({ projectId, revisionId: head, expectedHeadId: "" });
 
@@ -216,5 +216,69 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
     expect(await assets.uploadAssets({ projectId, manifest: recent[1]?.manifest ?? new Uint8Array() })).toMatchObject({
       uploads: [{ sha256: [...(recent[1]?.blobs.keys() ?? [])][0] }],
     });
+  });
+
+  test("a deployment keeps its revision while it drains, and not past its environment's drain deadline", async () => {
+    const { projectId, environmentId } = await createEnvironment(h);
+    const deploy = h.client(DeploymentService);
+    await uploadRelease(h, projectId, "r1");
+    const draining = assetRevision({ shared: { "f.txt": "draining" } });
+    await uploadAssets(h, projectId, draining);
+    const fillers = Array.from({ length: keptRecentRevisions + 1 }, (_, i) =>
+      assetRevision({ shared: { "f.txt": `filler${i}` } }),
+    );
+    for (const filler of fillers) await uploadAssets(h, projectId, filler);
+    const pin = (assetRevisionId: string) =>
+      deploy.deploy({ requestId: crypto.randomUUID(), environmentId, releaseId: "r1", assetRevisionId });
+    await pin(draining.id);
+    for (let i = 0; i < 11; i++) await pin(fillers[0]?.id ?? "");
+    await h.sql`update asset_revisions set protected_until = now() - interval '1 minute' where project_id = ${projectId}`;
+    await h.sql`update projects set asset_head_id = ${fillers[1]?.id ?? ""} where id = ${projectId}`;
+    const stored = async () =>
+      (await h.sql<{ id: string }[]>`select id from asset_revisions where project_id = ${projectId}`).some(
+        (row) => row.id === draining.id,
+      );
+
+    await collectAssets(h.deps, projectId);
+    expect(await stored()).toBe(true);
+    await h.sql`update deployments set update_time = now() - interval '5 hours' where asset_revision_id = ${draining.id}`;
+    await collectAssets(h.deps, projectId);
+    expect(await stored()).toBe(false);
+  });
+
+  test("a recorded deletion is dropped when its blob is referenced again, and retried when the store fails", async () => {
+    const { projectId } = await createEnvironment(h);
+    const [referenced, lost, flaky] = [1, 2, 3].map((i) => assetRevision({ shared: { "f.txt": `blob${i}` } }));
+    for (const revision of [referenced, lost, flaky]) await uploadAssets(h, projectId, revision);
+    const digest = (revision?: { blobs: Map<string, unknown> }) => [...(revision?.blobs.keys() ?? [])][0] ?? "";
+    for (const revision of [lost, flaky]) {
+      await h.sql`delete from asset_revisions where project_id = ${projectId} and id = ${revision?.id ?? ""}`;
+      await h.sql`delete from asset_blobs where project_id = ${projectId} and sha256 = ${digest(revision)}`;
+    }
+    for (const revision of [referenced, lost, flaky]) {
+      await h.sql`insert into asset_deletions (project_id, sha256) values (${projectId}, ${digest(revision)})`;
+    }
+    const recorded = async () =>
+      (await h.sql<{ sha256: string }[]>`select sha256 from asset_deletions where project_id = ${projectId}`).map(
+        (row) => row.sha256,
+      );
+    const present = (revision?: { blobs: Map<string, unknown> }) =>
+      h.releases.exists(blobKey(projectId, digest(revision)));
+    const { delete: remove } = h.deps.releases;
+    const flakyKey = blobKey(projectId, digest(flaky));
+    h.deps.releases.delete = async (key) => {
+      if (key === flakyKey) throw new Error("store unavailable");
+      await remove(key);
+    };
+    try {
+      await collectAssets(h.deps, projectId);
+      expect(await recorded()).toEqual([digest(flaky)]);
+      expect([await present(referenced), await present(lost), await present(flaky)]).toEqual([true, false, true]);
+    } finally {
+      h.deps.releases.delete = remove;
+    }
+    await collectAssets(h.deps, projectId);
+    expect(await recorded()).toEqual([]);
+    expect(await present(flaky)).toBe(false);
   });
 });
