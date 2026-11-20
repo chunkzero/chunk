@@ -132,6 +132,18 @@ class SessionLoggingTest {
         assertTrue(lines.stream().allMatch(line -> line.startsWith("[session:s] x")));
     }
 
+    @Test
+    void aLineSplitAtTheLimitKeepsMultibyteCharactersWhole() {
+        var raw = new ByteArrayOutputStream();
+        var stream = SessionLogging.wrap(new PrintStream(raw, true, StandardCharsets.UTF_8));
+
+        SessionLogging.run("s", () -> stream.println("x".repeat(8191) + "✓"));
+
+        assertEquals(
+                List.of("[session:s] " + "x".repeat(8191), "[session:s] ✓"),
+                raw.toString(StandardCharsets.UTF_8).lines().toList());
+    }
+
     private static Thread writer(String session, PrintStream stream, CountDownLatch start) {
         return new Thread(
                 () -> {

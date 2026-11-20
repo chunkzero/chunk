@@ -343,12 +343,16 @@ public final class SessionScope {
      * Minestom runs a node's listeners in one dispatch callers can't wrap, and instance and player
      * ticks run on its dispatcher outside this session's tick. So an event this session owns is
      * dispatched again through the node with the session bound, and the first pass runs nothing;
-     * the second finds its event in {@link #redispatching} and runs the listeners. Unlike a plain
-     * node, a failing session listener never stops the global listeners after it, bound or not.
+     * the second consumes its event from {@link #redispatching} and runs the listeners, so a
+     * dispatch those listeners start is bound and isolated on its own. Unlike a plain node, a
+     * failing session listener never stops the global listeners after it, bound or not.
      */
     private boolean admit(Event event) {
         if (!owns(event)) return false;
-        if (redispatching.get() == event) return true;
+        if (redispatching.get() == event) {
+            redispatching.remove();
+            return true;
+        }
         @SuppressWarnings("unchecked")
         var handle = (ListenerHandle<Event>) events.getHandle(event.getClass());
         var outer = redispatching.get();

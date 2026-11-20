@@ -157,6 +157,27 @@ class SessionLoggingMultistomTest {
         assertEquals(2, reported.size)
     }
 
+    @Test
+    fun `a dispatch started by a session listener binds its own session`() {
+        val first = scope("first")
+        val second = scope("second")
+        val firstEvent = SessionCreateEvent(first)
+        val observed = mutableListOf<String>()
+        first.events.addListener(SessionCreateEvent::class.java) {
+            observed.add("first:${SessionLogging.current()}")
+            if (observed.size == 1) process.eventHandler().call(SessionCreateEvent(second))
+        }
+        second.events.addListener(SessionCreateEvent::class.java) {
+            observed.add("second:${SessionLogging.current()}")
+            process.eventHandler().call(firstEvent)
+        }
+
+        process.eventHandler().call(firstEvent)
+
+        assertEquals(listOf("first:first", "second:second", "first:first"), observed)
+        assertNull(SessionLogging.current())
+    }
+
     private fun scope(id: String): SessionScope {
         lateinit var scope: SessionScope
         val manager =

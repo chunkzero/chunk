@@ -136,34 +136,51 @@ public final class SessionLogging {
                 var take = Math.min(segmentEnd - offset, LINE_LIMIT - line.size);
                 line.append(bytes, offset, take);
                 offset += take;
-                if (offset == segmentEnd && newline < end) emit(line, true);
-                else if (line.size >= LINE_LIMIT) emit(line, false);
+                if (offset == segmentEnd && newline < end) emit(line, line.size, true);
+                else if (line.size >= LINE_LIMIT)
+                    emit(line, line.size - incompleteCharacter(line), false);
             }
         }
 
         @Override
         public void flush() throws IOException {
             var line = lines.get();
-            if (line.size > 0) emit(line, false);
+            if (line.size > 0) emit(line, line.size, false);
             synchronized (LOCK) {
                 target.flush();
             }
         }
 
-        private void emit(Line line, boolean complete) throws IOException {
+        /** Writes the line's first {@code length} bytes and keeps the rest as its continuation. */
+        private void emit(Line line, int length, boolean complete) throws IOException {
             var tag =
                     line.session == null
                             ? new byte[0]
                             : ("[session:" + line.session + "] ").getBytes(StandardCharsets.UTF_8);
-            var output = new byte[tag.length + line.size + (complete ? 0 : 1)];
+            var output = new byte[tag.length + length + (complete ? 0 : 1)];
             System.arraycopy(tag, 0, output, 0, tag.length);
-            System.arraycopy(line.bytes, 0, output, tag.length, line.size);
+            System.arraycopy(line.bytes, 0, output, tag.length, length);
             if (!complete) output[output.length - 1] = '\n';
-            line.size = 0;
+            System.arraycopy(line.bytes, length, line.bytes, 0, line.size - length);
+            line.size -= length;
             synchronized (LOCK) {
                 target.write(output, 0, output.length);
                 target.flush();
             }
+        }
+
+        /** The bytes at the end of the line that begin a UTF-8 character it doesn't complete. */
+        private static int incompleteCharacter(Line line) {
+            for (var back = 1; back <= Math.min(3, line.size); back++) {
+                var b = line.bytes[line.size - back];
+                if ((b & 0xC0) == 0x80) continue;
+                var length =
+                        (b & 0xE0) == 0xC0
+                                ? 2
+                                : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 1;
+                return length > back ? back : 0;
+            }
+            return 0;
         }
     }
 
