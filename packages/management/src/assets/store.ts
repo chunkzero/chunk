@@ -51,11 +51,22 @@ export async function heldBlobs(
   return new Map(rows.map(({ sha256, ...blob }) => [sha256, blob]));
 }
 
-/** Runs `run` on every item, at most `limit` at once. */
+/**
+ * Runs `run` on every item, at most `limit` at once. Once a run fails, it starts no more, waits for those in flight and
+ * rejects with the first failure, so nothing it started is still running when it settles.
+ */
 export async function eachLimited<T>(items: T[], limit: number, run: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
+  let failure: { error: unknown } | undefined;
   const worker = async () => {
-    while (next < items.length) await run(items[next++] as T);
+    while (!failure && next < items.length) {
+      try {
+        await run(items[next++] as T);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure) throw failure.error;
 }

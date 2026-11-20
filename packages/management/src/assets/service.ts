@@ -5,6 +5,7 @@ import { timestampFromDate } from "@bufbuild/protobuf/wkt";
 import { Code, ConnectError, type ServiceImpl } from "@connectrpc/connect";
 import { and, desc, eq, lt } from "drizzle-orm";
 
+import type { Db } from "../db.ts";
 import type { Deps } from "../deps.ts";
 import {
   AssetRevisionState,
@@ -30,8 +31,8 @@ const existsConcurrency = 64;
 export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetService>> {
   const { db, releases } = deps;
   /** The project's verified blobs among `digests` that the blob store still holds. */
-  async function storedBlobs(projectId: string, digests: string[]) {
-    const held = await heldBlobs(db, projectId, digests);
+  async function storedBlobs(conn: Db, projectId: string, digests: string[]) {
+    const held = await heldBlobs(conn, projectId, digests);
     await eachLimited([...held.keys()], existsConcurrency, async (sha256) => {
       if (!(await releases.exists(blobKey(projectId, sha256)))) held.delete(sha256);
     });
@@ -80,7 +81,7 @@ export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetServic
       });
       const row = await findRevision(db, project.id, id);
       if (!row) throw notFound("asset revision");
-      const held = await storedBlobs(project.id, [...blobs.keys()]);
+      const held = await storedBlobs(db, project.id, [...blobs.keys()]);
       const expireTime = new Date(Date.now() + uploadLifetimeMs);
       const uploads = await Promise.all(
         [...blobs]
@@ -102,53 +103,60 @@ export function assetService(deps: Deps): Partial<ServiceImpl<typeof AssetServic
 
     async completeAssetUpload(request, context) {
       const project = await loadProject(db, callerOf(context), request.projectId);
-      const row = await findRevision(db, project.id, required(request.revisionId, "revision_id"));
-      if (!row) throw notFound("asset revision");
-      const revision = decodeRevision(row.manifest);
-      const blobs = revisionBlobs(revision);
-      const held = await storedBlobs(project.id, [...blobs.keys()]);
-      const missing: string[] = [];
-      const unverified = [...blobs].filter(([sha256]) => !held.has(sha256));
-      await eachLimited(unverified, verifyConcurrency, async ([sha256, { size }]) => {
-        const sizeBytes = BigInt(size);
-        const sha1 = await releases.complete(blobKey(project.id, sha256), { sha256, sizeBytes }, (blob) =>
-          verifyBlob(blob, sha256, sizeBytes).catch((error: unknown) => {
-            throw failedPrecondition(`blob ${sha256} is invalid: ${(error as Error).message}`);
-          }),
-        );
-        if (sha1 === undefined) {
-          missing.push(sha256);
-          return;
+      const revisionId = required(request.revisionId, "revision_id");
+      // The shared lock is taken before the revision is read and held until it is READY, so collection can't delete the
+      // revision or a blob it was checked against in between, and a later declaration of the same manifest can't be
+      // marked READY by an earlier completion.
+      return db.transaction(async (tx) => {
+        await lockAssets(tx, project.id, "shared");
+        const row = await findRevision(tx, project.id, revisionId);
+        if (!row) throw notFound("asset revision");
+        const revision = decodeRevision(row.manifest);
+        const blobs = revisionBlobs(revision);
+        const held = await storedBlobs(tx, project.id, [...blobs.keys()]);
+        const missing: string[] = [];
+        const unverified = [...blobs].filter(([sha256]) => !held.has(sha256));
+        await eachLimited(unverified, verifyConcurrency, async ([sha256, { size }]) => {
+          const sizeBytes = BigInt(size);
+          const sha1 = await releases.complete(blobKey(project.id, sha256), { sha256, sizeBytes }, (blob) =>
+            verifyBlob(blob, sha256, sizeBytes).catch((error: unknown) => {
+              throw failedPrecondition(`blob ${sha256} is invalid: ${(error as Error).message}`);
+            }),
+          );
+          if (sha1 === undefined) {
+            missing.push(sha256);
+            return;
+          }
+          await tx
+            .insert(assetBlobs)
+            .values({ project_id: project.id, sha256, size_bytes: sizeBytes, sha1 })
+            .onConflictDoNothing();
+          held.set(sha256, { size_bytes: sizeBytes, sha1 });
+        });
+        if (missing.length > 0) {
+          throw failedPrecondition(
+            `${missing.length} of the revision's blobs are not uploaded, such as ${missing.sort()[0]}`,
+          );
         }
-        await db
-          .insert(assetBlobs)
-          .values({ project_id: project.id, sha256, size_bytes: sizeBytes, sha1 })
-          .onConflictDoNothing();
-        held.set(sha256, { size_bytes: sizeBytes, sha1 });
+        for (const [sha256, { size }] of blobs) {
+          if (held.get(sha256)?.size_bytes !== BigInt(size)) {
+            throw failedPrecondition(`blob ${sha256} is not ${size} bytes, as the revision declares`);
+          }
+        }
+        for (const [name, pack] of revision.packs) {
+          if (held.get(pack.sha256)?.sha1 !== pack.sha1) {
+            throw failedPrecondition(`pack ${name}'s SHA-1 does not match its bytes`);
+          }
+        }
+        if (row.state === AssetRevisionState.READY) return { revision: toAssetRevision(row) };
+        const [ready] = await tx
+          .update(assetRevisions)
+          .set({ state: AssetRevisionState.READY })
+          .where(and(eq(assetRevisions.project_id, project.id), eq(assetRevisions.id, row.id)))
+          .returning();
+        if (!ready) throw notFound("asset revision");
+        return { revision: toAssetRevision(ready) };
       });
-      if (missing.length > 0) {
-        throw failedPrecondition(
-          `${missing.length} of the revision's blobs are not uploaded, such as ${missing.sort()[0]}`,
-        );
-      }
-      for (const [sha256, { size }] of blobs) {
-        if (held.get(sha256)?.size_bytes !== BigInt(size)) {
-          throw failedPrecondition(`blob ${sha256} is not ${size} bytes, as the revision declares`);
-        }
-      }
-      for (const [name, pack] of revision.packs) {
-        if (held.get(pack.sha256)?.sha1 !== pack.sha1) {
-          throw failedPrecondition(`pack ${name}'s SHA-1 does not match its bytes`);
-        }
-      }
-      if (row.state === AssetRevisionState.READY) return { revision: toAssetRevision(row) };
-      const [ready] = await db
-        .update(assetRevisions)
-        .set({ state: AssetRevisionState.READY })
-        .where(and(eq(assetRevisions.project_id, project.id), eq(assetRevisions.id, row.id)))
-        .returning();
-      if (!ready) throw notFound("asset revision");
-      return { revision: toAssetRevision(ready) };
     },
 
     async getAssetRevision(request, context) {

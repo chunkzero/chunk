@@ -1,7 +1,7 @@
 //! Loading the asset revision a deployment pins before it activates.
 
 use super::*;
-use crate::managed::assets;
+use crate::managed::{LoadDone, assets};
 use chunk_build::assets::Store;
 use chunk_contract::{AssetBlob, AssetContract, AssetRevision};
 use chunk_management::v1::AssetArtifact;
@@ -27,15 +27,16 @@ async fn a_revision_and_its_missing_blobs_load_unless_it_lacks_a_declared_world(
         ..AssetContract::default()
     };
     let cancel = CancellationToken::new();
+    let done = Arc::<LoadDone>::default();
 
-    let loaded = assets::load(&client, &store, Some(&artifact), &declared("koth"), &cancel).await.unwrap();
+    let loaded = assets::load(&client, &store, Some(&artifact), &declared("koth"), &done, &cancel).await.unwrap();
     assert!(store.contains(&blob(missing).sha256).unwrap());
     assert_eq!(store.read_revision(&revision.id()).unwrap(), revision);
     assert_eq!(loaded, Some(revision));
-    let error = assets::load(&client, &store, Some(&artifact), &declared("arena"), &cancel).await.unwrap_err();
+    let error = assets::load(&client, &store, Some(&artifact), &declared("arena"), &done, &cancel).await.unwrap_err();
     assert!(error.to_string().contains("no world arena for app lobby"), "{error}");
     let renamed = AssetArtifact { revision_id: "0".repeat(64), ..artifact };
-    assert!(assets::load(&client, &store, Some(&renamed), &declared("koth"), &cancel).await.is_err());
+    assert!(assets::load(&client, &store, Some(&renamed), &declared("koth"), &done, &cancel).await.is_err());
 }
 
 #[tokio::test]

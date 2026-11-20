@@ -69,6 +69,14 @@ export function requireJvmImage(manifest: ReleaseManifest, template: string | un
 
 const unfinished = [DeploymentState.PENDING, DeploymentState.IN_PROGRESS];
 
+/** The values a deployment takes when superseded; its environment's drain deadline, as of now, bounds its draining. */
+const superseded = {
+  state: DeploymentState.SUPERSEDED,
+  update_time: sql`now()`,
+  drain_until: sql`now() + make_interval(secs => (
+    select e.drain_deadline_seconds from environments e where e.id = ${deployments.environment_id}))`,
+};
+
 /** What a deployment pins: a release and an asset revision of one project. */
 export interface Deployable {
   release_id: string;
@@ -104,7 +112,7 @@ export async function createDeployment(
   }
   await db
     .update(deployments)
-    .set({ state: DeploymentState.SUPERSEDED, update_time: sql`now()` })
+    .set(superseded)
     .where(and(eq(deployments.environment_id, environment.id), inArray(deployments.state, unfinished)));
   const [row] = await db
     .insert(deployments)
@@ -188,7 +196,7 @@ export async function activateDeployment(db: Db, id: string): Promise<void> {
   if (!row) return;
   await db
     .update(deployments)
-    .set({ state: DeploymentState.SUPERSEDED, update_time: sql`now()` })
+    .set(superseded)
     .where(
       and(
         eq(deployments.environment_id, row.environment_id),

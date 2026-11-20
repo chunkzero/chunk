@@ -36,6 +36,13 @@
       "when": 1795205857037,
       "tag": "0004_asset_deletions",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795206793110,
+      "tag": "0005_drain_until",
+      "breakpoints": true
     }
   ]
 }

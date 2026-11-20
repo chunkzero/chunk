@@ -241,9 +241,59 @@ describe.skipIf(!databaseUrl)("AssetService", () => {
 
     await collectAssets(h.deps, projectId);
     expect(await stored()).toBe(true);
+    // Shortening the deadline doesn't release what the deployment's own deadline, set when it was superseded, keeps.
+    await h.sql`update environments set drain_max_age_seconds = 60, drain_deadline_seconds = 60 where id = ${environmentId}`;
     await h.sql`update deployments set update_time = now() - interval '5 hours' where asset_revision_id = ${draining.id}`;
     await collectAssets(h.deps, projectId);
+    expect(await stored()).toBe(true);
+    await h.sql`update deployments set drain_until = now() - interval '1 minute' where asset_revision_id = ${draining.id}`;
+    await collectAssets(h.deps, projectId);
     expect(await stored()).toBe(false);
+  });
+
+  test("a completion paused after verifying its blobs holds off collection, so the revision does not become ready without them", async () => {
+    const { projectId } = await createEnvironment(h);
+    const assets = h.client(AssetService);
+    const revision = assetRevision({ shared: { "a.txt": "a" } });
+    const [upload] = (await assets.uploadAssets({ projectId, manifest: revision.manifest })).uploads;
+    await fetch(upload?.upload?.url ?? "", { method: "PUT", body: revision.blobs.get(upload?.sha256 ?? "") });
+    await h.sql`update asset_revisions set protected_until = now() - interval '1 minute' where project_id = ${projectId}`;
+
+    const { complete } = h.deps.releases;
+    let verified: () => void = () => {};
+    const verifiedSignal = new Promise<void>((resolve) => (verified = resolve));
+    let resume: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (resume = resolve));
+    h.deps.releases.complete = async (key, expected, verify) => {
+      const result = await complete(key, expected, verify);
+      verified();
+      await gate;
+      return result;
+    };
+    try {
+      const completing = assets.completeAssetUpload({ projectId, revisionId: revision.id });
+      await verifiedSignal;
+      const state = { collected: false };
+      const collecting = collectAssets(h.deps, projectId).finally(() => (state.collected = true));
+      // Collection is blocked behind the completion's shared lock.
+      while (!state.collected) {
+        const [row] = await h.sql<{ waiting: number }[]>`
+          select count(*)::int as waiting from pg_locks where locktype = 'advisory' and not granted`;
+        if (row && row.waiting > 0) break;
+        await Bun.sleep(10);
+      }
+      resume();
+      expect((await completing).revision?.state).toBe(AssetRevisionState.READY);
+      expect(await collecting).toEqual({ revisions: 0, blobs: 0 });
+    } finally {
+      resume();
+      h.deps.releases.complete = complete;
+    }
+    const sha256 = [...revision.blobs.keys()][0] ?? "";
+    expect(await h.releases.exists(blobKey(projectId, sha256))).toBe(true);
+    expect((await assets.getAssetRevision({ projectId, revisionId: revision.id })).revision?.state).toBe(
+      AssetRevisionState.READY,
+    );
   });
 
   test("a recorded deletion is dropped when its blob is referenced again, and retried when the store fails", async () => {

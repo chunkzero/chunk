@@ -85,7 +85,7 @@ pub(crate) struct Managed<'a> {
     /// many loads had finished, and which revisions were kept, when the last removal fully succeeded.
     asset_loads: tokio::sync::RwLock<Option<(u64, BTreeSet<String>)>>,
     /// How many loads into `assets` have finished, whether they succeeded, failed or were abandoned.
-    asset_loads_finished: AtomicU64,
+    asset_loads_finished: Arc<AtomicU64>,
     /// Where the activation management has not yet accepted is recorded.
     activation: PathBuf,
     core: &'a Core,
@@ -180,12 +180,17 @@ struct Work<'a> {
 /// A load filling the asset store, which removal of unused revisions waits for.
 struct AssetLoad<'a> {
     _shared: tokio::sync::RwLockReadGuard<'a, Option<(u64, BTreeSet<String>)>>,
-    finished: &'a AtomicU64,
+    done: Arc<LoadDone>,
 }
 
-impl Drop for AssetLoad<'_> {
+/// Counts a load as finished once dropped. The load shares it with every blocking insert it starts, which keep running
+/// when the load is cancelled or fails, so the count advances only after the last of them is done.
+#[derive(Default)]
+struct LoadDone(Arc<AtomicU64>);
+
+impl Drop for LoadDone {
     fn drop(&mut self) {
-        self.finished.fetch_add(1, Ordering::Relaxed);
+        self.0.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -228,7 +233,7 @@ impl<'a> Managed<'a> {
             releases: release::Store::new(state, core.archives().clone()),
             assets: core.asset_store(),
             asset_loads: tokio::sync::RwLock::default(),
-            asset_loads_finished: AtomicU64::default(),
+            asset_loads_finished: Arc::default(),
             activation: state.join("managed.json"),
             core,
             gateway,
@@ -452,10 +457,14 @@ impl<'a> Managed<'a> {
         }
     }
 
-    /// Keeps unused revisions from being removed from `assets` until the returned guard drops, which also records that
-    /// a load finished, as it may have left blobs behind that no revision holds.
+    /// Keeps unused revisions from being removed from `assets` until the returned guard drops. The load is counted as
+    /// finished once that and the clones of `done` are dropped, as it may have left blobs behind that no revision
+    /// holds.
     async fn begin_asset_load(&self) -> AssetLoad<'_> {
-        AssetLoad { _shared: self.asset_loads.read().await, finished: &self.asset_loads_finished }
+        AssetLoad {
+            _shared: self.asset_loads.read().await,
+            done: Arc::new(LoadDone(Arc::clone(&self.asset_loads_finished))),
+        }
     }
 
     fn start(&self, desired: v1::AttachResponse) -> Work<'_> {
@@ -540,8 +549,8 @@ impl<'a> Managed<'a> {
         if backend.check_deployment(id).await.is_err() {
             return false;
         }
-        let _loading = self.begin_asset_load().await;
-        match assets::restore(&self.client, &self.assets, desired.assets.as_ref(), cancel).await {
+        let loading = self.begin_asset_load().await;
+        match assets::restore(&self.client, &self.assets, desired.assets.as_ref(), &loading.done, cancel).await {
             Ok(restored) => restored.is_some(),
             Err(error) => {
                 tracing::warn!(%error, deployment = %desired.deployment_id, "cannot restore the deployment's assets");
@@ -559,7 +568,8 @@ impl<'a> Managed<'a> {
             return Ok(false);
         };
         let loading = self.begin_asset_load().await;
-        let revision = assets::load(&self.client, &self.assets, desired.assets.as_ref(), loaded.assets(), cancel);
+        let revision =
+            assets::load(&self.client, &self.assets, desired.assets.as_ref(), loaded.assets(), &loading.done, cancel);
         let Some(revision) = revision.await? else {
             return Ok(false);
         };

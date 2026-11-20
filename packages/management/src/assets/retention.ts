@@ -36,8 +36,9 @@ export async function lockAssets(tx: Db, projectId: string, mode: "shared" | "ex
  * Deletes the project's revisions that nothing keeps, and then the blobs no remaining revision holds, from the database
  * and the release store. A revision is kept while it is the project's head, one of its `keptRecentRevisions` newest
  * ready revisions, protected by an upload declared within `uploadLifetimeMs`, pinned by the active, an unfinished or one
- * of the `keptRecentDeployments` newest deployments of any of its environments, or pinned by a deployment that
- * is still draining. Returns how many revisions it deleted and how many blobs it removed from the release store.
+ * of the `keptRecentDeployments` newest deployments of any of its environments, or pinned by a superseded deployment
+ * that is still draining: until the later of the deadline its environment had when it was superseded and the one it has
+ * now, so shortening the deadline never removes what core may still serve. Returns how many revisions it deleted and how many blobs it removed from the release store.
  *
  * The database rows are deleted first, recording the blobs' keys in `asset_deletions`; a later transaction deletes the
  * bytes of each key no row has claimed again. A store delete that fails leaves its key recorded, so the next
@@ -90,7 +91,7 @@ async function deleteUnusedRows(tx: Db, projectId: string): Promise<number> {
     with deployed as (
       select d.asset_revision_id, d.state, d.id = e.active_deployment_id as active,
         d.state = ${DeploymentState.SUPERSEDED}
-          and d.update_time + make_interval(secs => e.drain_deadline_seconds) > now() as draining,
+          and now() < greatest(d.drain_until, d.update_time + make_interval(secs => e.drain_deadline_seconds)) as draining,
         row_number() over (partition by d.environment_id order by d.seq desc) as recency
       from deployments d join environments e on e.id = d.environment_id
       where e.project_id = ${projectId}

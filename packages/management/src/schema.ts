@@ -290,6 +290,8 @@ export const deployments = pgTable(
     /** Stop the deployments this one replaces at once instead of draining them. */
     stop_previous: boolean().notNull().default(false),
     asset_revision_id: text().notNull(),
+    /** When a superseded deployment stops draining: its environment's drain deadline after it was superseded. */
+    drain_until: time(),
   },
   (t) => [index("deployments_environment").on(t.environment_id, t.seq)],
 );
