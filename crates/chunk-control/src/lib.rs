@@ -157,7 +157,7 @@ impl Release {
             || self.deployment.deployment.is_empty()
             || !plain(&self.release_id)
             || self.max_processes == 0
-            || self.max_processes > 32
+            || self.max_processes > 256
             || self.idle_node_timeout_seconds > 3600
             || self.session_types.is_empty()
             || self

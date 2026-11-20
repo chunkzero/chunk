@@ -48,9 +48,9 @@ no server broadcast, slow reader or backpressure workload.
 **Control workloads** run core in the target with its normal background tasks and on-disk SQLite, and call it as core's
 own gateway. Synthetic JVMs, one per host, follow their `jvm/<host>` topics inside the target process, so their work
 counts toward the target; they report sessions and arrivals but launch no JVMs and simulate no ticks or failures. The
-fixture declares 128-player sessions, one session per process and at most 32 processes. `control-population` offers 100
+fixture declares 128-player sessions, one session per process and at most 64 processes. `control-population` offers 100
 snapshots per second by default, each what a reconnecting gateway reads. `control-churn` reports complete player
-lifecycles per second; `population` (plus `concurrency` for churn) may be at most 4096. Released claims are kept for
+lifecycles per second; `population` (plus `concurrency` for churn) may be at most 8192. Released claims are kept for
 five minutes, so shorter runs measure churn with growing history. Setup and a successful run end by checking that a
 fresh snapshot holds exactly the seeded population.
 

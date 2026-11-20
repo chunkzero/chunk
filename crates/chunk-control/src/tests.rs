@@ -304,9 +304,7 @@ async fn expiry_releases_only_unactivated_reservations_and_confirmed_death_fence
     control.activate(assignment.claim.unwrap()).await.unwrap();
     control
         .update(|state| {
-            for claim in state.claims.values_mut() {
-                claim.created_at_ms = 0;
-            }
+            crate::state::modify(&mut state.claims, |_, _| true, |_, claim| claim.created_at_ms = 0);
             Ok(())
         })
         .unwrap();
@@ -315,9 +313,7 @@ async fn expiry_releases_only_unactivated_reservations_and_confirmed_death_fence
     assert!(control.state().unwrap().claims["waiting"].phase == Phase::Reserved);
     control
         .update(|state| {
-            for claim in state.claims.values_mut() {
-                claim.assigned_at_ms = Some(0);
-            }
+            crate::state::modify(&mut state.claims, |_, _| true, |_, claim| claim.assigned_at_ms = Some(0));
             Ok(())
         })
         .unwrap();

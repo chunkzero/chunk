@@ -3,11 +3,13 @@ pub(crate) mod feed;
 mod store;
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     sync::{Arc, Mutex, MutexGuard},
 };
 
 use chunk_proto::control::v1::{ClaimIdentity, ClaimRequest};
+use chunk_store::DocumentKey;
+use imbl::OrdMap;
 use prost::Message;
 use sha2::{Digest, Sha256};
 
@@ -19,6 +21,8 @@ pub(crate) use entities::{
 };
 pub use entities::{Generation, Launch, MachineKind};
 
+/// Its maps share structure with the states they were cloned from, so a clone is cheap and diffing it against its
+/// origin visits only the rows that changed.
 #[derive(Clone, Default)]
 pub(crate) struct State {
     pub config: Vec<u8>,
@@ -26,23 +30,23 @@ pub(crate) struct State {
     pub current: Option<String>,
     /// The deployments asked to stop at once, rather than drain, until their backend versions are released.
     pub stopping: BTreeSet<String>,
-    pub releases: BTreeMap<String, ReleaseState>,
-    pub hosts: BTreeMap<String, HostState>,
-    pub sessions: BTreeMap<String, SessionState>,
-    pub players: BTreeMap<String, PlayerState>,
-    pub claims: BTreeMap<String, Claim>,
+    pub releases: OrdMap<String, ReleaseState>,
+    pub hosts: OrdMap<String, HostState>,
+    pub sessions: OrdMap<String, SessionState>,
+    pub players: OrdMap<String, PlayerState>,
+    pub claims: OrdMap<String, Claim>,
     pub method_sequence: u64,
-    pub moves: BTreeMap<String, MoveIntent>,
+    pub moves: OrdMap<String, MoveIntent>,
     /// The operation IDs of the moves out of each claim, by the claim's operation ID. Derived from `moves`, not stored.
-    pub move_sources: BTreeMap<String, BTreeSet<String>>,
-    pub drains: BTreeMap<String, Drain>,
+    pub move_sources: OrdMap<String, BTreeSet<String>>,
+    pub drains: OrdMap<String, Drain>,
     /// What each of the operator's operation IDs is bound to.
-    pub operator_calls: BTreeMap<String, OperatorCall>,
-    pub rosters: BTreeMap<String, Roster>,
+    pub operator_calls: OrdMap<String, OperatorCall>,
+    pub rosters: OrdMap<String, Roster>,
     /// Machines core minted credentials for, by ID.
-    pub machines: BTreeMap<String, Machine>,
+    pub machines: OrdMap<String, Machine>,
     /// What remote runners start on each host, by host ID.
-    pub launches: BTreeMap<String, Launch>,
+    pub launches: OrdMap<String, Launch>,
     /// The store epoch, fixed while control runs.
     pub epoch: u64,
     /// The revision of the last commit this state includes. App commits share the log, so later revisions may
@@ -108,10 +112,20 @@ impl State {
         }
     }
 
-    /// Replaces [`Generation::PENDING`] with `generation`, the commit that applied the update.
-    fn stamp(&mut self, generation: Generation) {
-        self.claims.values_mut().for_each(|claim| claim.stamp(generation));
-        self.moves.values_mut().for_each(|intent| intent.stamp(generation));
+    /// Replaces [`Generation::PENDING`] with `generation`, the commit that applied the update, in the `pending` rows:
+    /// the only ones that can name it, since committed state never does.
+    fn stamp<'a>(&mut self, generation: Generation, pending: impl IntoIterator<Item = &'a DocumentKey>) {
+        for key in pending {
+            if key.table == store::CLAIMS
+                && let Some(claim) = self.claims.get_mut(&key.id)
+            {
+                claim.stamp(generation);
+            } else if key.table == store::MOVES
+                && let Some(intent) = self.moves.get_mut(&key.id)
+            {
+                intent.stamp(generation);
+            }
+        }
         entities::stamp_wire(&mut self.method_sequence, generation);
     }
 
@@ -127,6 +141,20 @@ impl State {
             if owner.current.is_none() && owner.pending.is_none() {
                 self.players.remove(player);
             }
+        }
+    }
+}
+
+/// Applies `change` to the rows `select` accepts, copying only the nodes that hold them.
+pub(crate) fn modify<T: Clone>(
+    rows: &mut OrdMap<String, T>,
+    mut select: impl FnMut(&str, &T) -> bool,
+    mut change: impl FnMut(&str, &mut T),
+) {
+    let ids: Vec<_> = rows.iter().filter(|(id, row)| select(id, row)).map(|(id, _)| id.clone()).collect();
+    for id in ids {
+        if let Some(row) = rows.get_mut(&id) {
+            change(&id, row);
         }
     }
 }
@@ -234,6 +262,7 @@ impl Writer<'_> {
         let touched = feed::touched(&previous, &next, writes.keys().map(|(key, _)| key));
         let moves = writes.keys().filter(|(key, _)| key.table == store::MOVES).map(|(key, _)| key.id.as_str());
         next.index_moves(&previous, moves);
+        let pending: Vec<_> = writes.pending_keys().cloned().collect();
         #[cfg(test)]
         if let Some(committing) = self.authority.committing.lock().ok().and_then(|mut hook| hook.take()) {
             committing();
@@ -242,7 +271,7 @@ impl Writer<'_> {
             Ok(revision) if revision > previous.revision => {
                 next.revision = revision;
                 let position = next.position();
-                next.stamp(position);
+                next.stamp(position, &pending);
                 self.authority.feed.record(next, touched)?;
                 Ok(result)
             }

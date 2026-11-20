@@ -3,7 +3,7 @@ use tokio::task::JoinSet;
 
 use crate::{
     Control, Error, Result,
-    state::{Capacity, Claim, Drain, Phase, State},
+    state::{self, Capacity, Claim, Drain, Phase, State},
 };
 
 /// Records a drain once per operation, retiring the resolved host and its sessions until the deadline.
@@ -23,9 +23,7 @@ pub(crate) fn retire_host(
     }
     let host = host(state)?;
     state.hosts.get_mut(&host).ok_or(Error::Invalid("unknown host"))?.retired = true;
-    for session in state.sessions.values_mut().filter(|s| s.host == host) {
-        session.retired = true;
-    }
+    state::modify(&mut state.sessions, |_, session| session.host == host, |_, session| session.retired = true);
     let deadline_ms = crate::now_ms() + u64::from(timeout_seconds) * 1000;
     state.drains.insert(operation, Drain { request, host, deadline_ms, automatic });
     Ok(())

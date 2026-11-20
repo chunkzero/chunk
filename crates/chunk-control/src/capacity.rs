@@ -11,7 +11,7 @@ use crate::{
     Control, Result,
     host::Progress,
     placement::runs_host,
-    state::{Capacity, HostState, Phase, State},
+    state::{self, Capacity, HostState, Phase, State},
 };
 
 impl Control {
@@ -123,10 +123,14 @@ fn released(state: &mut State, id: &str, from: Capacity) -> Result<()> {
     };
     host.capacity = Capacity::Released;
     host.retired = true;
-    for session in state.sessions.values_mut().filter(|session| session.host == id) {
-        session.retired = true;
-        session.finished = true;
-    }
+    state::modify(
+        &mut state.sessions,
+        |_, session| session.host == id,
+        |_, session| {
+            session.retired = true;
+            session.finished = true;
+        },
+    );
     let prepared: Vec<_> = state
         .claims
         .iter()
@@ -148,7 +152,5 @@ pub(crate) fn stop(state: &mut State, id: &str, failure: Option<String>) {
     host.capacity = Capacity::Releasing;
     host.failure = failure;
     host.retired = true;
-    for session in state.sessions.values_mut().filter(|session| session.host == id) {
-        session.retired = true;
-    }
+    state::modify(&mut state.sessions, |_, session| session.host == id, |_, session| session.retired = true);
 }

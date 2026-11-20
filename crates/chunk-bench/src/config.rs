@@ -3,7 +3,7 @@ use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 
 /// Players the control fixture's release can seat: control's limit of 32 processes, each one 128-player session.
-pub const CONTROL_SLOTS: u32 = 32 * 128;
+pub const CONTROL_SLOTS: u32 = 64 * 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
@@ -181,10 +181,10 @@ mod tests {
 
     #[test]
     fn churn_budget_includes_in_flight_and_seeded_players() {
-        let mut config = Config::parse_from(["bench", "control-churn", "--population", "4032", "--concurrency", "64"]);
+        let mut config = Config::parse_from(["bench", "control-churn", "--population", "8128", "--concurrency", "64"]);
         assert!(config.validate().is_ok());
         config.population += 1;
-        assert!(config.validate().unwrap_err().to_string().contains("4096"));
+        assert!(config.validate().unwrap_err().to_string().contains("8192"));
         config.scenario = Scenario::ControlPopulation;
         assert!(config.validate().is_ok());
     }

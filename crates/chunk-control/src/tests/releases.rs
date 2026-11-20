@@ -26,6 +26,16 @@ async fn arrived(fixture: &Fixture, control: &Control, operation: &str) -> Claim
 }
 
 #[tokio::test]
+async fn a_release_runs_at_most_256_processes() {
+    let mut fixture = Fixture::new();
+    fixture.release.max_processes = 256;
+    assert!(fixture.release.validate().is_ok());
+    fixture.release.max_processes = 257;
+    assert!(fixture.release.validate().is_err());
+    fixture.close().await;
+}
+
+#[tokio::test]
 async fn new_logins_and_moves_use_the_current_release_while_earlier_sessions_stay() {
     let fixture = Fixture::new();
     let control = fixture.control().await;

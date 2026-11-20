@@ -71,7 +71,7 @@ nothing replays packets to restore them.
 
 ## Limits
 
-A release allows at most 32 processes. A machine profile allows 1 to 16 sessions per process, a session type 1 to 128
+A release allows at most 256 processes. A machine profile allows 1 to 16 sessions per process, a session type 1 to 128
 players, and a host at most 128 players across its sessions. Control retains up to 256 sessions. At most 1024 claim,
 activation and cancellation operations are in flight; beyond that, calls fail with `OVERLOADED` and should be retried.
 Released claims are forgotten five minutes after release.

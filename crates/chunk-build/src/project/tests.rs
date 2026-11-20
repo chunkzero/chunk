@@ -97,6 +97,7 @@ fn local_defaults_and_app_overrides_are_validated_against_profiles_and_limits() 
         ("machine_profile = \"small\"", "machine_profile = 'missing'", "unknown profile"),
         ("capacity = 16", "capacity = 129", "local.capacity"),
         ("max_processes = 4", "max_processes = 0", "local.max_processes"),
+        ("max_processes = 4", "max_processes = 257", "local.max_processes"),
         ("memory_mib = 512", "memory_mib = 1", "local.profiles.small"),
         ("max_sessions = 2", "max_sessions = 17", "local.profiles.small"),
     ] {
