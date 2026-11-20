@@ -40,8 +40,9 @@ methods, whose output (at most 32 messages and 16 KiB per call) the backend logs
 also when called on a subclass. An error's `stack` is always a string: `Error.prepareStackTrace` is ignored, so code
 never receives call-site objects. Not available: filesystem, network, process, timers, Node or Deno globals, `import()`
 (every call rejects, including a module importing itself), `Intl` and locale methods, `performance`, weak references,
-WebAssembly, `SharedArrayBuffer` and resizable `ArrayBuffer`s. A promise that can never settle fails the call, and so
-does an unhandled rejection.
+WebAssembly, `SharedArrayBuffer` and resizable `ArrayBuffer`s. A promise that can never settle fails the call, and so do
+an unhandled rejection and an error thrown from a `queueMicrotask` callback. A failed call reports V8's message for the
+thrown value and the stack V8 captured with it, at most 16 KiB, without running code on the value.
 
 ## Limits
 
@@ -60,8 +61,8 @@ bound.
 
 ## Safety and tests
 
-`unsafe` is denied in this crate, except in `src/isolate.rs`, which enters parked isolates, and `src/allocator.rs`,
-which implements V8's `ArrayBuffer` allocator with the crate's memory accounting.
+`unsafe` is denied in this crate, except in `src/isolate.rs`, which enters parked isolates and interrupts running ones,
+and `src/allocator.rs`, which implements V8's `ArrayBuffer` allocator with the crate's memory accounting.
 
 `cargo test -p chunk-js` runs the tests. `cargo bench -p chunk-js --bench engines -- <bundle directory>` compares this
 engine with a plain V8 context on a compiled bundle, such as one [`chunk-bench`](../chunk-bench/README.md) writes.

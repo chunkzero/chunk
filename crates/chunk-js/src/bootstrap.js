@@ -11,6 +11,14 @@
   const write = Deno.core.ops.op_chunk_write;
   const now = Deno.core.ops.op_chunk_now;
   const random = Deno.core.ops.op_chunk_random;
+  const report = Deno.core.ops.op_chunk_report;
+  // Every application error reaches the host through report, which formats it without running
+  // application code; deno_core's own conversion reads properties the thrown value controls.
+  Deno.core.setReportExceptionCallback((error) => report(error, false));
+  Deno.core.setUnhandledPromiseRejectionHandler((_, reason) => {
+    report(reason, true);
+    return true;
+  });
   const freeze = Object.freeze;
   const parse = JSON.parse;
   const stringify = JSON.stringify;
@@ -94,7 +102,7 @@
     }
     return (actionEnv = freeze(values));
   };
-  return async (handler, callerJson, generation, argsJson) => {
+  const invoke = async (handler, callerJson, generation, argsJson) => {
     const invocationId = actionId();
     let caller;
     let callerRead = false;
@@ -157,5 +165,12 @@
             }),
           });
     return serialize(await handler(context, parse(argsJson)));
+  };
+  return async (handler, callerJson, generation, argsJson) => {
+    try {
+      return await invoke(handler, callerJson, generation, argsJson);
+    } catch (error) {
+      report(error, false);
+    }
   };
 })();

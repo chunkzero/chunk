@@ -593,3 +593,139 @@ fn imports_at_runtime_reject_without_aborting() {
     ";
     assert!(matches!(Deployment::new("build-a".into(), source.into(), Limits::default()), Err(Error::JavaScript(_))));
 }
+
+#[test]
+fn thrown_values_cannot_abort_or_stall_error_reporting() {
+    let limits = Limits { execution: Duration::from_millis(200), ..Limits::default() };
+    let values = [
+        "Object.assign(new Error('keys'), { [Symbol.for('errorAdditionalPropertyKeys')]: new Array(2 ** 32 - 1) })",
+        "Object.defineProperty(new Error('stalled'), 'message', { get() { for (;;); } })",
+        "new Proxy({}, { get() { for (;;); } })",
+    ];
+    for thrown in values {
+        for failure in [
+            format!("throw {thrown};"),
+            format!("queueMicrotask(() => {{ throw {thrown}; }});"),
+            format!("Promise.reject({thrown});"),
+        ] {
+            let mut engine = deployment(&format!("if (args.fail) {{ {failure} await 0; }} return 42;"), limits);
+            let mut fail = invocation();
+            fail.arguments = json!({"fail": true}).into();
+            let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
+            assert!(matches!(result, Err(Error::JavaScript(_))), "{failure}: {result:?}");
+            assert_eq!(value(&call(&mut engine).unwrap()), json!(42), "{failure}");
+            let source = format!("{failure} export default () => 1;");
+            let result = Deployment::new("build-a".into(), source, limits).map(|_| ());
+            assert!(matches!(result, Err(Error::JavaScript(_))), "top-level {failure}: {result:?}");
+        }
+    }
+    let Err(Error::JavaScript(thrown)) = run(&format!("throw {};", values[0])) else {
+        panic!("expected a JavaScript error");
+    };
+    assert!(thrown.starts_with("Error: keys\n    at default (chunk:deployment/build-a:1:"), "{thrown}");
+}
+
+#[test]
+fn termination_survives_error_prototypes_that_poison_conversion() {
+    let poison = r"
+        const keys = Symbol.for('errorAdditionalPropertyKeys');
+        Error.prototype[keys] = new Array(2 ** 32 - 1);
+        Error.prototype.cause = Object.assign(new Error('cause'), { [keys]: new Array(2 ** 32 - 1) });
+        Object.defineProperty(Error.prototype, 'name', { get() { for (;;); } });
+    ";
+    let time = Limits { execution: Duration::from_millis(200), ..Limits::default() };
+    let heap = Limits { execution: Duration::from_secs(5), heap_bytes: 16 * 1024 * 1024 };
+    for (body, limits, expected) in [
+        ("for (;;);", time, Error::Deadline),
+        ("for (;;) await 0;", time, Error::Deadline),
+        ("const a = []; for (;;) a.push(new Array(10000).fill('x'));", heap, Error::Heap),
+    ] {
+        let kind = |result: Result<(), Error>| std::mem::discriminant(&result.unwrap_err());
+        let expected = std::mem::discriminant(&expected);
+        let result = call(&mut deployment(&format!("{poison} {body}"), limits)).map(|_| ());
+        assert_eq!(kind(result), expected, "{body}");
+        let source = format!("{poison} {body} export default () => 1;");
+        let result = Deployment::new("build-a".into(), source, limits).map(|_| ());
+        assert_eq!(kind(result), expected, "top-level {body}");
+    }
+}
+
+#[test]
+fn failed_invocation_leaves_no_rejection_for_the_next_call() {
+    let mut engine = deployment(
+        r#"if (args.fail) { Promise.reject(new Error("leftover")); throw new Error("primary"); } return 42;"#,
+        Limits::default(),
+    );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail": true}).into();
+    let Err(Error::JavaScript(message)) = engine.execute(fail, Box::new(Snapshot), &Cancellation::default()) else {
+        panic!("expected a JavaScript error");
+    };
+    assert!(message.starts_with("Error: primary"), "{message}");
+    let mut pass = invocation();
+    pass.arguments = json!({"fail": false}).into();
+    let result = engine.execute(pass, Box::new(Snapshot), &Cancellation::default());
+    assert_eq!(value(&result.unwrap()), json!(42));
+
+    let mut engine = deployment(
+        r#"
+        globalThis.calls = (globalThis.calls ?? 0) + 1;
+        if (args.fail) {
+            queueMicrotask(() => { Promise.reject(new Error("leftover")); throw new Error("primary"); });
+        }
+        return calls;
+        "#,
+        Limits::default(),
+    );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail": true}).into();
+    let Err(Error::JavaScript(message)) = engine.execute(fail, Box::new(Snapshot), &Cancellation::default()) else {
+        panic!("expected a JavaScript error");
+    };
+    assert!(message.starts_with("Error: primary"), "{message}");
+    for expected in [2, 3] {
+        let mut pass = invocation();
+        pass.arguments = json!({"fail": false}).into();
+        let result = engine.execute(pass, Box::new(Snapshot), &Cancellation::default());
+        assert_eq!(value(&result.unwrap()), json!(expected));
+    }
+}
+
+#[test]
+fn error_reports_are_bounded_before_formatting() {
+    let started = std::time::Instant::now();
+    let Err(Error::JavaScript(message)) = run(r#"
+        throw new Error("€".repeat(4 * 1024 * 1024));
+    "#) else {
+        panic!("expected a JavaScript error");
+    };
+    assert!(message.len() <= 16 * 1024 && message.capacity() <= 16 * 1024, "{} {}", message.len(), message.capacity());
+    assert!(message.starts_with("Error: €€€"), "{}", &message[..20]);
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+}
+
+#[test]
+fn reading_stack_in_a_function_that_hits_its_deadline_stays_bounded() {
+    let limits = Limits { execution: Duration::from_millis(200), ..Limits::default() };
+    let mut engine = deployment(
+        r"
+        if (args.fail) {
+            const error = Object.defineProperty(new Error('x'), 'message', { get() { for (;;); } });
+            error.stack;
+            for (;;);
+        }
+        return 42;
+        ",
+        limits,
+    );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail": true}).into();
+    let started = std::time::Instant::now();
+    let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
+    assert!(matches!(result, Err(Error::Deadline)), "{result:?}");
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    let mut pass = invocation();
+    pass.arguments = json!({"fail": false}).into();
+    let result = engine.execute(pass, Box::new(Snapshot), &Cancellation::default());
+    assert_eq!(value(&result.unwrap()), json!(42));
+}

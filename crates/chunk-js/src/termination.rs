@@ -14,6 +14,10 @@ impl Termination {
         let _ = self.0.compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
     }
 
+    pub fn is_recorded(&self) -> bool {
+        self.0.load(Ordering::Acquire) != 0
+    }
+
     pub fn take(&self) -> Option<Error> {
         match self.0.swap(0, Ordering::AcqRel) {
             1 => Some(Error::Cancelled),
