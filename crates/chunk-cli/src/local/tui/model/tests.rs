@@ -1,4 +1,4 @@
-use chunk_proto::sync::v1::{Node, OperatorPlayer, SessionDemand};
+use chunk_proto::sync::v1::{JvmSessionPhase, Node, NodePhase, NodeSession, OperatorPlayer, SessionDemand};
 
 use crate::local::Command;
 
@@ -57,12 +57,12 @@ fn node_selection_previews_logs_and_survives_refreshes_and_tab_changes() {
     assert_eq!(model.focus, Focus::Nodes);
     assert_eq!(model.visible().len(), 1);
     model.move_node(-1);
-    assert!(model.node.is_none());
+    assert_eq!(model.selection, JvmSelection::All);
     assert_eq!(model.visible().len(), 3);
 
     model.move_node(1);
     nodes(&mut model, &["aaaaaaaa-1111"]);
-    assert!(model.node.is_none());
+    assert_eq!(model.selection, JvmSelection::All);
     assert_eq!(model.scroll, 0);
 }
 
@@ -79,7 +79,7 @@ fn failed_reload_preserves_the_dashboard_and_selected_node() {
         state: Step::Failed("compile failed\nthe previous release keeps serving".into()),
     });
     assert!(model.ready());
-    assert_eq!(model.node.as_deref(), Some("aaaaaaaa-1111"));
+    assert_eq!(model.selection, JvmSelection::Node("aaaaaaaa-1111".into()));
     assert!(matches!(model.step("Compile").unwrap().state, Step::Failed(_)));
     assert!(model.step("Compile").unwrap().started.is_none());
     model.apply(Event::Step { name: "Reload", state: Step::Running("Lobby.kt".into()) });
@@ -177,4 +177,84 @@ fn search_keeps_a_matching_selection_and_the_move_form_targets_it() {
     model.search();
     model.cancel();
     assert!(model.filter.is_empty() && model.input.is_none());
+}
+
+#[test]
+fn session_selection_filters_tagged_lines_keeps_untagged_at_node_and_falls_back_to_parent() {
+    let session = |id: &str, key: &str, players: u32| NodeSession {
+        id: id.into(),
+        session_type: "arena/default".into(),
+        key: key.into(),
+        players,
+        phase: JvmSessionPhase::Ready.into(),
+    };
+    let mut model = Model::new();
+    ready(&mut model);
+    model.apply(Event::Deployments(vec![Deployment {
+        id: "release".into(),
+        state: "current".into(),
+        nodes: vec![
+            (
+                "aaaaaaaa-1111".into(),
+                Node {
+                    app: "arena".into(),
+                    phase: NodePhase::Online.into(),
+                    sessions: vec![session("sess-1111-aaaa", "duel-1", 2), session("sess-2222-bbbb", "duel-2", 1)],
+                    ..Default::default()
+                },
+            ),
+            (
+                "bbbbbbbb-2222".into(),
+                Node {
+                    app: "lobby".into(),
+                    phase: NodePhase::Stopped.into(),
+                    sessions: vec![session("stale-session", "main", 5)],
+                    ..Default::default()
+                },
+            ),
+        ],
+        players: Vec::new(),
+        destinations: Vec::new(),
+    }]));
+
+    assert_eq!(model.sessions(), 2);
+    log(&mut model, Source::Jvm, "aaaaaaaa JVM started");
+    log(&mut model, Source::Jvm, "aaaaaaaa [session:sess-1111-aaaa] round 1");
+    log(&mut model, Source::Jvm, "aaaaaaaa [session:sess-2222-bbbb] round 2");
+    log(&mut model, Source::Jvm, "bbbbbbbb lobby stopped");
+
+    // All nodes shows everything.
+    assert_eq!(model.visible().len(), 4);
+
+    // Row 1 selects node aaaaaaaa: includes untagged startup + both sessions.
+    model.move_node(1);
+    assert_eq!(model.selection, JvmSelection::Node("aaaaaaaa-1111".into()));
+    assert_eq!(model.visible().len(), 3);
+
+    // Row 2 selects sess-1111-aaaa: only lines tagged with that session (untagged stays at node level).
+    model.move_node(1);
+    assert_eq!(
+        model.selection,
+        JvmSelection::Session { host: "aaaaaaaa-1111".into(), session: "sess-1111-aaaa".into() }
+    );
+    assert_eq!(model.visible(), ["aaaaaaaa [session:sess-1111-aaaa] round 1"]);
+
+    // When the selected session ends, selection falls back to its parent node.
+    model.apply(Event::Deployments(vec![Deployment {
+        id: "release".into(),
+        state: "current".into(),
+        nodes: vec![(
+            "aaaaaaaa-1111".into(),
+            Node {
+                app: "arena".into(),
+                phase: NodePhase::Online.into(),
+                sessions: vec![session("sess-2222-bbbb", "duel-2", 1)],
+                ..Default::default()
+            },
+        )],
+        players: Vec::new(),
+        destinations: Vec::new(),
+    }]));
+    assert_eq!(model.selection, JvmSelection::Node("aaaaaaaa-1111".into()));
+    assert_eq!(model.visible().len(), 3);
 }

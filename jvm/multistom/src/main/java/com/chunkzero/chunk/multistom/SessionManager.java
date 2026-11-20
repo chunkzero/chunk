@@ -7,6 +7,7 @@ import com.chunkzero.chunk.runtime.ComponentRegistry;
 import com.chunkzero.chunk.runtime.Delivery;
 import com.chunkzero.chunk.runtime.SessionControl;
 import com.chunkzero.chunk.runtime.SessionHandler;
+import com.chunkzero.chunk.runtime.SessionLogging;
 import com.chunkzero.chunk.runtime.SessionMethod;
 import com.chunkzero.chunk.runtime.SessionMethodRegistry;
 import com.chunkzero.chunk.runtime.SessionProvider;
@@ -94,7 +95,8 @@ public final class SessionManager implements SessionHandler {
 
     @Override
     public void create(SessionControl control) {
-        ticks.submit(
+        onTick(
+                        control.id(),
                         () -> {
                             var created =
                                     types.create(
@@ -121,7 +123,8 @@ public final class SessionManager implements SessionHandler {
 
     @Override
     public void finish(SessionControl control) {
-        ticks.submit(
+        onTick(
+                        control.id(),
                         () -> {
                             var managed = sessions.get(control.id());
                             if (managed == null) control.ended();
@@ -140,7 +143,8 @@ public final class SessionManager implements SessionHandler {
         if (!methods.declares(control.type(), call.name()))
             return CompletableFuture.failedFuture(
                     new IllegalArgumentException("Undeclared session method"));
-        return ticks.submit(
+        return onTick(
+                control.id(),
                 () -> {
                     var managed = sessions.get(control.id());
                     if (managed != null && managed.isDisconnected(call.delivery()))
@@ -206,7 +210,8 @@ public final class SessionManager implements SessionHandler {
             invoke(() -> behavior.onCreate(scope))
                     .whenComplete(
                             (ignored, error) ->
-                                    ticks.submit(
+                                    onTick(
+                                            control.id(),
                                             () -> {
                                                 // A creation past its deadline already ended.
                                                 if (finishing) return null;
@@ -230,7 +235,8 @@ public final class SessionManager implements SessionHandler {
         }
 
         public CompletableFuture<Void> join(Player player) {
-            return ticks.submit(
+            return onTick(
+                            control.id(),
                             () -> {
                                 if (!control.isReady())
                                     throw new IllegalStateException("Session unavailable");
@@ -240,7 +246,8 @@ public final class SessionManager implements SessionHandler {
                     .thenCompose(Function.identity())
                     .thenCompose(
                             ignored ->
-                                    ticks.submit(
+                                    onTick(
+                                            control.id(),
                                             () -> {
                                                 if (scope.getPlayers().contains(player)
                                                         && joined.add(player)) {
@@ -254,7 +261,8 @@ public final class SessionManager implements SessionHandler {
         }
 
         public CompletableFuture<Void> leave(Player player) {
-            return ticks.submit(
+            return onTick(
+                            control.id(),
                             () -> {
                                 if (!scope.getPlayers().remove(player))
                                     return CompletableFuture.<Void>completedFuture(null);
@@ -280,7 +288,8 @@ public final class SessionManager implements SessionHandler {
         }
 
         private CompletableFuture<Void> notifyLeave(Player player, @Nullable Throwable failure) {
-            return ticks.submit(
+            return onTick(
+                    control.id(),
                     () -> {
                         if (joined.remove(player))
                             process.eventHandler().call(new SessionLeaveEvent(scope, player));
@@ -295,7 +304,8 @@ public final class SessionManager implements SessionHandler {
             invoke(behavior::onFinish)
                     .whenComplete(
                             (ignored, error) ->
-                                    ticks.submit(
+                                    onTick(
+                                            control.id(),
                                             () -> {
                                                 try {
                                                     scope.dispose();
@@ -316,6 +326,11 @@ public final class SessionManager implements SessionHandler {
                                                 return null;
                                             }));
         }
+    }
+
+    /** Runs {@code action} on the tick thread with session {@code id} bound for logging. */
+    private <T> CompletableFuture<T> onTick(String id, Supplier<T> action) {
+        return ticks.submit(() -> SessionLogging.call(id, action));
     }
 
     private static CompletableFuture<Void> invoke(Supplier<CompletionStage<Void>> action) {

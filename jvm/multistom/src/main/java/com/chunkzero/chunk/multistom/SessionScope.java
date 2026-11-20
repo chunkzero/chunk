@@ -8,12 +8,14 @@ import com.chunkzero.chunk.multistom.event.SessionEvent;
 import com.chunkzero.chunk.runtime.Component;
 import com.chunkzero.chunk.runtime.ComponentRegistry;
 import com.chunkzero.chunk.runtime.MoveResult;
+import com.chunkzero.chunk.runtime.SessionLogging;
 
 import net.minestom.server.ServerProcess;
 import net.minestom.server.entity.Player;
 import net.minestom.server.event.Event;
 import net.minestom.server.event.EventFilter;
 import net.minestom.server.event.EventNode;
+import net.minestom.server.event.ListenerHandle;
 import net.minestom.server.event.trait.EntityEvent;
 import net.minestom.server.event.trait.InstanceEvent;
 import net.minestom.server.event.trait.PlayerEvent;
@@ -66,6 +68,7 @@ public final class SessionScope {
     private final Map<Class<?>, AutoCloseable> sharedResources = new HashMap<>();
     private final Set<Player> players = ConcurrentHashMap.newKeySet();
     private final EventNode<Event> events;
+    private final ThreadLocal<@Nullable Event> redispatching = new ThreadLocal<>();
     private final Scheduler scheduler;
     private final List<Task> drivers;
     private boolean disposed;
@@ -92,18 +95,19 @@ public final class SessionScope {
         this.requestFinish = requestFinish;
         this.backend = backend;
         this.components = components;
-        events = EventNode.event("session-" + id, EventFilter.ALL, this::owns);
+        events = EventNode.event("session-" + id, EventFilter.ALL, this::admit);
         try {
             var schedulers = process.schedulerManager();
             scheduler = schedulers.createScheduler();
             drivers =
                     List.of(
                             schedulers
-                                    .buildTask(scheduler::processTick)
+                                    .buildTask(() -> SessionLogging.run(id, scheduler::processTick))
                                     .repeat(TaskSchedule.nextTick())
                                     .schedule(),
                             schedulers
-                                    .buildTask(scheduler::processTickEnd)
+                                    .buildTask(
+                                            () -> SessionLogging.run(id, scheduler::processTickEnd))
                                     .repeat(TaskSchedule.nextTick())
                                     .executionType(ExecutionType.TICK_END)
                                     .schedule());
@@ -130,7 +134,8 @@ public final class SessionScope {
 
     /**
      * Receives this scope's lifecycle notifications, its admitted players' events, and events of
-     * its instances and the entities in them.
+     * its instances and the entities in them. Its listeners run with this session bound for {@link
+     * SessionLogging}.
      */
     public @NotNull EventNode<Event> getEvents() {
         return events;
@@ -250,10 +255,13 @@ public final class SessionScope {
 
     public <T> CompletableFuture<T> onTick(Supplier<T> action) {
         return ticks.submit(
-                () -> {
-                    checkActive();
-                    return action.get();
-                });
+                () ->
+                        SessionLogging.call(
+                                id,
+                                () -> {
+                                    checkActive();
+                                    return action.get();
+                                }));
     }
 
     public CompletableFuture<Void> onTick(Runnable action) {
@@ -329,6 +337,33 @@ public final class SessionScope {
                         .<AutoCloseable>map(
                                 instance -> () -> instances.unregisterInstance(instance))
                         .toList());
+    }
+
+    /**
+     * Minestom runs a node's listeners in one dispatch callers can't wrap, and instance and player
+     * ticks run on its dispatcher outside this session's tick. So an event this session owns is
+     * dispatched again through the node with the session bound, and the first pass runs nothing;
+     * the second consumes its event from {@link #redispatching} and runs the listeners, so a
+     * dispatch those listeners start is bound and isolated on its own. Unlike a plain node, a
+     * failing session listener never stops the global listeners after it, bound or not.
+     */
+    private boolean admit(Event event) {
+        if (!owns(event)) return false;
+        if (redispatching.get() == event) {
+            redispatching.remove();
+            return true;
+        }
+        @SuppressWarnings("unchecked")
+        var handle = (ListenerHandle<Event>) events.getHandle(event.getClass());
+        var outer = redispatching.get();
+        redispatching.set(event);
+        try {
+            SessionLogging.run(id, () -> handle.call(process, event));
+        } finally {
+            if (outer == null) redispatching.remove();
+            else redispatching.set(outer);
+        }
+        return false;
     }
 
     private boolean owns(Event event) {

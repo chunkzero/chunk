@@ -7,8 +7,8 @@ use super::{
 };
 use chunk_proto::sync::v1::{
     ActivateResult, ClaimArguments, ClaimPhase, ClaimResult, DrainArguments, DrainResult, GatewayClaim, JvmHealth,
-    MovePlayerArguments, MovePlayerResult, Node, NodePhase, OperatorPlayer, SessionDemand, WithdrawResult,
-    claim_result, drain_arguments::Target,
+    JvmSessionPhase, MovePlayerArguments, MovePlayerResult, Node, NodePhase, OperatorPlayer, SessionDemand,
+    WithdrawResult, claim_result, drain_arguments::Target,
 };
 
 impl Fixture {
@@ -107,6 +107,13 @@ async fn nodes_follow_health_and_a_host_drain_until_it_stopped() {
         (node.deployment.as_str(), node.app.as_str(), node.machine_profile.as_str()),
         ("test", "bridge", "small")
     );
+    assert_eq!(node.sessions.len(), 1);
+    let lobby = &node.sessions[0];
+    assert!(!lobby.id.is_empty());
+    assert_eq!(
+        (lobby.session_type.as_str(), lobby.key.as_str(), lobby.players, lobby.phase()),
+        ("bridge/default", "lobby", 1, JvmSessionPhase::Ready)
+    );
 
     // Health isn't in the log, so the next health pass sends it at an unchanged position.
     jvm.health(JvmHealth { ready: true, tick_count: 100, ..JvmHealth::default() }).await;
@@ -119,6 +126,22 @@ async fn nodes_follow_health_and_a_host_drain_until_it_stopped() {
     let resumed = next(&mut resumed).await;
     assert!(resumed.snapshot && value::<Node>(&resumed, &host).is_some_and(|node| healthy(&node)));
 
+    // Moving the player opens a second session and updates player counts on `nodes`.
+    let control = fixture.control.clone();
+    fixture.operate(&cli, "operator:move-arena", "chunk:move_player", &move_to("arena")).await;
+    let destination = control.stored_claim("operator:move-arena").unwrap().expect("the queued move").request;
+    let assignment = control.claim(destination).await.unwrap();
+    control.cancel(runtime::login()).await.unwrap();
+    control.activate(assignment.claim.unwrap()).await.unwrap();
+    let (_, node) = until(&mut nodes, &host, |node: &Node| {
+        node.sessions
+            .iter()
+            .any(|session| session.key == "arena" && session.players == 1 && session.phase() == JvmSessionPhase::Ready)
+            && node.sessions.iter().any(|session| session.key == "lobby" && session.players == 0)
+    })
+    .await;
+    assert_eq!(node.sessions.len(), 2);
+
     let host_drain = drain(Target::Host(host.clone()), 1);
     let drained = fixture.operate(&cli, "operator:drain-host", "chunk:drain", &host_drain).await;
     let drained: DrainResult = result(&drained);
@@ -126,7 +149,8 @@ async fn nodes_follow_health_and_a_host_drain_until_it_stopped() {
     let (_, node) = until(&mut nodes, &host, |node: &Node| node.phase() == NodePhase::Draining).await;
     assert_eq!((node.drain_deadline_ms, node.remaining_claims), (drained.deadline_ms, 1));
     until(&mut nodes, &host, |node: &Node| node.phase() == NodePhase::Stopping).await;
-    until(&mut nodes, &host, |node: &Node| node.phase() == NodePhase::Stopped).await;
+    let (_, stopped) = until(&mut nodes, &host, |node: &Node| node.phase() == NodePhase::Stopped).await;
+    assert!(stopped.sessions.is_empty());
     drop(nodes);
     fixture.stop().await;
     jvm.abort();

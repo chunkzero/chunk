@@ -30,6 +30,7 @@ import net.minestom.server.timer.TaskSchedule
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertSame
 import org.junit.jupiter.api.Assertions.assertThrows
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -372,7 +373,7 @@ class SessionEventsTest {
         assertEquals(3, reported.size)
         assertTrue(reported.all { it === listenerFailure })
         assertTrue(global.last() is SessionDestroyEvent)
-        assertFalse(process.eventHandler().children.contains(session.scope.events))
+        assertNull(session.scope.events.parent)
         assertTrue(process.instanceManager().instances.isEmpty())
     }
 

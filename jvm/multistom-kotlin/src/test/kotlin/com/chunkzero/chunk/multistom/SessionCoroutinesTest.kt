@@ -18,17 +18,22 @@ import com.chunkzero.chunk.backend.api.SessionId
 import com.chunkzero.chunk.backend.client.BackendSession
 import com.chunkzero.chunk.backend.client.OperationId
 import com.chunkzero.chunk.backend.client.SessionIdentity
+import com.chunkzero.chunk.runtime.SessionLogging
 import com.chunkzero.chunk.runtime.TestHosts
 import com.google.protobuf.ByteString
 import io.grpc.ManagedChannelBuilder
 import io.grpc.ServerBuilder
 import io.grpc.stub.ServerCallStreamObserver
 import io.grpc.stub.StreamObserver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import net.minestom.server.ServerProcess
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import tools.jackson.core.type.TypeReference
@@ -42,6 +47,29 @@ import java.util.function.Supplier
 class SessionCoroutinesTest {
     private val nullType = JsonType.of(object : TypeReference<Void?>() {}, BackendValues::checkNull)
     private val integerType = JsonType.of(object : TypeReference<Long>() {}, BackendValues::checkInteger)
+
+    @Test
+    fun `coroutines keep their session bound across dispatchers`() {
+        val process = ServerProcess.create()
+        val ticks = TickExecutor()
+        val scope = SessionScope(process, "sess-7", ticks, { CompletableFuture.completedFuture(null) }, null)
+        val seen = CompletableFuture<List<String?>>()
+        scope.onTick {
+            scope.coroutines.launch {
+                val onTick = SessionLogging.current()
+                val elsewhere = withContext(Dispatchers.Default) { SessionLogging.current() }
+                seen.complete(listOf(onTick, elsewhere, SessionLogging.current()))
+            }
+        }
+        while (!seen.isDone) ticks.flush()
+
+        assertEquals(listOf("sess-7", "sess-7", "sess-7"), seen.join())
+        assertNull(SessionLogging.current())
+        val disposed = scope.onTick { scope.dispose() }
+        while (!disposed.isDone) ticks.flush()
+        disposed.join()
+        process.stop()
+    }
 
     @Test
     fun `tick resumptions and finishing await the result before disposing watches`() {

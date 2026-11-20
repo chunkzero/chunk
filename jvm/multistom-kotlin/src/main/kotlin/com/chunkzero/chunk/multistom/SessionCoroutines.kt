@@ -3,9 +3,11 @@ package com.chunkzero.chunk.multistom
 import com.chunkzero.chunk.backend.CoroutineBackend
 import com.chunkzero.chunk.backend.api.PlayerId
 import com.chunkzero.chunk.backend.client.BackendSession
+import com.chunkzero.chunk.runtime.SessionLogging
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.ThreadContextElement
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.future.future
 import net.minestom.server.entity.Player
@@ -20,7 +22,7 @@ val SessionScope.coroutines: SessionCoroutines
 class SessionCoroutines internal constructor(
     private val session: SessionScope,
     ticks: TickExecutor,
-) : CoroutineScope by CoroutineScope(SupervisorJob() + TickDispatcher(ticks)),
+) : CoroutineScope by CoroutineScope(SupervisorJob() + TickDispatcher(ticks) + SessionLog(session.id)),
     AutoCloseable {
     fun backend(client: BackendSession): CoroutineBackend = session.own(CoroutineBackend(client, this))
 
@@ -46,6 +48,24 @@ private class TickDispatcher(
         block: Runnable,
     ) {
         ticks.submit { block.run() }
+    }
+}
+
+/** Binds the session for [SessionLogging] whenever one of its coroutines runs, on any thread. */
+private class SessionLog(
+    private val sessionId: String,
+) : ThreadContextElement<String?> {
+    companion object Key : CoroutineContext.Key<SessionLog>
+
+    override val key get() = Key
+
+    override fun updateThreadContext(context: CoroutineContext): String? = SessionLogging.bind(sessionId)
+
+    override fun restoreThreadContext(
+        context: CoroutineContext,
+        oldState: String?,
+    ) {
+        SessionLogging.bind(oldState)
     }
 }
 

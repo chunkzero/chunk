@@ -452,7 +452,7 @@ public final class ChunkSessions implements AutoCloseable {
                                     synchronized (this) {
                                         if (control.handlerFinishing) return;
                                     }
-                                    handler.create(control);
+                                    SessionLogging.run(control.id(), () -> handler.create(control));
                                 }));
         return control.created;
     }
@@ -564,7 +564,9 @@ public final class ChunkSessions implements AutoCloseable {
                                             dispatch(
                                                     () -> {
                                                         try {
-                                                            handler.finish(control);
+                                                            SessionLogging.run(
+                                                                    control.id(),
+                                                                    () -> handler.finish(control));
                                                         } catch (RuntimeException failure) {
                                                             ended(control, failure);
                                                         }
@@ -740,14 +742,13 @@ public final class ChunkSessions implements AutoCloseable {
         }
         CompletionStage<String> result;
         try {
-            result =
-                    handler.method(
-                            session,
-                            new SessionMethod(
-                                    call.getMethod(),
-                                    call.getArgumentsJson().toStringUtf8(),
-                                    delivery,
-                                    () -> start(operation)));
+            var methodCall =
+                    new SessionMethod(
+                            call.getMethod(),
+                            call.getArgumentsJson().toStringUtf8(),
+                            delivery,
+                            () -> start(operation));
+            result = SessionLogging.call(session.id(), () -> handler.method(session, methodCall));
         } catch (RuntimeException error) {
             result = CompletableFuture.failedFuture(error);
         }
