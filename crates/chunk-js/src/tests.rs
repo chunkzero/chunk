@@ -666,6 +666,29 @@ fn failed_invocation_leaves_no_rejection_for_the_next_call() {
     pass.arguments = json!({"fail": false}).into();
     let result = engine.execute(pass, Box::new(Snapshot), &Cancellation::default());
     assert_eq!(value(&result.unwrap()), json!(42));
+
+    let mut engine = deployment(
+        r#"
+        globalThis.calls = (globalThis.calls ?? 0) + 1;
+        if (args.fail) {
+            queueMicrotask(() => { Promise.reject(new Error("leftover")); throw new Error("primary"); });
+        }
+        return calls;
+        "#,
+        Limits::default(),
+    );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail": true}).into();
+    let Err(Error::JavaScript(message)) = engine.execute(fail, Box::new(Snapshot), &Cancellation::default()) else {
+        panic!("expected a JavaScript error");
+    };
+    assert!(message.starts_with("Error: primary"), "{message}");
+    for expected in [2, 3] {
+        let mut pass = invocation();
+        pass.arguments = json!({"fail": false}).into();
+        let result = engine.execute(pass, Box::new(Snapshot), &Cancellation::default());
+        assert_eq!(value(&result.unwrap()), json!(expected));
+    }
 }
 
 #[test]

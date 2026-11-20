@@ -59,11 +59,16 @@ impl State {
         self.runtime.op_state().borrow_mut().put(action);
         self.runtime.op_state().borrow_mut().put(crate::actions::Env(env));
         let result = self.guarded(deadline, limits, cancellation, |engine| {
-            let output = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str(), json_bytes))?;
-            if !is_action {
-                executor.block_on(engine.drain())?;
+            let output = executor.block_on(engine.invoke(&export, caller.as_str(), arguments.as_str(), json_bytes));
+            // A failed call still settles its microtasks and rejections here, under the guard,
+            // so none reach the next call on this runtime. A terminated runtime is discarded instead.
+            if !is_action && (output.is_ok() || !engine.termination.is_recorded()) {
+                let drained = executor.block_on(engine.drain());
+                if output.is_ok() {
+                    drained?;
+                }
             }
-            Ok(output)
+            output
         });
         let logs = crate::profile::end(&mut self.runtime);
         let capabilities = self.runtime.op_state().borrow_mut().borrow_mut::<Option<Capabilities>>().take();
