@@ -63,6 +63,8 @@ pub struct SessionType {
 }
 
 pub const DEFAULT_IDLE_NODE_TIMEOUT_SECONDS: u32 = 60;
+/// The most JVMs one release may run at once.
+pub const MAX_PROCESSES: u16 = 256;
 
 /// Control's reply to a login routed with a release that no longer accepts logins. Nothing was reserved, so the proxy
 /// routes the login again through the current release.
@@ -157,7 +159,7 @@ impl Release {
             || self.deployment.deployment.is_empty()
             || !plain(&self.release_id)
             || self.max_processes == 0
-            || self.max_processes > 32
+            || self.max_processes > MAX_PROCESSES
             || self.idle_node_timeout_seconds > 3600
             || self.session_types.is_empty()
             || self

@@ -5,7 +5,7 @@ use chunk_proto::{
 
 use crate::{
     Control, Error, Result,
-    state::{Phase, SessionState, State},
+    state::{self, Phase, SessionState, State},
 };
 
 impl Control {
@@ -70,9 +70,8 @@ impl Control {
                 .map(|claim| claim.session.clone())
                 .collect();
             let reconnectable = crate::draining::reconnectable(state, now);
-            for (id, session) in
-                state.sessions.iter_mut().filter(|(_, session)| session.host == host && !session.finished)
-            {
+            let select = |_: &str, session: &SessionState| session.host == host && !session.finished;
+            state::modify(&mut state.sessions, select, |id, session| {
                 let empty = !open.contains(id);
                 if empty {
                     session.empty_since_ms.get_or_insert(now);
@@ -92,7 +91,7 @@ impl Control {
                     session.retired = true;
                     session.finish_requested = true;
                 }
-            }
+            });
             Ok(())
         })
     }

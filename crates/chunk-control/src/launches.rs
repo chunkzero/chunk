@@ -14,7 +14,7 @@ pub use crate::state::Launch;
 /// # Errors
 /// Reports a store that cannot be read, or that a serving control holds.
 pub fn recorded_launches(system: chunk_backend::System) -> Result<BTreeSet<String>> {
-    Ok(state::load(system)?.launches.into_keys().collect())
+    Ok(state::load(system)?.launches.keys().cloned().collect())
 }
 
 impl Control {

@@ -284,8 +284,8 @@ impl LocalConfig {
         if !(1..=128).contains(&self.capacity) {
             return Err(invalid(path, "local.capacity must be between 1 and 128"));
         }
-        if !(1..=32).contains(&self.max_processes) {
-            return Err(invalid(path, "local.max_processes must be between 1 and 32"));
+        if !(1..=256).contains(&self.max_processes) {
+            return Err(invalid(path, "local.max_processes must be between 1 and 256"));
         }
         if self.idle_node_timeout_seconds.is_some_and(|seconds| seconds > 3600) {
             return Err(invalid(path, "local.idle_node_timeout_seconds must be between 0 and 3600"));

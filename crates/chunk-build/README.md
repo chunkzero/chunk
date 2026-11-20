@@ -15,7 +15,7 @@ A project has a `chunk.toml` at its root, its apps under `apps/`, its backend un
 environment = "local" # the local environment's name
 machine_profile = "local" # the default profile for sessions
 capacity = 16 # default players per session, 1 to 128
-max_processes = 4 # JVMs at most, 1 to 32
+max_processes = 4 # JVMs at most, 1 to 256
 # idle_node_timeout_seconds = 60 # stop a JVM with no unfinished session after this long, 0 to 3600
 
 [local.profiles.local]

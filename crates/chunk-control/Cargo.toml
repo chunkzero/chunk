@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 base64 = "0.22"
+imbl = "7"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 chunk-backend = { path = "../chunk-backend" }

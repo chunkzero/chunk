@@ -1,13 +1,14 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use chunk_proto::control::v1::{ClaimRequest, ShutdownNodeRequest};
+use imbl::OrdMap;
 use prost::Message;
 
 use crate::{
     Control, Error, Result,
     drain::retire_host,
     releases::Launches,
-    state::{Capacity, OperatorMethod, Phase, State},
+    state::{self, Capacity, HostState, OperatorMethod, Phase, State},
 };
 
 /// Long enough for callers to retry an operation after its release, short enough to bound history.
@@ -111,20 +112,21 @@ impl Control {
             .map(|(_, session)| session.host.clone())
             .collect();
         let mut expired = Vec::new();
-        for (id, host) in state.hosts.iter_mut().filter(|(_, host)| !host.retired) {
-            let timeout = state
-                .releases
-                .get(&host.release)
-                .map_or(0, |release| u64::from(release.release.idle_node_timeout_seconds) * 1000);
-            if timeout == 0 {
-                continue;
-            }
-            let since = (!busy.contains(id)).then(|| host.idle_since_ms.unwrap_or(now));
-            host.idle_since_ms = since;
-            if since.is_some_and(|since| now.saturating_sub(since) >= timeout) {
-                expired.push(id.clone());
-            }
-        }
+        let releases = &state.releases;
+        let timeout = |host: &HostState| {
+            releases.get(&host.release).map_or(0, |release| u64::from(release.release.idle_node_timeout_seconds) * 1000)
+        };
+        state::modify(
+            &mut state.hosts,
+            |_, host| !host.retired && timeout(host) != 0,
+            |id, host| {
+                let since = (!busy.contains(id)).then(|| host.idle_since_ms.unwrap_or(now));
+                host.idle_since_ms = since;
+                if since.is_some_and(|since| now.saturating_sub(since) >= timeout(host)) {
+                    expired.push(id.to_owned());
+                }
+            },
+        );
         for id in expired {
             let operation = format!("idle/{id}");
             let request =
@@ -136,11 +138,11 @@ impl Control {
 }
 
 /// The IDs of rows `forget` accepts.
-fn select<T>(rows: &BTreeMap<String, T>, mut forget: impl FnMut(&str, &T) -> bool) -> Vec<String> {
+fn select<T: Clone>(rows: &OrdMap<String, T>, mut forget: impl FnMut(&str, &T) -> bool) -> Vec<String> {
     rows.iter().filter(|(id, row)| forget(id, row)).map(|(id, _)| id.clone()).collect()
 }
 
-fn remove<T>(rows: &mut BTreeMap<String, T>, ids: Vec<String>) {
+fn remove<T: Clone>(rows: &mut OrdMap<String, T>, ids: Vec<String>) {
     for id in ids {
         rows.remove(&id);
     }

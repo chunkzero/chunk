@@ -1,7 +1,6 @@
-use std::collections::BTreeMap;
-
 use chunk_backend::{ScopeLock, System};
 use chunk_store::{DatabaseSchema, DocumentKey, KeyRange, ReadBudget, Revision, Snapshot, Write};
+use imbl::{OrdMap, ordmap::DiffItem};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
@@ -90,7 +89,7 @@ impl Store {
             players: scan(&snapshot, PLAYERS, budget)?,
             claims: scan(&snapshot, CLAIMS, budget)?,
             moves: scan(&snapshot, MOVES, budget)?,
-            move_sources: BTreeMap::new(),
+            move_sources: OrdMap::new(),
             drains: scan(&snapshot, DRAINS, budget)?,
             operator_calls: scan(&snapshot, OPERATOR_CALLS, budget)?,
             rosters: scan(&snapshot, ROSTERS, budget)?,
@@ -145,9 +144,13 @@ fn key(table: &str, id: &str) -> Result<DocumentKey> {
     Ok(DocumentKey::new(table, id)?)
 }
 
-fn scan<T: DeserializeOwned>(snapshot: &Snapshot, table: &str, budget: &mut ReadBudget) -> Result<BTreeMap<String, T>> {
+fn scan<T: DeserializeOwned + Clone>(
+    snapshot: &Snapshot,
+    table: &str,
+    budget: &mut ReadBudget,
+) -> Result<OrdMap<String, T>> {
     let range = KeyRange { table: table.into(), start: None, end: None };
-    let mut rows = BTreeMap::new();
+    let mut rows = OrdMap::new();
     for (id, document) in snapshot.scan_bounded(&range, budget)? {
         rows.insert(id, serde_json::from_value(document.value)?);
     }
@@ -156,15 +159,17 @@ fn scan<T: DeserializeOwned>(snapshot: &Snapshot, table: &str, budget: &mut Read
 
 fn diff<T: Clone + PartialEq + Serialize + Stamp + Send + 'static>(
     table: &str,
-    previous: &BTreeMap<String, T>,
-    next: &BTreeMap<String, T>,
+    previous: &OrdMap<String, T>,
+    next: &OrdMap<String, T>,
     writes: &mut Writes,
 ) -> Result<()> {
-    for id in previous.keys().filter(|id| !next.contains_key(*id)) {
-        writes.ready.push(Write { key: key(table, id)?, value: None });
-    }
-    for (id, value) in next.iter().filter(|(id, value)| previous.get(*id) != Some(*value)) {
-        writes.put(key(table, id)?, value.clone())?;
+    for item in previous.diff(next) {
+        match item {
+            DiffItem::Remove(id, _) => writes.ready.push(Write { key: key(table, id)?, value: None }),
+            DiffItem::Add(id, value) | DiffItem::Update { new: (id, value), .. } => {
+                writes.put(key(table, id)?, value.clone())?;
+            }
+        }
     }
     Ok(())
 }
@@ -189,6 +194,11 @@ impl Writes {
     pub fn keys(&self) -> impl Iterator<Item = (&DocumentKey, bool)> {
         let ready = self.ready.iter().map(|write| (&write.key, write.value.is_none()));
         ready.chain(self.pending.iter().map(|(key, _)| (key, false)))
+    }
+
+    /// The keys of rows that name [`Generation::PENDING`].
+    pub fn pending_keys(&self) -> impl Iterator<Item = &DocumentKey> {
+        self.pending.iter().map(|(key, _)| key)
     }
 
     fn put<T: Serialize + Stamp + Send + 'static>(&mut self, key: DocumentKey, mut row: T) -> Result<()> {

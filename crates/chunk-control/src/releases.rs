@@ -7,7 +7,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use crate::{
     Control, DrainPolicy, Error, Release, Result,
-    state::{Capacity, ReleaseState, State},
+    state::{self, Capacity, ReleaseState, State},
 };
 
 /// The launches whose release control may not know, read before the state they are checked against.
@@ -65,11 +65,11 @@ impl Control {
             if let Some(release) = state.releases.get_mut(&name) {
                 release.drain = None;
             }
-            for release in state.releases.iter_mut().filter(|(other, _)| **other != name).map(|(_, release)| release) {
-                if !release.retired {
-                    release.start_draining(now, policy);
-                }
-            }
+            state::modify(
+                &mut state.releases,
+                |other, release| other != name && !release.retired,
+                |_, release| release.start_draining(now, policy),
+            );
             state.stopping.extend(stop.iter().cloned());
             state.stopping.remove(&name);
             state.current = Some(name);

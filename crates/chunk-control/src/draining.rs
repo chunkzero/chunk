@@ -9,7 +9,7 @@ use std::{
 
 use crate::{
     Control, Error, Generation, Result,
-    state::{Capacity, Claim, Phase, ReleaseDrain, ReleaseState, State},
+    state::{self, Capacity, Claim, Phase, ReleaseDrain, ReleaseState, State},
 };
 
 /// How long after leaving a session of a draining release a player who logs in again returns to it.
@@ -63,9 +63,15 @@ impl Control {
             return Ok(());
         }
         self.update(|state| {
-            for drain in state.releases.values_mut().filter_map(|release| release.drain.as_mut()) {
-                drain.shorten(policy);
-            }
+            state::modify(
+                &mut state.releases,
+                |_, release| release.drain.as_ref().is_some_and(shortened),
+                |_, release| {
+                    if let Some(drain) = &mut release.drain {
+                        drain.shorten(policy);
+                    }
+                },
+            );
             Ok(())
         })
     }

@@ -21,8 +21,6 @@ const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// A download attempt may take this long, plus a second for every `MIN_BYTES_PER_SECOND` of the archive.
 const DOWNLOAD_BUDGET: Duration = Duration::from_secs(60);
 const MIN_BYTES_PER_SECOND: u64 = 256 * 1024;
-/// JVMs one release may run at once: control's limit, since capacity bounds them.
-const MAX_PROCESSES: u16 = 32;
 
 /// Where loaded releases live: each unpacked at `releases/<id>`, beside the archive it was installed from at
 /// `archives/<id>.tar.gz` and the digest that archive was verified against at `archives/<id>.json`. Core's archive
@@ -349,7 +347,7 @@ impl Loaded {
             release_id: release.id.clone(),
             profiles: profiles.collect(),
             session_types,
-            max_processes: MAX_PROCESSES,
+            max_processes: chunk_control::MAX_PROCESSES,
             idle_node_timeout_seconds: chunk_control::DEFAULT_IDLE_NODE_TIMEOUT_SECONDS,
             assets: chunk_control::DeploymentAssets::new(assets, release.assets.clone(), pack_url_prefix),
             contracts: chunk_control::Contracts {
