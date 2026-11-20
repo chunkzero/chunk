@@ -649,3 +649,60 @@ fn termination_survives_error_prototypes_that_poison_conversion() {
         assert_eq!(kind(result), expected, "top-level {body}");
     }
 }
+
+#[test]
+fn failed_invocation_leaves_no_rejection_for_the_next_call() {
+    let mut engine = deployment(
+        r#"if (args.fail) { Promise.reject(new Error("leftover")); throw new Error("primary"); } return 42;"#,
+        Limits::default(),
+    );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail": true}).into();
+    let Err(Error::JavaScript(message)) = engine.execute(fail, Box::new(Snapshot), &Cancellation::default()) else {
+        panic!("expected a JavaScript error");
+    };
+    assert!(message.starts_with("Error: primary"), "{message}");
+    let mut pass = invocation();
+    pass.arguments = json!({"fail": false}).into();
+    let result = engine.execute(pass, Box::new(Snapshot), &Cancellation::default());
+    assert_eq!(value(&result.unwrap()), json!(42));
+}
+
+#[test]
+fn error_reports_are_bounded_before_formatting() {
+    let started = std::time::Instant::now();
+    let Err(Error::JavaScript(message)) = run(r#"
+        throw new Error("€".repeat(4 * 1024 * 1024));
+    "#) else {
+        panic!("expected a JavaScript error");
+    };
+    assert!(message.len() <= 16 * 1024 && message.capacity() <= 16 * 1024, "{} {}", message.len(), message.capacity());
+    assert!(message.starts_with("Error: €€€"), "{}", &message[..20]);
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+}
+
+#[test]
+fn reading_stack_in_a_function_that_hits_its_deadline_stays_bounded() {
+    let limits = Limits { execution: Duration::from_millis(200), ..Limits::default() };
+    let mut engine = deployment(
+        r"
+        if (args.fail) {
+            const error = Object.defineProperty(new Error('x'), 'message', { get() { for (;;); } });
+            error.stack;
+            for (;;);
+        }
+        return 42;
+        ",
+        limits,
+    );
+    let mut fail = invocation();
+    fail.arguments = json!({"fail": true}).into();
+    let started = std::time::Instant::now();
+    let result = engine.execute(fail, Box::new(Snapshot), &Cancellation::default());
+    assert!(matches!(result, Err(Error::Deadline)), "{result:?}");
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
+    let mut pass = invocation();
+    pass.arguments = json!({"fail": false}).into();
+    let result = engine.execute(pass, Box::new(Snapshot), &Cancellation::default());
+    assert_eq!(value(&result.unwrap()), json!(42));
+}
