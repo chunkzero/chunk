@@ -2,7 +2,7 @@ use anyhow::{Result, ensure};
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
 
-/// Players the control fixture's release can seat: control's limit of 32 processes, each one 128-player session.
+/// Players the control fixture's release can seat: 64 processes, each one 128-player session.
 pub const CONTROL_SLOTS: u32 = 64 * 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
